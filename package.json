@@ -1,0 +1,17 @@
+{
+  "name": "upshot-predictions-bot",
+  "version": "1.0.0",
+  "description": "Upshot Prediction Rewards System — Discord bot with Components v2",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "deploy": "node src/deploy-commands.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0",
+    "discord.js": "^14.18.0",
+    "dotenv": "^16.4.7"
+  }
+}
