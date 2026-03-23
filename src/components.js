@@ -105,11 +105,16 @@ export function buildPredictionCard(prediction, upshotUrl) {
   const date = prediction.created_at?.split('T')[0] || prediction.created_at?.split(' ')[0] || '';
   children.push(text(`-# ID \`#${id}\` · ${date}`));
 
-  // Edit button (only for pending states)
+  // Action buttons
+  const btns = [];
+  if (prediction.description.length > 280) {
+    btns.push(button(`read_more:${prediction.id}`, '📖 Read More', ButtonStyle.Secondary));
+  }
   if ([Status.PendingVerification, Status.PendingReview].includes(prediction.status)) {
-    children.push(actionRow(
-      button(`edit_prediction:${prediction.id}`, '✏ Edit', ButtonStyle.Secondary)
-    ));
+    btns.push(button(`edit_prediction:${prediction.id}`, '✏ Edit', ButtonStyle.Secondary));
+  }
+  if (btns.length > 0) {
+    children.push(actionRow(...btns));
   }
 
   return {

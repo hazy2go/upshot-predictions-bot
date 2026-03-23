@@ -652,6 +652,8 @@ async function handleButton(interaction) {
   const predictionId = parseInt(idStr, 10);
 
   switch (action) {
+    case 'read_more':
+      return handleReadMore(interaction, predictionId);
     case 'edit_prediction':
       return handleEditButton(interaction, predictionId);
     case 'verify_ownership':
@@ -674,6 +676,24 @@ async function handleButton(interaction) {
     default:
       return interaction.reply({ content: '❓ Unknown action.', flags: ['Ephemeral'] });
   }
+}
+
+async function handleReadMore(interaction, predictionId) {
+  const prediction = getPrediction(predictionId);
+  if (!prediction) return interaction.reply({ content: '❌ Not found.', flags: ['Ephemeral'] });
+
+  const id = String(prediction.id).padStart(4, '0');
+  // Discord message limit is 2000 chars — chunk if needed
+  const header = `**${prediction.title}** · \`#${id}\`\n\n`;
+  const content = header + prediction.description;
+
+  if (content.length <= 2000) {
+    return interaction.reply({ content, flags: ['Ephemeral'] });
+  }
+
+  // Send first 2000, follow up with the rest
+  await interaction.reply({ content: content.slice(0, 2000), flags: ['Ephemeral'] });
+  await interaction.followUp({ content: content.slice(2000), flags: ['Ephemeral'] });
 }
 
 async function handleEditButton(interaction, predictionId) {
