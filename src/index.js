@@ -246,7 +246,7 @@ async function handlePredict(interaction) {
   if (!profile) {
     return interaction.reply({
       content: '❌ You must link your Upshot profile first.\nRun `/link-upshot` with your profile URL.',
-      ephemeral: true,
+      flags: ['Ephemeral'],
     });
   }
 
@@ -255,7 +255,7 @@ async function handlePredict(interaction) {
   if (todayCount >= maxDaily) {
     return interaction.reply({
       content: `❌ You've reached the daily limit of **${maxDaily}** predictions. Try again tomorrow.`,
-      ephemeral: true,
+      flags: ['Ephemeral'],
     });
   }
 
@@ -276,7 +276,7 @@ async function handlePredict(interaction) {
     new ActionRowBuilder().addComponents(
       new TextInputBuilder()
         .setCustomId('category')
-        .setLabel(`Category (${Categories.join(' / ')})`)
+        .setLabel('Category')
         .setPlaceholder(Categories.join(' / '))
         .setStyle(TextInputStyle.Short)
         .setMaxLength(20)
@@ -319,7 +319,7 @@ async function handleLinkUpshot(interaction) {
   if (!url.startsWith('https://') || !url.includes('upshot')) {
     return interaction.reply({
       content: '❌ Invalid Upshot profile URL. Expected format: `https://upshot.xyz/user/yourname`',
-      ephemeral: true,
+      flags: ['Ephemeral'],
     });
   }
 
@@ -327,22 +327,22 @@ async function handleLinkUpshot(interaction) {
 
   await interaction.reply({
     content: `✅ Upshot profile linked!\n🔗 ${url}\n\nYou can now submit predictions with \`/predict\`.`,
-    ephemeral: true,
+    flags: ['Ephemeral'],
   });
 }
 
 async function handleMyStats(interaction) {
   const stats = getUserStats(interaction.user.id, currentMonthKey());
   const payload = buildStatsCard(stats, interaction.user.id, currentMonthLabel());
-  await interaction.reply({ ...payload, ephemeral: true });
+  await interaction.reply({ ...payload, flags: ['Ephemeral'] });
 }
 
 async function handleLeaderboardCommand(interaction) {
   if (!isAdmin(interaction.member)) {
-    return interaction.reply({ content: '❌ Admin only.', ephemeral: true });
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
   }
 
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({ flags: ['Ephemeral'] });
   await refreshLeaderboard(interaction.guildId);
   await interaction.editReply({ content: '✅ Leaderboard refreshed.' });
 }
@@ -350,7 +350,7 @@ async function handleLeaderboardCommand(interaction) {
 async function handleSetup(interaction) {
   // Requires Administrator permission (enforced by Discord via defaultMemberPermissions)
   if (!interaction.memberPermissions.has('Administrator')) {
-    return interaction.reply({ content: '❌ Server admins only.', ephemeral: true });
+    return interaction.reply({ content: '❌ Server admins only.', flags: ['Ephemeral'] });
   }
 
   const sub = interaction.options.getSubcommand();
@@ -360,27 +360,27 @@ async function handleSetup(interaction) {
     case 'predictions-channel': {
       const channel = interaction.options.getChannel('channel', true);
       setConfig(guildId, 'predictions_channel', channel.id);
-      return interaction.reply({ content: `✅ Predictions channel set to <#${channel.id}>`, ephemeral: true });
+      return interaction.reply({ content: `✅ Predictions channel set to <#${channel.id}>`, flags: ['Ephemeral'] });
     }
     case 'admin-channel': {
       const channel = interaction.options.getChannel('channel', true);
       setConfig(guildId, 'admin_channel', channel.id);
-      return interaction.reply({ content: `✅ Admin review channel set to <#${channel.id}>`, ephemeral: true });
+      return interaction.reply({ content: `✅ Admin review channel set to <#${channel.id}>`, flags: ['Ephemeral'] });
     }
     case 'leaderboard-channel': {
       const channel = interaction.options.getChannel('channel', true);
       setConfig(guildId, 'leaderboard_channel', channel.id);
-      return interaction.reply({ content: `✅ Leaderboard channel set to <#${channel.id}>`, ephemeral: true });
+      return interaction.reply({ content: `✅ Leaderboard channel set to <#${channel.id}>`, flags: ['Ephemeral'] });
     }
     case 'admin-role': {
       const role = interaction.options.getRole('role', true);
       setConfig(guildId, 'admin_role', role.id);
-      return interaction.reply({ content: `✅ Admin role set to <@&${role.id}>`, ephemeral: true });
+      return interaction.reply({ content: `✅ Admin role set to <@&${role.id}>`, flags: ['Ephemeral'] });
     }
     case 'max-daily': {
       const limit = interaction.options.getInteger('limit', true);
       setConfig(guildId, 'max_daily', limit);
-      return interaction.reply({ content: `✅ Max daily predictions set to **${limit}**`, ephemeral: true });
+      return interaction.reply({ content: `✅ Max daily predictions set to **${limit}**`, flags: ['Ephemeral'] });
     }
     case 'view': {
       const cfg = getAllConfig(guildId);
@@ -393,7 +393,7 @@ async function handleSetup(interaction) {
         `**Admin role:** ${cfg.admin_role ? `<@&${cfg.admin_role}>` : '`not set (using .env)`'}`,
         `**Max daily predictions:** ${cfg.max_daily || '`not set (default: 3)`'}`,
       ];
-      return interaction.reply({ content: lines.join('\n'), ephemeral: true });
+      return interaction.reply({ content: lines.join('\n'), flags: ['Ephemeral'] });
     }
   }
 }
@@ -412,7 +412,7 @@ async function handlePredictModalSubmit(interaction) {
   if (!matchedCategory) {
     return interaction.reply({
       content: `❌ Invalid category. Must be one of: ${Categories.join(', ')}`,
-      ephemeral: true,
+      flags: ['Ephemeral'],
     });
   }
 
@@ -421,7 +421,7 @@ async function handlePredictModalSubmit(interaction) {
   if (!deadlineMatch) {
     return interaction.reply({
       content: '❌ Invalid deadline format. Use DD/MM/YYYY.',
-      ephemeral: true,
+      flags: ['Ephemeral'],
     });
   }
 
@@ -448,7 +448,7 @@ async function handlePredictModalSubmit(interaction) {
     // Tweet proof — post immediately
     await interaction.reply({
       content: `✅ Prediction **#${String(prediction.id).padStart(4, '0')}** submitted with tweet proof!\nIt's now in the review queue.`,
-      ephemeral: true,
+      flags: ['Ephemeral'],
     });
     await postPredictionToFeed(prediction, interaction.guildId);
     await postToAdminReview(prediction, interaction.guildId);
@@ -463,7 +463,7 @@ async function handlePredictModalSubmit(interaction) {
         'Send a message in this channel with your card screenshots attached.',
         `You have **5 minutes**. After that, the prediction will be posted without images.`,
       ].join('\n'),
-      ephemeral: true,
+      flags: ['Ephemeral'],
     });
 
     // Track pending upload — survives via DB Status.AwaitingImages status on restart
@@ -503,7 +503,7 @@ async function handleEditModalSubmit(interaction) {
   const prediction = getPrediction(predictionId);
 
   if (!prediction || prediction.author_id !== interaction.user.id) {
-    return interaction.reply({ content: '❌ Not found or not yours.', ephemeral: true });
+    return interaction.reply({ content: '❌ Not found or not yours.', flags: ['Ephemeral'] });
   }
 
   const title = interaction.fields.getTextInputValue('title');
@@ -519,7 +519,7 @@ async function handleEditModalSubmit(interaction) {
 
   updatePrediction(predictionId, updates);
   await syncPredictionEmbeds(predictionId, interaction.guildId);
-  await interaction.reply({ content: '✅ Prediction updated.', ephemeral: true });
+  await interaction.reply({ content: '✅ Prediction updated.', flags: ['Ephemeral'] });
 }
 
 async function handleStarsModalSubmit(interaction) {
@@ -528,12 +528,12 @@ async function handleStarsModalSubmit(interaction) {
   const stars = parseInt(starsInput, 10);
 
   if (![1, 2, 3].includes(stars)) {
-    return interaction.reply({ content: '❌ Stars must be 1, 2, or 3.', ephemeral: true });
+    return interaction.reply({ content: '❌ Stars must be 1, 2, or 3.', flags: ['Ephemeral'] });
   }
 
   const prediction = getPrediction(predictionId);
   if (!prediction) {
-    return interaction.reply({ content: '❌ Prediction not found.', ephemeral: true });
+    return interaction.reply({ content: '❌ Prediction not found.', flags: ['Ephemeral'] });
   }
 
   const pts = starPoints(stars);
@@ -548,7 +548,7 @@ async function handleStarsModalSubmit(interaction) {
   await refreshLeaderboard(interaction.guildId).catch(() => {});
   await interaction.reply({
     content: `⭐ Rated **#${String(predictionId).padStart(4, '0')}** — ${stars} star${stars > 1 ? 's' : ''} (${pts} pts)`,
-    ephemeral: true,
+    flags: ['Ephemeral'],
   });
 }
 
@@ -579,20 +579,20 @@ async function handleButton(interaction) {
         components: [],
       });
     default:
-      return interaction.reply({ content: '❓ Unknown action.', ephemeral: true });
+      return interaction.reply({ content: '❓ Unknown action.', flags: ['Ephemeral'] });
   }
 }
 
 async function handleEditButton(interaction, predictionId) {
   const prediction = getPrediction(predictionId);
   if (!prediction) {
-    return interaction.reply({ content: '❌ Prediction not found.', ephemeral: true });
+    return interaction.reply({ content: '❌ Prediction not found.', flags: ['Ephemeral'] });
   }
   if (prediction.author_id !== interaction.user.id) {
-    return interaction.reply({ content: '❌ You can only edit your own predictions.', ephemeral: true });
+    return interaction.reply({ content: '❌ You can only edit your own predictions.', flags: ['Ephemeral'] });
   }
   if (![Status.PendingVerification, Status.PendingReview].includes(prediction.status)) {
-    return interaction.reply({ content: '❌ This prediction can no longer be edited.', ephemeral: true });
+    return interaction.reply({ content: '❌ This prediction can no longer be edited.', flags: ['Ephemeral'] });
   }
 
   const modal = new ModalBuilder()
@@ -631,14 +631,14 @@ async function handleEditButton(interaction, predictionId) {
 
 async function handleVerifyOwnership(interaction, predictionId) {
   if (!isAdmin(interaction.member)) {
-    return interaction.reply({ content: '❌ Admin only.', ephemeral: true });
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
   }
 
   const prediction = getPrediction(predictionId);
-  if (!prediction) return interaction.reply({ content: '❌ Not found.', ephemeral: true });
+  if (!prediction) return interaction.reply({ content: '❌ Not found.', flags: ['Ephemeral'] });
 
   if (prediction.ownership_verified) {
-    return interaction.reply({ content: '✅ Already verified.', ephemeral: true });
+    return interaction.reply({ content: '✅ Already verified.', flags: ['Ephemeral'] });
   }
 
   updatePrediction(predictionId, {
@@ -651,20 +651,20 @@ async function handleVerifyOwnership(interaction, predictionId) {
   await syncPredictionEmbeds(predictionId, interaction.guildId);
   await interaction.reply({
     content: `✅ Ownership verified for **#${String(predictionId).padStart(4, '0')}**. Ready for star rating.`,
-    ephemeral: true,
+    flags: ['Ephemeral'],
   });
 }
 
 async function handleAssignStars(interaction, predictionId) {
   if (!isAdmin(interaction.member)) {
-    return interaction.reply({ content: '❌ Admin only.', ephemeral: true });
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
   }
 
   const prediction = getPrediction(predictionId);
-  if (!prediction) return interaction.reply({ content: '❌ Not found.', ephemeral: true });
+  if (!prediction) return interaction.reply({ content: '❌ Not found.', flags: ['Ephemeral'] });
 
   if (!prediction.ownership_verified) {
-    return interaction.reply({ content: '❌ Verify ownership first.', ephemeral: true });
+    return interaction.reply({ content: '❌ Verify ownership first.', flags: ['Ephemeral'] });
   }
 
   const modal = new ModalBuilder()
@@ -688,18 +688,18 @@ async function handleAssignStars(interaction, predictionId) {
 
 async function handleMarkOutcome(interaction, predictionId, outcome) {
   if (!isAdmin(interaction.member)) {
-    return interaction.reply({ content: '❌ Admin only.', ephemeral: true });
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
   }
 
   const prediction = getPrediction(predictionId);
-  if (!prediction) return interaction.reply({ content: '❌ Not found.', ephemeral: true });
+  if (!prediction) return interaction.reply({ content: '❌ Not found.', flags: ['Ephemeral'] });
 
   if (prediction.outcome) {
-    return interaction.reply({ content: `❌ Already resolved as **${prediction.outcome}**.`, ephemeral: true });
+    return interaction.reply({ content: `❌ Already resolved as **${prediction.outcome}**.`, flags: ['Ephemeral'] });
   }
 
   if (!prediction.star_rating) {
-    return interaction.reply({ content: '❌ Assign stars first.', ephemeral: true });
+    return interaction.reply({ content: '❌ Assign stars first.', flags: ['Ephemeral'] });
   }
 
   const pts = totalPoints(prediction.star_rating, outcome);
@@ -718,24 +718,24 @@ async function handleMarkOutcome(interaction, predictionId, outcome) {
   const emoji = outcome === 'hit' ? '🟢' : '🔴';
   await interaction.reply({
     content: `${emoji} **#${String(predictionId).padStart(4, '0')}** marked as **${outcome}** — ${pts} pts total`,
-    ephemeral: true,
+    flags: ['Ephemeral'],
   });
 }
 
 async function handleDeleteButton(interaction, predictionId) {
   if (!isAdmin(interaction.member)) {
-    return interaction.reply({ content: '❌ Admin only.', ephemeral: true });
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
   }
 
   const prediction = getPrediction(predictionId);
-  if (!prediction) return interaction.reply({ content: '❌ Already deleted.', ephemeral: true });
+  if (!prediction) return interaction.reply({ content: '❌ Already deleted.', flags: ['Ephemeral'] });
 
   await interaction.reply(buildDeleteConfirm(predictionId));
 }
 
 async function handleConfirmDelete(interaction, predictionId) {
   if (!isAdmin(interaction.member)) {
-    return interaction.reply({ content: '❌ Admin only.', ephemeral: true });
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
   }
 
   const prediction = getPrediction(predictionId);
@@ -856,7 +856,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
   } catch (error) {
     console.error('Interaction error:', error);
-    const reply = { content: '❌ Something went wrong. Please try again.', ephemeral: true };
+    const reply = { content: '❌ Something went wrong. Please try again.', flags: ['Ephemeral'] };
     try {
       if (interaction.replied || interaction.deferred) {
         await interaction.followUp(reply);
