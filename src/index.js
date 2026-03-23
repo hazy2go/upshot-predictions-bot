@@ -610,10 +610,40 @@ async function handleEditModalSubmit(interaction) {
     updates.deadline = `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
   }
 
+  // Build diff for admin notification
+  const changes = [];
+  if (prediction.title !== title) {
+    changes.push(`**Title:** ${prediction.title} → ${title}`);
+  }
+  if (prediction.description !== description) {
+    const oldSnip = prediction.description.length > 80 ? prediction.description.slice(0, 80) + '...' : prediction.description;
+    const newSnip = description.length > 80 ? description.slice(0, 80) + '...' : description;
+    changes.push(`**Description:** ${oldSnip} → ${newSnip}`);
+  }
+  if (updates.deadline && prediction.deadline !== updates.deadline) {
+    changes.push(`**Deadline:** ${prediction.deadline} → ${updates.deadline}`);
+  }
+
   await interaction.deferReply({ flags: ['Ephemeral'] });
   updatePrediction(predictionId, updates);
   await syncPredictionEmbeds(predictionId, interaction.guildId);
   await interaction.editReply({ content: '✅ Prediction updated.' });
+
+  // Notify admin channel about the edit
+  if (changes.length > 0) {
+    const adminChannelId = getAdminChannelId(interaction.guildId);
+    if (adminChannelId) {
+      const channel = await safeGetChannel(adminChannelId);
+      if (channel) {
+        const id = String(predictionId).padStart(4, '0');
+        const msg = [
+          `**✏️ Prediction #${id} edited by <@${interaction.user.id}>**`,
+          ...changes,
+        ].join('\n');
+        await channel.send({ content: msg }).catch(() => {});
+      }
+    }
+  }
 }
 
 async function handleStarsModalSubmit(interaction) {
@@ -709,6 +739,13 @@ async function handleEditButton(interaction, predictionId) {
   }
   if (![Status.PendingVerification, Status.PendingReview].includes(prediction.status)) {
     return interaction.reply({ content: '❌ This prediction can no longer be edited.', flags: ['Ephemeral'] });
+  }
+
+  // 1-hour edit window
+  const createdAt = new Date(prediction.created_at + 'Z').getTime();
+  const elapsed = Date.now() - createdAt;
+  if (elapsed > 60 * 60 * 1000) {
+    return interaction.reply({ content: '❌ Edit window has closed. Predictions can only be edited within 1 hour of submission.', flags: ['Ephemeral'] });
   }
 
   const modal = new ModalBuilder()
