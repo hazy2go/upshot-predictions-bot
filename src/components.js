@@ -44,9 +44,8 @@ function mediaGallery(filenames) {
 
 // ── Prediction card (public #predictions) ────────────────────
 //
-// Public cards do NOT include images — images are proof for admin
-// review only. The public card shows a verification badge instead.
-// This avoids Discord CDN URL expiration on long-lived messages.
+// Public cards include images via attachment:// protocol.
+// Files are attached from disk when sending/editing (handled by index.js).
 
 export function buildPredictionCard(prediction, upshotUrl) {
   const color = statusColor(prediction.status);
@@ -68,16 +67,18 @@ export function buildPredictionCard(prediction, upshotUrl) {
     : prediction.description;
   children.push(text(desc));
 
-  // Proof indicators (text only — no images in public feed)
+  // Card images via attachment:// protocol
+  if (prediction.images && prediction.images.length > 0) {
+    children.push(mediaGallery(prediction.images));
+  }
+
+  // Proof indicators
   const proofParts = [];
   if (prediction.ownership_verified) {
     proofParts.push('✅ Card ownership verified');
   }
   if (prediction.tweet_url) {
     proofParts.push(`📎 [Tweet Proof](${prediction.tweet_url})`);
-  }
-  if (prediction.proof_type === 'images' && prediction.images?.length > 0) {
-    proofParts.push(`🖼 ${prediction.images.length} card image${prediction.images.length > 1 ? 's' : ''} submitted`);
   }
   if (proofParts.length > 0) {
     children.push(text(proofParts.join(' · ')));

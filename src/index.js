@@ -171,8 +171,13 @@ async function postPredictionToFeed(prediction, guildId) {
 
   const payload = buildPredictionCard(prediction, profile?.upshot_url);
 
+  // Attach image files from disk for MediaGallery
+  const files = prediction.images?.length > 0
+    ? getAttachmentBuilders(prediction.id, prediction.images)
+    : [];
+
   try {
-    const msg = await channel.send(payload);
+    const msg = await channel.send({ ...payload, files });
     updatePrediction(prediction.id, { embed_message_id: msg.id });
     return msg;
   } catch (err) {
@@ -210,7 +215,7 @@ async function syncPredictionEmbeds(predictionId, guildId) {
 
   const profile = getUpshotProfile(prediction.author_id);
 
-  // Update public embed (no files — text only)
+  // Update public embed (re-attach images from disk)
   if (prediction.embed_message_id) {
     const channelId = getPredictionsChannelId(guildId);
     if (channelId) {
@@ -220,7 +225,10 @@ async function syncPredictionEmbeds(predictionId, guildId) {
         if (msg) {
           try {
             const payload = buildPredictionCard(prediction, profile?.upshot_url);
-            await msg.edit(payload);
+            const files = prediction.images?.length > 0
+              ? getAttachmentBuilders(prediction.id, prediction.images)
+              : [];
+            await msg.edit({ ...payload, files });
           } catch (err) {
             console.error(`Failed to edit public embed #${predictionId}:`, err.message);
           }
