@@ -11,6 +11,7 @@ import {
   getLeaderboardMessageId, setLeaderboardMessageId,
   getAwaitingImagePredictions,
   getConfig, setConfig, getAllConfig,
+  getCategories, addCategory, removeCategory,
 } from './database.js';
 
 import {
@@ -22,7 +23,7 @@ import { downloadAndSave, getAttachmentBuilders } from './images.js';
 import { commands } from './commands.js';
 
 import {
-  Status, Categories, starPoints, totalPoints,
+  Status, DefaultCategories, starPoints, totalPoints,
 } from './constants.js';
 
 // ── Client ──────────────────────────────────────────────────
@@ -69,6 +70,60 @@ function getMaxDaily(guildId) {
 }
 
 // ── Helpers ──────────────────────────────────────────────────
+
+function getCategoryList(guildId) {
+  return getCategories(guildId) || DefaultCategories;
+}
+
+/**
+ * Fuzzy match a user's category input against the known list.
+ * Returns the matched category name or null.
+ * Tolerates typos by using Levenshtein distance.
+ */
+function matchCategory(input, categories) {
+  const lower = input.toLowerCase().trim();
+
+  // Exact match (case-insensitive)
+  const exact = categories.find(c => c.toLowerCase() === lower);
+  if (exact) return exact;
+
+  // Starts-with match (e.g. "def" → "DeFi", "gam" → "Gaming")
+  const startsWith = categories.find(c => c.toLowerCase().startsWith(lower));
+  if (startsWith) return startsWith;
+
+  // Contains match (e.g. "nft" matches "NFTs")
+  const contains = categories.find(c => c.toLowerCase().includes(lower) || lower.includes(c.toLowerCase()));
+  if (contains) return contains;
+
+  // Levenshtein distance — allow up to 2 edits for short names, 3 for longer
+  let bestMatch = null;
+  let bestDist = Infinity;
+  for (const cat of categories) {
+    const dist = levenshtein(lower, cat.toLowerCase());
+    const threshold = cat.length <= 4 ? 2 : 3;
+    if (dist <= threshold && dist < bestDist) {
+      bestDist = dist;
+      bestMatch = cat;
+    }
+  }
+
+  return bestMatch;
+}
+
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  const dp = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1]
+        ? dp[i - 1][j - 1]
+        : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  return dp[m][n];
+}
 
 function currentMonthKey() {
   const now = new Date();
@@ -277,9 +332,9 @@ async function handlePredict(interaction) {
       new TextInputBuilder()
         .setCustomId('category')
         .setLabel('Category')
-        .setPlaceholder(Categories.join(' / '))
+        .setPlaceholder(getCategoryList(interaction.guildId).join(' / '))
         .setStyle(TextInputStyle.Short)
-        .setMaxLength(20)
+        .setMaxLength(30)
         .setRequired(true)
     ),
     new ActionRowBuilder().addComponents(
@@ -382,8 +437,19 @@ async function handleSetup(interaction) {
       setConfig(guildId, 'max_daily', limit);
       return interaction.reply({ content: `✅ Max daily predictions set to **${limit}**`, flags: ['Ephemeral'] });
     }
+    case 'add-category': {
+      const name = interaction.options.getString('name', true).trim();
+      const updated = addCategory(guildId, name);
+      return interaction.reply({ content: `✅ Category **${name}** added.\nCurrent: ${updated.join(', ')}`, flags: ['Ephemeral'] });
+    }
+    case 'remove-category': {
+      const name = interaction.options.getString('name', true).trim();
+      const updated = removeCategory(guildId, name);
+      return interaction.reply({ content: `✅ Category **${name}** removed.\nCurrent: ${updated.length > 0 ? updated.join(', ') : '*(empty — defaults will be used)*'}`, flags: ['Ephemeral'] });
+    }
     case 'view': {
       const cfg = getAllConfig(guildId);
+      const cats = getCategoryList(guildId);
       const lines = [
         '**Current Configuration**',
         '',
@@ -392,6 +458,7 @@ async function handleSetup(interaction) {
         `**Leaderboard channel:** ${cfg.leaderboard_channel ? `<#${cfg.leaderboard_channel}>` : '`not set (using .env)`'}`,
         `**Admin role:** ${cfg.admin_role ? `<@&${cfg.admin_role}>` : '`not set (using .env)`'}`,
         `**Max daily predictions:** ${cfg.max_daily || '`not set (default: 3)`'}`,
+        `**Categories:** ${cats.join(', ')}`,
       ];
       return interaction.reply({ content: lines.join('\n'), flags: ['Ephemeral'] });
     }
@@ -407,11 +474,12 @@ async function handlePredictModalSubmit(interaction) {
   const deadline = interaction.fields.getTextInputValue('deadline');
   const tweetUrl = interaction.fields.getTextInputValue('tweet_url')?.trim() || null;
 
-  // Validate category
-  const matchedCategory = Categories.find(c => c.toLowerCase() === category.toLowerCase());
+  // Fuzzy match category — tolerates typos
+  const categories = getCategoryList(interaction.guildId);
+  const matchedCategory = matchCategory(category, categories);
   if (!matchedCategory) {
     return interaction.reply({
-      content: `❌ Invalid category. Must be one of: ${Categories.join(', ')}`,
+      content: `❌ Couldn't match "**${category}**" to a category.\nAvailable: ${categories.join(', ')}`,
       flags: ['Ephemeral'],
     });
   }

@@ -54,8 +54,8 @@ export const Status = {
   Fail: 'fail',
 };
 
-// Categories
-export const Categories = ['DeFi', 'NFTs', 'L1-L2', 'Gaming', 'Macro'];
+// Default categories (used if none configured via /setup)
+export const DefaultCategories = ['DeFi', 'NFTs', 'L1-L2', 'Gaming', 'Macro'];
 
 // MessageFlags for Components v2
 export const MESSAGE_FLAGS = {

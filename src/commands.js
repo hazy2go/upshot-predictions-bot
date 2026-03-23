@@ -77,6 +77,24 @@ export const commands = [
         )
     )
     .addSubcommand(sub =>
+      sub.setName('add-category')
+        .setDescription('Add a prediction category')
+        .addStringOption(opt =>
+          opt.setName('name')
+            .setDescription('Category name (e.g. AI, Memecoins, RWA)')
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('remove-category')
+        .setDescription('Remove a prediction category')
+        .addStringOption(opt =>
+          opt.setName('name')
+            .setDescription('Category to remove')
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
       sub.setName('view')
         .setDescription('View current bot configuration')
     ),

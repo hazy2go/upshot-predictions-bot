@@ -230,4 +230,31 @@ export function getAllConfig(guildId) {
   return config;
 }
 
+// ── Categories ──────────────────────────────────────────────
+
+export function getCategories(guildId) {
+  const raw = getConfig(guildId, 'categories');
+  return raw ? JSON.parse(raw) : null;
+}
+
+export function setCategories(guildId, categories) {
+  setConfig(guildId, 'categories', JSON.stringify(categories));
+}
+
+export function addCategory(guildId, category) {
+  const current = getCategories(guildId) || [];
+  if (!current.find(c => c.toLowerCase() === category.toLowerCase())) {
+    current.push(category);
+    setCategories(guildId, current);
+  }
+  return current;
+}
+
+export function removeCategory(guildId, category) {
+  const current = getCategories(guildId) || [];
+  const filtered = current.filter(c => c.toLowerCase() !== category.toLowerCase());
+  setCategories(guildId, filtered);
+  return filtered;
+}
+
 export default db;
