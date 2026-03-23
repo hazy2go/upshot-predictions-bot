@@ -585,9 +585,10 @@ async function handleEditModalSubmit(interaction) {
     updates.deadline = `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
   }
 
+  await interaction.deferReply({ flags: ['Ephemeral'] });
   updatePrediction(predictionId, updates);
   await syncPredictionEmbeds(predictionId, interaction.guildId);
-  await interaction.reply({ content: '✅ Prediction updated.', flags: ['Ephemeral'] });
+  await interaction.editReply({ content: '✅ Prediction updated.' });
 }
 
 async function handleStarsModalSubmit(interaction) {
@@ -604,6 +605,8 @@ async function handleStarsModalSubmit(interaction) {
     return interaction.reply({ content: '❌ Prediction not found.', flags: ['Ephemeral'] });
   }
 
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
   const pts = starPoints(stars);
   updatePrediction(predictionId, {
     star_rating: stars,
@@ -614,7 +617,7 @@ async function handleStarsModalSubmit(interaction) {
 
   await syncPredictionEmbeds(predictionId, interaction.guildId);
   await refreshLeaderboard(interaction.guildId).catch(() => {});
-  await interaction.reply({
+  await interaction.editReply({
     content: `⭐ Rated **#${String(predictionId).padStart(4, '0')}** — ${stars} star${stars > 1 ? 's' : ''} (${pts} pts)`,
     flags: ['Ephemeral'],
   });
@@ -709,6 +712,8 @@ async function handleVerifyOwnership(interaction, predictionId) {
     return interaction.reply({ content: '✅ Already verified.', flags: ['Ephemeral'] });
   }
 
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
   updatePrediction(predictionId, {
     ownership_verified: 1,
     verified_by: interaction.user.id,
@@ -717,9 +722,8 @@ async function handleVerifyOwnership(interaction, predictionId) {
   });
 
   await syncPredictionEmbeds(predictionId, interaction.guildId);
-  await interaction.reply({
+  await interaction.editReply({
     content: `✅ Ownership verified for **#${String(predictionId).padStart(4, '0')}**. Ready for star rating.`,
-    flags: ['Ephemeral'],
   });
 }
 
@@ -770,6 +774,8 @@ async function handleMarkOutcome(interaction, predictionId, outcome) {
     return interaction.reply({ content: '❌ Assign stars first.', flags: ['Ephemeral'] });
   }
 
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
   const pts = totalPoints(prediction.star_rating, outcome);
   const status = outcome === 'hit' ? Status.Hit : Status.Fail;
 
@@ -784,9 +790,8 @@ async function handleMarkOutcome(interaction, predictionId, outcome) {
   await refreshLeaderboard(interaction.guildId).catch(() => {});
 
   const emoji = outcome === 'hit' ? '🟢' : '🔴';
-  await interaction.reply({
+  await interaction.editReply({
     content: `${emoji} **#${String(predictionId).padStart(4, '0')}** marked as **${outcome}** — ${pts} pts total`,
-    flags: ['Ephemeral'],
   });
 }
 
@@ -868,9 +873,8 @@ async function handleMessageForImages(message) {
   const filenames = await downloadAndSave(pending.predictionId, imageUrls);
 
   if (filenames.length === 0) {
-    await message.reply({
-      content: '❌ Failed to save images. Please try submitting again with `/predict`.',
-    });
+    try { await message.react('❌'); } catch {}
+    await message.channel.send('❌ Failed to save images. Please try submitting again with `/predict`.');
     return;
   }
 
@@ -888,9 +892,8 @@ async function handleMessageForImages(message) {
   await refreshLeaderboard(pending.guildId).catch(() => {});
 
   // Confirm to user
-  await message.reply({
-    content: `📸 ${filenames.length} card image${filenames.length > 1 ? 's' : ''} saved for prediction **#${String(pending.predictionId).padStart(4, '0')}**. Submitted for review!`,
-  });
+  try { await message.react('📸'); } catch {}
+  await message.channel.send(`📸 ${filenames.length} card image${filenames.length > 1 ? 's' : ''} saved for prediction **#${String(pending.predictionId).padStart(4, '0')}**. Submitted for review!`);
 }
 
 // ── Event routing ────────────────────────────────────────────
