@@ -1,28 +1,6 @@
-import { REST, Routes, SlashCommandBuilder } from 'discord.js';
+import { REST, Routes } from 'discord.js';
+import { commands } from './commands.js';
 import 'dotenv/config';
-
-const commands = [
-  new SlashCommandBuilder()
-    .setName('predict')
-    .setDescription('Submit a prediction — prove your alpha with your Upshot cards'),
-
-  new SlashCommandBuilder()
-    .setName('link-upshot')
-    .setDescription('Link your Upshot profile to your Discord account')
-    .addStringOption(opt =>
-      opt.setName('url')
-        .setDescription('Your Upshot profile URL (e.g. https://upshot.xyz/user/yourname)')
-        .setRequired(true)
-    ),
-
-  new SlashCommandBuilder()
-    .setName('mystats')
-    .setDescription('View your personal prediction stats for this month'),
-
-  new SlashCommandBuilder()
-    .setName('leaderboard')
-    .setDescription('Refresh the leaderboard (admin only)'),
-];
 
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 

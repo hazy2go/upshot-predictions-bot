@@ -1,5 +1,5 @@
 import {
-  Client, GatewayIntentBits, Events,
+  Client, GatewayIntentBits, Events, Routes,
   ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder,
 } from 'discord.js';
 import 'dotenv/config';
@@ -18,6 +18,7 @@ import {
 } from './components.js';
 
 import { downloadAndSave, getAttachmentBuilders } from './images.js';
+import { commands } from './commands.js';
 
 import {
   Status, Categories, starPoints, totalPoints,
@@ -775,6 +776,26 @@ client.on(Events.MessageCreate, handleMessageForImages);
 
 client.once(Events.ClientReady, async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
+
+  // Auto-register slash commands on every startup
+  try {
+    const body = commands.map(c => c.toJSON());
+    if (process.env.GUILD_ID) {
+      await client.rest.put(
+        Routes.applicationGuildCommands(client.user.id, process.env.GUILD_ID),
+        { body },
+      );
+    } else {
+      await client.rest.put(
+        Routes.applicationCommands(client.user.id),
+        { body },
+      );
+    }
+    console.log(`   Registered ${commands.length} slash commands`);
+  } catch (err) {
+    console.error('   Failed to register commands:', err.message);
+  }
+
   console.log(`   Predictions: ${process.env.PREDICTIONS_CHANNEL_ID}`);
   console.log(`   Admin review: ${process.env.ADMIN_REVIEW_CHANNEL_ID}`);
   console.log(`   Leaderboard: ${process.env.LEADERBOARD_CHANNEL_ID}`);
