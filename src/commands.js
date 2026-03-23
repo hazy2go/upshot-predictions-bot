@@ -3,7 +3,27 @@ import { SlashCommandBuilder, PermissionFlagsBits, ChannelType } from 'discord.j
 export const commands = [
   new SlashCommandBuilder()
     .setName('predict')
-    .setDescription('Submit a prediction — prove your alpha with your Upshot cards'),
+    .setDescription('Submit a prediction — prove your alpha with your Upshot cards')
+    .addAttachmentOption(opt =>
+      opt.setName('image1')
+        .setDescription('Card screenshot #1')
+        .setRequired(false)
+    )
+    .addAttachmentOption(opt =>
+      opt.setName('image2')
+        .setDescription('Card screenshot #2')
+        .setRequired(false)
+    )
+    .addAttachmentOption(opt =>
+      opt.setName('image3')
+        .setDescription('Card screenshot #3')
+        .setRequired(false)
+    )
+    .addStringOption(opt =>
+      opt.setName('tweet-url')
+        .setDescription('Tweet link showing your cards (alternative to images)')
+        .setRequired(false)
+    ),
 
   new SlashCommandBuilder()
     .setName('link-upshot')

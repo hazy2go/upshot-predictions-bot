@@ -9,7 +9,6 @@ import {
   createPrediction, getPrediction, updatePrediction, deletePrediction,
   countUserDailyPredictions, getUserStats, getLeaderboard,
   getLeaderboardMessageId, setLeaderboardMessageId,
-  getAwaitingImagePredictions,
   getConfig, setConfig, getAllConfig,
   getCategories, addCategory, removeCategory,
 } from './database.js';
@@ -31,17 +30,8 @@ import {
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
   ],
 });
-
-const IMAGE_UPLOAD_TIMEOUT_MS = 5 * 60 * 1000;
-
-// In-memory tracker for pending image uploads.
-// On restart, the bot checks DB for stale entries (see ClientReady handler).
-// Map<userId, { predictionId, channelId, guildId, timeout }>
-const pendingImageUploads = new Map();
 
 // ── Config resolver (DB first, .env fallback) ───────────────
 
@@ -296,6 +286,10 @@ async function refreshLeaderboard(guildId) {
 
 // ── Slash commands ──────────────────────────────────────────
 
+// Temporary storage for attachments between command → modal flow
+// Map<userId, { imageUrls: string[], tweetUrl: string|null, guildId: string }>
+const pendingSubmissions = new Map();
+
 async function handlePredict(interaction) {
   const profile = getUpshotProfile(interaction.user.id);
   if (!profile) {
@@ -313,6 +307,33 @@ async function handlePredict(interaction) {
       flags: ['Ephemeral'],
     });
   }
+
+  // Grab attachments and tweet URL from command options
+  const imageUrls = [];
+  for (const key of ['image1', 'image2', 'image3']) {
+    const att = interaction.options.getAttachment(key);
+    if (att && att.contentType?.startsWith('image/')) {
+      imageUrls.push(att.url);
+    }
+  }
+  const tweetUrl = interaction.options.getString('tweet-url')?.trim() || null;
+
+  if (imageUrls.length === 0 && !tweetUrl) {
+    return interaction.reply({
+      content: '❌ You must provide proof of card ownership.\nAttach card screenshots (`image1`, `image2`, `image3`) or provide a `tweet-url`.',
+      flags: ['Ephemeral'],
+    });
+  }
+
+  // Store attachments temporarily — they'll be retrieved when the modal is submitted
+  pendingSubmissions.set(interaction.user.id, {
+    imageUrls,
+    tweetUrl,
+    guildId: interaction.guildId,
+  });
+
+  // Auto-clear after 5 min if modal is never submitted
+  setTimeout(() => pendingSubmissions.delete(interaction.user.id), 5 * 60 * 1000);
 
   const modal = new ModalBuilder()
     .setCustomId('predict_modal')
@@ -354,14 +375,6 @@ async function handlePredict(interaction) {
         .setStyle(TextInputStyle.Short)
         .setMaxLength(10)
         .setRequired(true)
-    ),
-    new ActionRowBuilder().addComponents(
-      new TextInputBuilder()
-        .setCustomId('tweet_url')
-        .setLabel('Tweet link (optional)')
-        .setPlaceholder('https://x.com/you/status/...')
-        .setStyle(TextInputStyle.Short)
-        .setRequired(false)
     ),
   );
 
@@ -468,11 +481,20 @@ async function handleSetup(interaction) {
 // ── Modal submits ───────────────────────────────────────────
 
 async function handlePredictModalSubmit(interaction) {
+  // Retrieve attachments stored during /predict command
+  const pending = pendingSubmissions.get(interaction.user.id);
+  if (!pending) {
+    return interaction.reply({
+      content: '❌ Submission expired. Please run `/predict` again.',
+      flags: ['Ephemeral'],
+    });
+  }
+  pendingSubmissions.delete(interaction.user.id);
+
   const title = interaction.fields.getTextInputValue('title');
   const category = interaction.fields.getTextInputValue('category').trim();
   const description = interaction.fields.getTextInputValue('description');
   const deadline = interaction.fields.getTextInputValue('deadline');
-  const tweetUrl = interaction.fields.getTextInputValue('tweet_url')?.trim() || null;
 
   // Fuzzy match category — tolerates typos
   const categories = getCategoryList(interaction.guildId);
@@ -496,51 +518,60 @@ async function handlePredictModalSubmit(interaction) {
   const [, dd, mm, yyyy] = deadlineMatch;
   const deadlineFormatted = `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
 
+  // Defer — downloading images + posting to channels takes time
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  const { imageUrls, tweetUrl, guildId } = pending;
   const proofType = tweetUrl ? 'tweet' : 'images';
 
-  // Create prediction in DB (status = Status.AwaitingImages if no tweet, else 'pending_verification')
-  const initialStatus = tweetUrl ? Status.PendingVerification : Status.AwaitingImages;
-  const prediction = createPrediction({
-    authorId: interaction.user.id,
-    title,
-    category: matchedCategory,
-    description,
-    deadline: deadlineFormatted,
-    proofType,
-    tweetUrl,
-    images: [],
-    status: initialStatus,
-  });
-
-  if (tweetUrl) {
-    // Tweet proof — post immediately
-    await interaction.reply({
-      content: `✅ Prediction **#${String(prediction.id).padStart(4, '0')}** submitted with tweet proof!\nIt's now in the review queue.`,
-      flags: ['Ephemeral'],
+  // Download images to disk immediately (URLs expire)
+  let filenames = [];
+  if (imageUrls.length > 0) {
+    // Create a temp prediction ID for download, then update
+    const prediction = createPrediction({
+      authorId: interaction.user.id,
+      title,
+      category: matchedCategory,
+      description,
+      deadline: deadlineFormatted,
+      proofType,
+      tweetUrl,
+      images: [],
+      status: Status.PendingVerification,
     });
-    await postPredictionToFeed(prediction, interaction.guildId);
-    await postToAdminReview(prediction, interaction.guildId);
-    await refreshLeaderboard(interaction.guildId).catch(() => {});
+
+    filenames = await downloadAndSave(prediction.id, imageUrls);
+    updatePrediction(prediction.id, { images: filenames });
+    const updated = getPrediction(prediction.id);
+
+    await postPredictionToFeed(updated, guildId);
+    await postToAdminReview(updated, guildId);
+    await refreshLeaderboard(guildId).catch(() => {});
+
+    const imgCount = filenames.length;
+    await interaction.editReply({
+      content: `✅ Prediction **#${String(prediction.id).padStart(4, '0')}** submitted with ${imgCount} card image${imgCount > 1 ? 's' : ''}! Now in the review queue.`,
+    });
   } else {
-    // Image proof — prompt for upload
-    await interaction.reply({
-      content: [
-        `✅ Prediction **#${String(prediction.id).padStart(4, '0')}** saved!`,
-        '',
-        '📸 **Now upload your card images** as proof of ownership.',
-        'Send a message in this channel with your card screenshots attached.',
-        `You have **5 minutes**. After that, the prediction will be posted without images.`,
-      ].join('\n'),
-      flags: ['Ephemeral'],
+    // Tweet proof only
+    const prediction = createPrediction({
+      authorId: interaction.user.id,
+      title,
+      category: matchedCategory,
+      description,
+      deadline: deadlineFormatted,
+      proofType,
+      tweetUrl,
+      images: [],
+      status: Status.PendingVerification,
     });
 
-    // Track pending upload — survives via DB Status.AwaitingImages status on restart
-    const timeout = setTimeout(() => finalizePendingUpload(interaction.user.id), IMAGE_UPLOAD_TIMEOUT_MS);
-    pendingImageUploads.set(interaction.user.id, {
-      predictionId: prediction.id,
-      channelId: interaction.channelId,
-      guildId: interaction.guildId,
-      timeout,
+    await postPredictionToFeed(prediction, guildId);
+    await postToAdminReview(prediction, guildId);
+    await refreshLeaderboard(guildId).catch(() => {});
+
+    await interaction.editReply({
+      content: `✅ Prediction **#${String(prediction.id).padStart(4, '0')}** submitted with tweet proof! Now in the review queue.`,
     });
   }
 }
@@ -549,23 +580,6 @@ async function handlePredictModalSubmit(interaction) {
  * Called when the image upload window expires.
  * Posts the prediction without images.
  */
-async function finalizePendingUpload(userId) {
-  const pending = pendingImageUploads.get(userId);
-  if (!pending) return;
-  pendingImageUploads.delete(userId);
-
-  const prediction = getPrediction(pending.predictionId);
-  if (!prediction || prediction.status !== Status.AwaitingImages) return;
-
-  // Move to pending_verification and post
-  updatePrediction(prediction.id, { status: Status.PendingVerification });
-  const updated = getPrediction(prediction.id);
-
-  await postPredictionToFeed(updated, pending.guildId);
-  await postToAdminReview(updated, pending.guildId);
-  await refreshLeaderboard(pending.guildId).catch(() => {});
-}
-
 async function handleEditModalSubmit(interaction) {
   const predictionId = parseInt(interaction.customId.split(':')[1], 10);
   const prediction = getPrediction(predictionId);
@@ -851,51 +865,6 @@ async function handleConfirmDelete(interaction, predictionId) {
 
 // ── Image collection (message listener) ──────────────────────
 
-async function handleMessageForImages(message) {
-  if (message.author.bot) return;
-
-  const pending = pendingImageUploads.get(message.author.id);
-  if (!pending || pending.channelId !== message.channelId) return;
-  if (message.attachments.size === 0) return;
-
-  // Filter image attachments only
-  const imageUrls = message.attachments
-    .filter(a => a.contentType?.startsWith('image/'))
-    .map(a => a.url);
-
-  if (imageUrls.length === 0) return;
-
-  // Clear the timeout — we got images
-  clearTimeout(pending.timeout);
-  pendingImageUploads.delete(message.author.id);
-
-  // Download images to disk BEFORE anything else (URLs may expire)
-  const filenames = await downloadAndSave(pending.predictionId, imageUrls);
-
-  if (filenames.length === 0) {
-    try { await message.react('❌'); } catch {}
-    await message.channel.send('❌ Failed to save images. Please try submitting again with `/predict`.');
-    return;
-  }
-
-  // Update prediction: store filenames (not URLs), move to pending_verification
-  updatePrediction(pending.predictionId, {
-    images: filenames,
-    status: Status.PendingVerification,
-  });
-
-  const prediction = getPrediction(pending.predictionId);
-
-  // Post to feeds
-  await postPredictionToFeed(prediction, pending.guildId);
-  await postToAdminReview(prediction, pending.guildId);
-  await refreshLeaderboard(pending.guildId).catch(() => {});
-
-  // Confirm to user
-  try { await message.react('📸'); } catch {}
-  await message.channel.send(`📸 ${filenames.length} card image${filenames.length > 1 ? 's' : ''} saved for prediction **#${String(pending.predictionId).padStart(4, '0')}**. Submitted for review!`);
-}
-
 // ── Event routing ────────────────────────────────────────────
 
 client.on(Events.InteractionCreate, async interaction => {
@@ -938,8 +907,6 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 });
 
-client.on(Events.MessageCreate, handleMessageForImages);
-
 // ── Startup ──────────────────────────────────────────────────
 
 client.once(Events.ClientReady, async () => {
@@ -966,22 +933,6 @@ client.once(Events.ClientReady, async () => {
 
   console.log(`   Use /setup to configure channels, admin role, and limits`);
 
-  // Handle predictions that were awaiting images when the bot last went offline.
-  // If they've been waiting > 5 min, post them without images.
-  const stale = getAwaitingImagePredictions(IMAGE_UPLOAD_TIMEOUT_MS);
-  if (stale.length > 0) {
-    console.log(`   Recovering ${stale.length} stale prediction(s) from before restart...`);
-    // Use the first guild as fallback for config resolution
-    const fallbackGuildId = client.guilds.cache.first()?.id;
-    for (const pred of stale) {
-      updatePrediction(pred.id, { status: Status.PendingVerification });
-      const updated = getPrediction(pred.id);
-      if (!updated.embed_message_id) {
-        await postPredictionToFeed(updated, fallbackGuildId);
-        await postToAdminReview(updated, fallbackGuildId);
-      }
-    }
-  }
 });
 
 client.login(process.env.DISCORD_TOKEN);
