@@ -26,7 +26,7 @@ export async function downloadAndSave(predictionId, urls) {
     const filepath = resolve(dir, filename);
 
     try {
-      const response = await fetch(urls[i]);
+      const response = await fetch(urls[i], { signal: AbortSignal.timeout(20_000) });
       if (!response.ok) {
         console.error(`Failed to download image ${i + 1} for prediction #${predictionId}: ${response.status}`);
         continue;

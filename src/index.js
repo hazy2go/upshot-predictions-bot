@@ -31,6 +31,9 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
   ],
+  rest: {
+    timeout: 30_000, // 30s REST timeout (default is 15s, too short for Pi with large attachments)
+  },
 });
 
 // ── Config resolver (DB first, .env fallback) ───────────────
@@ -552,8 +555,8 @@ async function handlePredictModalSubmit(interaction) {
     updatePrediction(prediction.id, { images: filenames });
     const updated = getPrediction(prediction.id);
 
-    await postPredictionToFeed(updated, guildId);
-    await postToAdminReview(updated, guildId);
+    await postPredictionToFeed(updated, guildId).catch(e => console.error('Feed post failed:', e.message));
+    await postToAdminReview(updated, guildId).catch(e => console.error('Admin post failed:', e.message));
     await refreshLeaderboard(guildId).catch(() => {});
 
     const imgCount = filenames.length;
@@ -574,8 +577,8 @@ async function handlePredictModalSubmit(interaction) {
       status: Status.PendingVerification,
     });
 
-    await postPredictionToFeed(prediction, guildId);
-    await postToAdminReview(prediction, guildId);
+    await postPredictionToFeed(prediction, guildId).catch(e => console.error('Feed post failed:', e.message));
+    await postToAdminReview(prediction, guildId).catch(e => console.error('Admin post failed:', e.message));
     await refreshLeaderboard(guildId).catch(() => {});
 
     await interaction.editReply({
