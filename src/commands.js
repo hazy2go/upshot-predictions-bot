@@ -1,5 +1,4 @@
-import { SlashCommandBuilder } from 'discord.js';
-import { Categories } from './constants.js';
+import { SlashCommandBuilder, PermissionFlagsBits, ChannelType } from 'discord.js';
 
 export const commands = [
   new SlashCommandBuilder()
@@ -22,4 +21,63 @@ export const commands = [
   new SlashCommandBuilder()
     .setName('leaderboard')
     .setDescription('Refresh the leaderboard (admin only)'),
+
+  new SlashCommandBuilder()
+    .setName('setup')
+    .setDescription('Configure the prediction bot (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addSubcommand(sub =>
+      sub.setName('predictions-channel')
+        .setDescription('Set the channel where predictions are posted')
+        .addChannelOption(opt =>
+          opt.setName('channel')
+            .setDescription('The predictions channel')
+            .addChannelTypes(ChannelType.GuildText)
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('admin-channel')
+        .setDescription('Set the private admin review channel')
+        .addChannelOption(opt =>
+          opt.setName('channel')
+            .setDescription('The admin review channel')
+            .addChannelTypes(ChannelType.GuildText)
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('leaderboard-channel')
+        .setDescription('Set the leaderboard channel')
+        .addChannelOption(opt =>
+          opt.setName('channel')
+            .setDescription('The leaderboard channel')
+            .addChannelTypes(ChannelType.GuildText)
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('admin-role')
+        .setDescription('Set the role that can review and resolve predictions')
+        .addRoleOption(opt =>
+          opt.setName('role')
+            .setDescription('The admin role')
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('max-daily')
+        .setDescription('Set max predictions per user per day')
+        .addIntegerOption(opt =>
+          opt.setName('limit')
+            .setDescription('Max predictions per day (1-20)')
+            .setMinValue(1)
+            .setMaxValue(20)
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('view')
+        .setDescription('View current bot configuration')
+    ),
 ];

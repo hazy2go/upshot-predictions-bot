@@ -209,4 +209,25 @@ export function markImageTimeout(id) {
   db.prepare("UPDATE predictions SET status = 'pending_verification' WHERE id = ? AND status = 'awaiting_images'").run(id);
 }
 
+// ── Config (DB-backed, overrides .env) ──────────────────────
+
+export function getConfig(guildId, key) {
+  const row = db.prepare("SELECT value FROM bot_state WHERE key = ?").get(`config_${guildId}_${key}`);
+  return row?.value ?? null;
+}
+
+export function setConfig(guildId, key, value) {
+  db.prepare("INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)").run(`config_${guildId}_${key}`, String(value));
+}
+
+export function getAllConfig(guildId) {
+  const rows = db.prepare("SELECT key, value FROM bot_state WHERE key LIKE ?").all(`config_${guildId}_%`);
+  const config = {};
+  for (const row of rows) {
+    const key = row.key.replace(`config_${guildId}_`, '');
+    config[key] = row.value;
+  }
+  return config;
+}
+
 export default db;

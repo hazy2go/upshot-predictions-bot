@@ -10,6 +10,7 @@ import {
   countUserDailyPredictions, getUserStats, getLeaderboard,
   getLeaderboardMessageId, setLeaderboardMessageId,
   getAwaitingImagePredictions,
+  getConfig, setConfig, getAllConfig,
 } from './database.js';
 
 import {
@@ -34,13 +35,38 @@ const client = new Client({
   ],
 });
 
-const MAX_DAILY = parseInt(process.env.MAX_DAILY_PREDICTIONS || '3', 10);
 const IMAGE_UPLOAD_TIMEOUT_MS = 5 * 60 * 1000;
 
 // In-memory tracker for pending image uploads.
 // On restart, the bot checks DB for stale entries (see ClientReady handler).
 // Map<userId, { predictionId, channelId, guildId, timeout }>
 const pendingImageUploads = new Map();
+
+// ── Config resolver (DB first, .env fallback) ───────────────
+
+function cfg(guildId, key, fallbackEnv) {
+  return getConfig(guildId, key) ?? process.env[fallbackEnv] ?? null;
+}
+
+function getPredictionsChannelId(guildId) {
+  return cfg(guildId, 'predictions_channel', 'PREDICTIONS_CHANNEL_ID');
+}
+
+function getAdminChannelId(guildId) {
+  return cfg(guildId, 'admin_channel', 'ADMIN_REVIEW_CHANNEL_ID');
+}
+
+function getLeaderboardChannelId(guildId) {
+  return cfg(guildId, 'leaderboard_channel', 'LEADERBOARD_CHANNEL_ID');
+}
+
+function getAdminRoleId(guildId) {
+  return cfg(guildId, 'admin_role', 'ADMIN_ROLE_ID');
+}
+
+function getMaxDaily(guildId) {
+  return parseInt(cfg(guildId, 'max_daily', 'MAX_DAILY_PREDICTIONS') || '3', 10);
+}
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -54,7 +80,8 @@ function currentMonthLabel() {
 }
 
 function isAdmin(member) {
-  return member.roles.cache.has(process.env.ADMIN_ROLE_ID);
+  const roleId = getAdminRoleId(member.guild.id);
+  return roleId ? member.roles.cache.has(roleId) : member.permissions.has('Administrator');
 }
 
 /**
@@ -90,9 +117,11 @@ async function safeGetMessage(channel, messageId) {
 // attachment:// protocol. On every edit, we re-attach images from disk
 // so the MediaGallery URLs remain valid regardless of how old the message is.
 
-async function postPredictionToFeed(prediction) {
+async function postPredictionToFeed(prediction, guildId) {
   const profile = getUpshotProfile(prediction.author_id);
-  const channel = await safeGetChannel(process.env.PREDICTIONS_CHANNEL_ID);
+  const channelId = getPredictionsChannelId(guildId);
+  if (!channelId) return null;
+  const channel = await safeGetChannel(channelId);
   if (!channel) return null;
 
   const payload = buildPredictionCard(prediction, profile?.upshot_url);
@@ -107,14 +136,15 @@ async function postPredictionToFeed(prediction) {
   }
 }
 
-async function postToAdminReview(prediction) {
+async function postToAdminReview(prediction, guildId) {
   const profile = getUpshotProfile(prediction.author_id);
-  const channel = await safeGetChannel(process.env.ADMIN_REVIEW_CHANNEL_ID);
+  const channelId = getAdminChannelId(guildId);
+  if (!channelId) return null;
+  const channel = await safeGetChannel(channelId);
   if (!channel) return null;
 
   const payload = buildAdminCard(prediction, profile?.upshot_url);
 
-  // Attach image files from disk for the admin MediaGallery
   const files = prediction.images?.length > 0
     ? getAttachmentBuilders(prediction.id, prediction.images)
     : [];
@@ -129,7 +159,7 @@ async function postToAdminReview(prediction) {
   }
 }
 
-async function syncPredictionEmbeds(predictionId) {
+async function syncPredictionEmbeds(predictionId, guildId) {
   const prediction = getPrediction(predictionId);
   if (!prediction) return;
 
@@ -137,15 +167,18 @@ async function syncPredictionEmbeds(predictionId) {
 
   // Update public embed (no files — text only)
   if (prediction.embed_message_id) {
-    const channel = await safeGetChannel(process.env.PREDICTIONS_CHANNEL_ID);
-    if (channel) {
-      const msg = await safeGetMessage(channel, prediction.embed_message_id);
-      if (msg) {
-        try {
-          const payload = buildPredictionCard(prediction, profile?.upshot_url);
-          await msg.edit(payload);
-        } catch (err) {
-          console.error(`Failed to edit public embed #${predictionId}:`, err.message);
+    const channelId = getPredictionsChannelId(guildId);
+    if (channelId) {
+      const channel = await safeGetChannel(channelId);
+      if (channel) {
+        const msg = await safeGetMessage(channel, prediction.embed_message_id);
+        if (msg) {
+          try {
+            const payload = buildPredictionCard(prediction, profile?.upshot_url);
+            await msg.edit(payload);
+          } catch (err) {
+            console.error(`Failed to edit public embed #${predictionId}:`, err.message);
+          }
         }
       }
     }
@@ -153,18 +186,21 @@ async function syncPredictionEmbeds(predictionId) {
 
   // Update admin embed (re-attach images from disk every time)
   if (prediction.admin_message_id) {
-    const channel = await safeGetChannel(process.env.ADMIN_REVIEW_CHANNEL_ID);
-    if (channel) {
-      const msg = await safeGetMessage(channel, prediction.admin_message_id);
-      if (msg) {
-        try {
-          const payload = buildAdminCard(prediction, profile?.upshot_url);
-          const files = prediction.images?.length > 0
-            ? getAttachmentBuilders(prediction.id, prediction.images)
-            : [];
-          await msg.edit({ ...payload, files });
-        } catch (err) {
-          console.error(`Failed to edit admin embed #${predictionId}:`, err.message);
+    const channelId = getAdminChannelId(guildId);
+    if (channelId) {
+      const channel = await safeGetChannel(channelId);
+      if (channel) {
+        const msg = await safeGetMessage(channel, prediction.admin_message_id);
+        if (msg) {
+          try {
+            const payload = buildAdminCard(prediction, profile?.upshot_url);
+            const files = prediction.images?.length > 0
+              ? getAttachmentBuilders(prediction.id, prediction.images)
+              : [];
+            await msg.edit({ ...payload, files });
+          } catch (err) {
+            console.error(`Failed to edit admin embed #${predictionId}:`, err.message);
+          }
         }
       }
     }
@@ -174,7 +210,9 @@ async function syncPredictionEmbeds(predictionId) {
 async function refreshLeaderboard(guildId) {
   const entries = getLeaderboard(currentMonthKey());
   const payload = buildLeaderboard(entries, currentMonthLabel());
-  const channel = await safeGetChannel(process.env.LEADERBOARD_CHANNEL_ID);
+  const channelId = getLeaderboardChannelId(guildId);
+  if (!channelId) return null;
+  const channel = await safeGetChannel(channelId);
   if (!channel) return null;
 
   const existingId = getLeaderboardMessageId(guildId);
@@ -212,10 +250,11 @@ async function handlePredict(interaction) {
     });
   }
 
+  const maxDaily = getMaxDaily(interaction.guildId);
   const todayCount = countUserDailyPredictions(interaction.user.id);
-  if (todayCount >= MAX_DAILY) {
+  if (todayCount >= maxDaily) {
     return interaction.reply({
-      content: `❌ You've reached the daily limit of **${MAX_DAILY}** predictions. Try again tomorrow.`,
+      content: `❌ You've reached the daily limit of **${maxDaily}** predictions. Try again tomorrow.`,
       ephemeral: true,
     });
   }
@@ -308,6 +347,57 @@ async function handleLeaderboardCommand(interaction) {
   await interaction.editReply({ content: '✅ Leaderboard refreshed.' });
 }
 
+async function handleSetup(interaction) {
+  // Requires Administrator permission (enforced by Discord via defaultMemberPermissions)
+  if (!interaction.memberPermissions.has('Administrator')) {
+    return interaction.reply({ content: '❌ Server admins only.', ephemeral: true });
+  }
+
+  const sub = interaction.options.getSubcommand();
+  const guildId = interaction.guildId;
+
+  switch (sub) {
+    case 'predictions-channel': {
+      const channel = interaction.options.getChannel('channel', true);
+      setConfig(guildId, 'predictions_channel', channel.id);
+      return interaction.reply({ content: `✅ Predictions channel set to <#${channel.id}>`, ephemeral: true });
+    }
+    case 'admin-channel': {
+      const channel = interaction.options.getChannel('channel', true);
+      setConfig(guildId, 'admin_channel', channel.id);
+      return interaction.reply({ content: `✅ Admin review channel set to <#${channel.id}>`, ephemeral: true });
+    }
+    case 'leaderboard-channel': {
+      const channel = interaction.options.getChannel('channel', true);
+      setConfig(guildId, 'leaderboard_channel', channel.id);
+      return interaction.reply({ content: `✅ Leaderboard channel set to <#${channel.id}>`, ephemeral: true });
+    }
+    case 'admin-role': {
+      const role = interaction.options.getRole('role', true);
+      setConfig(guildId, 'admin_role', role.id);
+      return interaction.reply({ content: `✅ Admin role set to <@&${role.id}>`, ephemeral: true });
+    }
+    case 'max-daily': {
+      const limit = interaction.options.getInteger('limit', true);
+      setConfig(guildId, 'max_daily', limit);
+      return interaction.reply({ content: `✅ Max daily predictions set to **${limit}**`, ephemeral: true });
+    }
+    case 'view': {
+      const cfg = getAllConfig(guildId);
+      const lines = [
+        '**Current Configuration**',
+        '',
+        `**Predictions channel:** ${cfg.predictions_channel ? `<#${cfg.predictions_channel}>` : '`not set (using .env)`'}`,
+        `**Admin review channel:** ${cfg.admin_channel ? `<#${cfg.admin_channel}>` : '`not set (using .env)`'}`,
+        `**Leaderboard channel:** ${cfg.leaderboard_channel ? `<#${cfg.leaderboard_channel}>` : '`not set (using .env)`'}`,
+        `**Admin role:** ${cfg.admin_role ? `<@&${cfg.admin_role}>` : '`not set (using .env)`'}`,
+        `**Max daily predictions:** ${cfg.max_daily || '`not set (default: 3)`'}`,
+      ];
+      return interaction.reply({ content: lines.join('\n'), ephemeral: true });
+    }
+  }
+}
+
 // ── Modal submits ───────────────────────────────────────────
 
 async function handlePredictModalSubmit(interaction) {
@@ -360,8 +450,8 @@ async function handlePredictModalSubmit(interaction) {
       content: `✅ Prediction **#${String(prediction.id).padStart(4, '0')}** submitted with tweet proof!\nIt's now in the review queue.`,
       ephemeral: true,
     });
-    await postPredictionToFeed(prediction);
-    await postToAdminReview(prediction);
+    await postPredictionToFeed(prediction, interaction.guildId);
+    await postToAdminReview(prediction, interaction.guildId);
     await refreshLeaderboard(interaction.guildId).catch(() => {});
   } else {
     // Image proof — prompt for upload
@@ -403,8 +493,8 @@ async function finalizePendingUpload(userId) {
   updatePrediction(prediction.id, { status: Status.PendingVerification });
   const updated = getPrediction(prediction.id);
 
-  await postPredictionToFeed(updated);
-  await postToAdminReview(updated);
+  await postPredictionToFeed(updated, pending.guildId);
+  await postToAdminReview(updated, pending.guildId);
   await refreshLeaderboard(pending.guildId).catch(() => {});
 }
 
@@ -428,7 +518,7 @@ async function handleEditModalSubmit(interaction) {
   }
 
   updatePrediction(predictionId, updates);
-  await syncPredictionEmbeds(predictionId);
+  await syncPredictionEmbeds(predictionId, interaction.guildId);
   await interaction.reply({ content: '✅ Prediction updated.', ephemeral: true });
 }
 
@@ -454,7 +544,7 @@ async function handleStarsModalSubmit(interaction) {
     rated_by: interaction.user.id,
   });
 
-  await syncPredictionEmbeds(predictionId);
+  await syncPredictionEmbeds(predictionId, interaction.guildId);
   await refreshLeaderboard(interaction.guildId).catch(() => {});
   await interaction.reply({
     content: `⭐ Rated **#${String(predictionId).padStart(4, '0')}** — ${stars} star${stars > 1 ? 's' : ''} (${pts} pts)`,
@@ -558,7 +648,7 @@ async function handleVerifyOwnership(interaction, predictionId) {
     status: Status.PendingReview,
   });
 
-  await syncPredictionEmbeds(predictionId);
+  await syncPredictionEmbeds(predictionId, interaction.guildId);
   await interaction.reply({
     content: `✅ Ownership verified for **#${String(predictionId).padStart(4, '0')}**. Ready for star rating.`,
     ephemeral: true,
@@ -622,7 +712,7 @@ async function handleMarkOutcome(interaction, predictionId, outcome) {
     resolved_by: interaction.user.id,
   });
 
-  await syncPredictionEmbeds(predictionId);
+  await syncPredictionEmbeds(predictionId, interaction.guildId);
   await refreshLeaderboard(interaction.guildId).catch(() => {});
 
   const emoji = outcome === 'hit' ? '🟢' : '🔴';
@@ -655,19 +745,25 @@ async function handleConfirmDelete(interaction, predictionId) {
 
   // Delete public embed
   if (prediction.embed_message_id) {
-    const channel = await safeGetChannel(process.env.PREDICTIONS_CHANNEL_ID);
-    if (channel) {
-      const msg = await safeGetMessage(channel, prediction.embed_message_id);
-      if (msg) { try { await msg.delete(); } catch { /* ok */ } }
+    const channelId = getPredictionsChannelId(interaction.guildId);
+    if (channelId) {
+      const channel = await safeGetChannel(channelId);
+      if (channel) {
+        const msg = await safeGetMessage(channel, prediction.embed_message_id);
+        if (msg) { try { await msg.delete(); } catch { /* ok */ } }
+      }
     }
   }
 
   // Delete admin embed
   if (prediction.admin_message_id) {
-    const channel = await safeGetChannel(process.env.ADMIN_REVIEW_CHANNEL_ID);
-    if (channel) {
-      const msg = await safeGetMessage(channel, prediction.admin_message_id);
-      if (msg) { try { await msg.delete(); } catch { /* ok */ } }
+    const channelId = getAdminChannelId(interaction.guildId);
+    if (channelId) {
+      const channel = await safeGetChannel(channelId);
+      if (channel) {
+        const msg = await safeGetMessage(channel, prediction.admin_message_id);
+        if (msg) { try { await msg.delete(); } catch { /* ok */ } }
+      }
     }
   }
 
@@ -719,8 +815,8 @@ async function handleMessageForImages(message) {
   const prediction = getPrediction(pending.predictionId);
 
   // Post to feeds
-  await postPredictionToFeed(prediction);
-  await postToAdminReview(prediction);
+  await postPredictionToFeed(prediction, pending.guildId);
+  await postToAdminReview(prediction, pending.guildId);
   await refreshLeaderboard(pending.guildId).catch(() => {});
 
   // Confirm to user
@@ -739,6 +835,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'link-upshot': return await handleLinkUpshot(interaction);
         case 'mystats': return await handleMyStats(interaction);
         case 'leaderboard': return await handleLeaderboardCommand(interaction);
+        case 'setup': return await handleSetup(interaction);
       }
     }
 
@@ -796,23 +893,21 @@ client.once(Events.ClientReady, async () => {
     console.error('   Failed to register commands:', err.message);
   }
 
-  console.log(`   Predictions: ${process.env.PREDICTIONS_CHANNEL_ID}`);
-  console.log(`   Admin review: ${process.env.ADMIN_REVIEW_CHANNEL_ID}`);
-  console.log(`   Leaderboard: ${process.env.LEADERBOARD_CHANNEL_ID}`);
-  console.log(`   Admin role: ${process.env.ADMIN_ROLE_ID}`);
-  console.log(`   Daily limit: ${MAX_DAILY}/user`);
+  console.log(`   Use /setup to configure channels, admin role, and limits`);
 
   // Handle predictions that were awaiting images when the bot last went offline.
   // If they've been waiting > 5 min, post them without images.
   const stale = getAwaitingImagePredictions(IMAGE_UPLOAD_TIMEOUT_MS);
   if (stale.length > 0) {
     console.log(`   Recovering ${stale.length} stale prediction(s) from before restart...`);
+    // Use the first guild as fallback for config resolution
+    const fallbackGuildId = client.guilds.cache.first()?.id;
     for (const pred of stale) {
       updatePrediction(pred.id, { status: Status.PendingVerification });
       const updated = getPrediction(pred.id);
       if (!updated.embed_message_id) {
-        await postPredictionToFeed(updated);
-        await postToAdminReview(updated);
+        await postPredictionToFeed(updated, fallbackGuildId);
+        await postToAdminReview(updated, fallbackGuildId);
       }
     }
   }
