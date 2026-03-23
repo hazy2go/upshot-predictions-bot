@@ -11,6 +11,7 @@ import {
   getLeaderboardMessageId, setLeaderboardMessageId,
   getConfig, setConfig, getAllConfig,
   getCategories, addCategory, removeCategory,
+  resetUser, resetAllUsers,
 } from './database.js';
 
 import {
@@ -327,19 +328,9 @@ async function handlePredict(interaction) {
       imageUrls.push(att.url);
     }
   }
-  const tweetUrl = interaction.options.getString('tweet-url')?.trim() || null;
-
-  if (imageUrls.length === 0 && !tweetUrl) {
-    return interaction.reply({
-      content: '❌ You must provide proof of card ownership.\nAttach card screenshots (`image1`, `image2`, `image3`) or provide a `tweet-url`.',
-      flags: ['Ephemeral'],
-    });
-  }
-
   // Store attachments temporarily — they'll be retrieved when the modal is submitted
   pendingSubmissions.set(interaction.user.id, {
     imageUrls,
-    tweetUrl,
     guildId: interaction.guildId,
   });
 
@@ -386,6 +377,15 @@ async function handlePredict(interaction) {
         .setStyle(TextInputStyle.Short)
         .setMaxLength(10)
         .setRequired(true)
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('tweet_url')
+        .setLabel('Tweet URL (optional — +1 bonus point on hit)')
+        .setPlaceholder('https://x.com/... or https://twitter.com/...')
+        .setStyle(TextInputStyle.Short)
+        .setMaxLength(280)
+        .setRequired(false)
     ),
   );
 
@@ -471,6 +471,25 @@ async function handleSetup(interaction) {
       const updated = removeCategory(guildId, name);
       return interaction.reply({ content: `✅ Category **${name}** removed.\nCurrent: ${updated.length > 0 ? updated.join(', ') : '*(empty — defaults will be used)*'}`, flags: ['Ephemeral'] });
     }
+    case 'reset-user': {
+      const user = interaction.options.getUser('user', true);
+      const monthKey = currentMonthKey();
+      const result = resetUser(user.id, monthKey);
+      await refreshLeaderboard(guildId).catch(() => {});
+      return interaction.reply({
+        content: `✅ Reset <@${user.id}> — deleted **${result.changes}** prediction(s) for ${currentMonthLabel()}.`,
+        flags: ['Ephemeral'],
+      });
+    }
+    case 'reset-all': {
+      const monthKey = currentMonthKey();
+      const result = resetAllUsers(monthKey);
+      await refreshLeaderboard(guildId).catch(() => {});
+      return interaction.reply({
+        content: `✅ Reset ALL users — deleted **${result.changes}** prediction(s) for ${currentMonthLabel()}.`,
+        flags: ['Ephemeral'],
+      });
+    }
     case 'view': {
       const cfg = getAllConfig(guildId);
       const cats = getCategoryList(guildId);
@@ -506,6 +525,7 @@ async function handlePredictModalSubmit(interaction) {
   const category = interaction.fields.getTextInputValue('category').trim();
   const description = interaction.fields.getTextInputValue('description');
   const deadline = interaction.fields.getTextInputValue('deadline');
+  const rawTweetUrl = interaction.fields.getTextInputValue('tweet_url')?.trim() || null;
 
   // Fuzzy match category — tolerates typos
   const categories = getCategoryList(interaction.guildId);
@@ -529,11 +549,23 @@ async function handlePredictModalSubmit(interaction) {
   const [, dd, mm, yyyy] = deadlineMatch;
   const deadlineFormatted = `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
 
+  // Validate tweet URL if provided
+  const tweetUrl = rawTweetUrl && rawTweetUrl.startsWith('https://') && (rawTweetUrl.includes('twitter') || rawTweetUrl.includes('x.com'))
+    ? rawTweetUrl
+    : null;
+
+  if (rawTweetUrl && !tweetUrl) {
+    return interaction.reply({
+      content: '❌ Invalid tweet URL. Must start with `https://` and be from twitter.com or x.com.',
+      flags: ['Ephemeral'],
+    });
+  }
+
   // Defer — downloading images + posting to channels takes time
   await interaction.deferReply({ flags: ['Ephemeral'] });
 
-  const { imageUrls, tweetUrl, guildId } = pending;
-  const proofType = tweetUrl ? 'tweet' : 'images';
+  const { imageUrls, guildId } = pending;
+  const proofType = tweetUrl ? 'tweet' : (imageUrls.length > 0 ? 'images' : 'none');
 
   // Download images to disk immediately (URLs expire)
   let filenames = [];
@@ -560,11 +592,12 @@ async function handlePredictModalSubmit(interaction) {
     await refreshLeaderboard(guildId).catch(() => {});
 
     const imgCount = filenames.length;
+    const proofNote = tweetUrl ? ` and tweet proof` : '';
     await interaction.editReply({
-      content: `✅ Prediction **#${String(prediction.id).padStart(4, '0')}** submitted with ${imgCount} card image${imgCount > 1 ? 's' : ''}! Now in the review queue.`,
+      content: `✅ Prediction **#${String(prediction.id).padStart(4, '0')}** submitted with ${imgCount} card image${imgCount > 1 ? 's' : ''}${proofNote}! Now in the review queue.`,
     });
   } else {
-    // Tweet proof only
+    // No images — tweet proof or no proof
     const prediction = createPrediction({
       authorId: interaction.user.id,
       title,
@@ -581,8 +614,9 @@ async function handlePredictModalSubmit(interaction) {
     await postToAdminReview(prediction, guildId).catch(e => console.error('Admin post failed:', e.message));
     await refreshLeaderboard(guildId).catch(() => {});
 
+    const proofNote = tweetUrl ? ' with tweet proof' : '';
     await interaction.editReply({
-      content: `✅ Prediction **#${String(prediction.id).padStart(4, '0')}** submitted with tweet proof! Now in the review queue.`,
+      content: `✅ Prediction **#${String(prediction.id).padStart(4, '0')}** submitted${proofNote}! Now in the review queue.`,
     });
   }
 }
@@ -662,10 +696,11 @@ async function handleStarsModalSubmit(interaction) {
 
   await interaction.deferReply({ flags: ['Ephemeral'] });
 
-  const pts = starPoints(stars);
+  const hasTweet = !!prediction.tweet_url;
+  const pts = totalPoints(stars, prediction.outcome, hasTweet);
   updatePrediction(predictionId, {
     star_rating: stars,
-    total_points: prediction.outcome === 'hit' ? pts + 10 : pts,
+    total_points: pts,
     status: prediction.outcome ? prediction.status : Status.Rated,
     rated_by: interaction.user.id,
   });
@@ -858,7 +893,8 @@ async function handleMarkOutcome(interaction, predictionId, outcome) {
 
   await interaction.deferReply({ flags: ['Ephemeral'] });
 
-  const pts = totalPoints(prediction.star_rating, outcome);
+  const hasTweet = !!prediction.tweet_url;
+  const pts = totalPoints(prediction.star_rating, outcome, hasTweet);
   const status = outcome === 'hit' ? Status.Hit : Status.Fail;
 
   updatePrediction(predictionId, {

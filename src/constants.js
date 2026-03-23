@@ -42,6 +42,7 @@ export const Points = {
   Star2: 3,
   Star3: 5,
   HitBonus: 10,
+  TweetBonus: 1,
 };
 
 // Prediction statuses
@@ -67,10 +68,11 @@ export function starPoints(stars) {
   return [0, Points.Star1, Points.Star2, Points.Star3][stars] || 0;
 }
 
-export function totalPoints(stars, outcome) {
+export function totalPoints(stars, outcome, hasTweet = false) {
   const base = starPoints(stars);
-  const bonus = outcome === 'hit' ? Points.HitBonus : 0;
-  return base + bonus;
+  const hitBonus = outcome === 'hit' ? Points.HitBonus : 0;
+  const tweetBonus = outcome === 'hit' && hasTweet ? Points.TweetBonus : 0;
+  return base + hitBonus + tweetBonus;
 }
 
 export function statusLabel(status) {

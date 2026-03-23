@@ -1,5 +1,5 @@
 import {
-  ComponentType as CT, ButtonStyle, Colors,
+  ComponentType as CT, ButtonStyle, Colors, Points,
   statusLabel, statusColor, starPoints, Status,
 } from './constants.js';
 
@@ -92,7 +92,9 @@ export function buildPredictionCard(prediction, upshotUrl) {
     let pointsLine = `${stars} ${starPoints(prediction.star_rating)} pts`;
 
     if (prediction.outcome === 'hit') {
-      pointsLine = `${stars} **${prediction.total_points} pts awarded** (+${starPoints(prediction.star_rating)} quality, +10 hit bonus)`;
+      const parts = [`+${starPoints(prediction.star_rating)} quality`, '+10 hit bonus'];
+      if (prediction.tweet_url) parts.push(`+${Points.TweetBonus} tweet bonus`);
+      pointsLine = `${stars} **${prediction.total_points} pts awarded** (${parts.join(', ')})`;
     } else if (prediction.outcome === 'fail') {
       pointsLine = `${stars} **${prediction.total_points} pts awarded** (quality only)`;
     }
@@ -267,7 +269,7 @@ export function buildStatsCard(stats, userId, monthLabel) {
   ].join('\n')));
 
   children.push(separator());
-  children.push(text('-# Points = quality stars (1/3/5) + hit bonus (+10)'));
+  children.push(text('-# Points = quality stars (1/3/5) + hit bonus (+10) + tweet bonus (+1)'));
 
   return {
     components: [container(Colors.Stats, children)],

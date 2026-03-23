@@ -18,11 +18,6 @@ export const commands = [
       opt.setName('image3')
         .setDescription('Card screenshot #3')
         .setRequired(false)
-    )
-    .addStringOption(opt =>
-      opt.setName('tweet-url')
-        .setDescription('Tweet link showing your cards (alternative to images)')
-        .setRequired(false)
     ),
 
   new SlashCommandBuilder()
@@ -117,5 +112,18 @@ export const commands = [
     .addSubcommand(sub =>
       sub.setName('view')
         .setDescription('View current bot configuration')
+    )
+    .addSubcommand(sub =>
+      sub.setName('reset-user')
+        .setDescription('Reset a user\'s predictions for this month')
+        .addUserOption(opt =>
+          opt.setName('user')
+            .setDescription('The user to reset')
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('reset-all')
+        .setDescription('Reset ALL predictions for this month (dangerous!)')
     ),
 ];

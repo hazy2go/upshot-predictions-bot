@@ -250,6 +250,20 @@ export function addCategory(guildId, category) {
   return current;
 }
 
+// ── Reset functions ──────────────────────────────────────────
+
+export function resetUser(authorId, monthKey) {
+  return db.prepare(
+    'DELETE FROM predictions WHERE author_id = ? AND month_key = ?'
+  ).run(authorId, monthKey);
+}
+
+export function resetAllUsers(monthKey) {
+  return db.prepare(
+    'DELETE FROM predictions WHERE month_key = ?'
+  ).run(monthKey);
+}
+
 export function removeCategory(guildId, category) {
   const current = getCategories(guildId) || [];
   const filtered = current.filter(c => c.toLowerCase() !== category.toLowerCase());
