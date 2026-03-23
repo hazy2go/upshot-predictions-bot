@@ -285,7 +285,7 @@ async function handlePredict(interaction) {
     new ActionRowBuilder().addComponents(
       new TextInputBuilder()
         .setCustomId('description')
-        .setLabel('Description — your full reasoning')
+        .setLabel('Description')
         .setPlaceholder('Your thesis, data, charts, evidence...')
         .setStyle(TextInputStyle.Paragraph)
         .setMaxLength(2000)
@@ -303,7 +303,7 @@ async function handlePredict(interaction) {
     new ActionRowBuilder().addComponents(
       new TextInputBuilder()
         .setCustomId('tweet_url')
-        .setLabel('Tweet link (optional — skip if uploading images)')
+        .setLabel('Tweet link (optional)')
         .setPlaceholder('https://x.com/you/status/...')
         .setStyle(TextInputStyle.Short)
         .setRequired(false)
@@ -675,7 +675,7 @@ async function handleAssignStars(interaction, predictionId) {
     new ActionRowBuilder().addComponents(
       new TextInputBuilder()
         .setCustomId('stars')
-        .setLabel('Stars (1, 2, or 3) — 1pt / 3pts / 5pts')
+        .setLabel('Stars (1, 2, or 3)')
         .setPlaceholder('1, 2, or 3')
         .setStyle(TextInputStyle.Short)
         .setMaxLength(1)
