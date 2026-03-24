@@ -75,22 +75,37 @@ export function buildPredictionPanel(title, description, imageUrl) {
 const helpPages = [
   // Page 1 — Getting Started
   [
-    '## How It Works',
+    '## Getting Started',
     '',
     '**1. Link your Upshot profile**',
-    'Click "Make a Prediction" — if it\'s your first time, you\'ll be asked to paste your Upshot profile URL. This links your wallet so the bot can verify your card ownership.',
+    'Click "Make a Prediction" — if it\'s your first time, you\'ll be asked to paste your Upshot profile URL.',
+    '',
+    '**How to get your profile URL:**',
+    'Go to [upshot.cards](https://upshot.cards), click **View Profile** (top-right), then copy the URL from your browser or click **Share Profile**.',
     '',
     '**2. Submit a prediction**',
-    'Fill out the form:',
-    '- **Title** — Your prediction in one line',
-    '- **Description** — Your thesis and reasoning',
-    '- **Card URL/ID** — The Upshot card backing your prediction (required)',
-    '- **Tweet URL** — Optional, earns +1 bonus point if your prediction hits',
+    'Fill out the form with your title, description, card URL, and optionally a tweet link.',
     '',
-    'The bot automatically pulls the card image and deadline from Upshot, and checks if you own the card.',
+    'The bot automatically pulls the card image and deadline from Upshot, and verifies you own the card.',
   ].join('\n'),
 
-  // Page 2 — Points & Scoring
+  // Page 2 — Card URL & Tweet
+  [
+    '## Submitting Your Card',
+    '',
+    '**How to get your card URL:**',
+    'On [upshot.cards](https://upshot.cards), click any card you own to open it, then copy the URL from your browser or click the **Share** button.',
+    '',
+    '**What happens after you submit:**',
+    '- The bot fetches the card image and deadline automatically',
+    '- It checks if your wallet actually owns the card',
+    '- Your prediction is posted to the feed and sent for admin review',
+    '',
+    '**Tweet URL (optional)**',
+    'Link a tweet about your prediction for a **+1 bonus point** if it hits. Must be from twitter.com or x.com.',
+  ].join('\n'),
+
+  // Page 3 — Points & Scoring
   [
     '## Points & Scoring',
     '',
@@ -109,7 +124,7 @@ const helpPages = [
     '-# Example: 3-star prediction with tweet that hits = 5 + 10 + 1 = **16 pts**',
   ].join('\n'),
 
-  // Page 3 — Rules & Tips
+  // Page 4 — Rules & Tips
   [
     '## Rules & Tips',
     '',
