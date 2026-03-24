@@ -379,7 +379,7 @@ async function showPredictModal(interaction) {
     new ActionRowBuilder().addComponents(
       new TextInputBuilder()
         .setCustomId('card_url')
-        .setLabel('Card URL or ID (optional — enables auto-check)')
+        .setLabel('Card URL or ID (optional)')
         .setPlaceholder('https://upshot.cards/card-detail/cm... or cm...')
         .setStyle(TextInputStyle.Short)
         .setMaxLength(280)
