@@ -83,7 +83,7 @@ export function buildPredictionCard(prediction, upshotUrl) {
   // Title + meta
   const profileLink = upshotUrl ? `[Upshot Profile](${upshotUrl})` : '';
   children.push(text(`## ${prediction.title}`));
-  children.push(text(`${prediction.category} · <@${prediction.author_id}> · ${profileLink} · Deadline: ${prediction.deadline}`));
+  children.push(text(`<@${prediction.author_id}> · ${profileLink} · Deadline: ${prediction.deadline}`));
 
   // Description (truncated for feed)
   const desc = prediction.description.length > 280
@@ -103,9 +103,6 @@ export function buildPredictionCard(prediction, upshotUrl) {
   const proofParts = [];
   if (prediction.ownership_verified) {
     proofParts.push('✅ Card ownership verified');
-  }
-  if (prediction.ownership_check === 'verified') {
-    proofParts.push('🤖 API: card ownership confirmed');
   }
   if (prediction.tweet_url) {
     proofParts.push(`📎 [Tweet Proof](${prediction.tweet_url})`);

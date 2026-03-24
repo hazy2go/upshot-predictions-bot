@@ -351,15 +351,6 @@ async function showPredictModal(interaction) {
     ),
     new ActionRowBuilder().addComponents(
       new TextInputBuilder()
-        .setCustomId('category')
-        .setLabel('Category')
-        .setPlaceholder(getCategoryList(interaction.guildId).join(' / '))
-        .setStyle(TextInputStyle.Short)
-        .setMaxLength(30)
-        .setRequired(true)
-    ),
-    new ActionRowBuilder().addComponents(
-      new TextInputBuilder()
         .setCustomId('description')
         .setLabel('Description')
         .setPlaceholder('Your thesis, data, charts, evidence...')
@@ -379,8 +370,17 @@ async function showPredictModal(interaction) {
     new ActionRowBuilder().addComponents(
       new TextInputBuilder()
         .setCustomId('card_url')
-        .setLabel('Card URL or ID (optional)')
+        .setLabel('Card URL or ID')
         .setPlaceholder('https://upshot.cards/card-detail/cm... or cm...')
+        .setStyle(TextInputStyle.Short)
+        .setMaxLength(280)
+        .setRequired(true)
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('tweet_url')
+        .setLabel('Tweet URL (optional, +1 bonus on hit)')
+        .setPlaceholder('https://x.com/... or https://twitter.com/...')
         .setStyle(TextInputStyle.Short)
         .setMaxLength(280)
         .setRequired(false)
@@ -592,17 +592,19 @@ async function handlePredictModalSubmit(interaction) {
   pendingSubmissions.delete(interaction.user.id);
 
   const title = interaction.fields.getTextInputValue('title');
-  const category = interaction.fields.getTextInputValue('category').trim();
   const description = interaction.fields.getTextInputValue('description');
   const deadline = interaction.fields.getTextInputValue('deadline');
   const rawCardUrl = interaction.fields.getTextInputValue('card_url')?.trim() || null;
+  const rawTweetUrl = interaction.fields.getTextInputValue('tweet_url')?.trim() || null;
 
-  // Fuzzy match category — tolerates typos
-  const categories = getCategoryList(interaction.guildId);
-  const matchedCategory = matchCategory(category, categories);
-  if (!matchedCategory) {
+  // Validate tweet URL if provided
+  const tweetUrl = rawTweetUrl && rawTweetUrl.startsWith('https://') && (rawTweetUrl.includes('twitter') || rawTweetUrl.includes('x.com'))
+    ? rawTweetUrl
+    : null;
+
+  if (rawTweetUrl && !tweetUrl) {
     return interaction.reply({
-      content: `❌ Couldn't match "**${category}**" to a category.\nAvailable: ${categories.join(', ')}`,
+      content: '❌ Invalid tweet URL. Must start with `https://` and be from twitter.com or x.com.',
       flags: ['Ephemeral'],
     });
   }
@@ -657,14 +659,16 @@ async function handlePredictModalSubmit(interaction) {
     }
   }
 
+  const proofType = tweetUrl ? 'tweet' : 'none';
+
   const prediction = createPrediction({
     authorId: interaction.user.id,
     title,
-    category: matchedCategory,
+    category: 'General',
     description,
     deadline: deadlineFormatted,
-    proofType: 'none',
-    tweetUrl: null,
+    proofType,
+    tweetUrl,
     images: [],
     status: Status.PendingVerification,
     cardId,
