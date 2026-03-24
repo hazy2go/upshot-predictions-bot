@@ -17,14 +17,19 @@ import {
 import {
   buildPredictionCard, buildAdminCard,
   buildLeaderboard, buildStatsCard, buildDeleteConfirm,
+  buildPredictionPanel,
 } from './components.js';
 
-import { downloadAndSave, getAttachmentBuilders } from './images.js';
 import { commands } from './commands.js';
 
 import {
   Status, DefaultCategories, starPoints, totalPoints,
 } from './constants.js';
+
+import {
+  extractWallet, extractCardId,
+  getCardDetails, checkCardOwnership,
+} from './api.js';
 
 // ── Client ──────────────────────────────────────────────────
 
@@ -158,13 +163,8 @@ async function safeGetMessage(channel, messageId) {
 
 // ── Post / Sync embeds ──────────────────────────────────────
 //
-// Public prediction cards (in #predictions) have NO image attachments.
-// They use text-only proof indicators. This means edits are simple —
-// just update the components, no files to manage.
-//
-// Admin cards (in #admin-review) DO include image attachments via
-// attachment:// protocol. On every edit, we re-attach images from disk
-// so the MediaGallery URLs remain valid regardless of how old the message is.
+// Card images are now Arweave URLs (fetched via Upshot API).
+// No local image files — MediaGallery uses external URLs directly.
 
 async function postPredictionToFeed(prediction, guildId) {
   const profile = getUpshotProfile(prediction.author_id);
@@ -175,13 +175,8 @@ async function postPredictionToFeed(prediction, guildId) {
 
   const payload = buildPredictionCard(prediction, profile?.upshot_url);
 
-  // Attach image files from disk for MediaGallery
-  const files = prediction.images?.length > 0
-    ? getAttachmentBuilders(prediction.id, prediction.images)
-    : [];
-
   try {
-    const msg = await channel.send({ ...payload, files });
+    const msg = await channel.send(payload);
     updatePrediction(prediction.id, { embed_message_id: msg.id });
     return msg;
   } catch (err) {
@@ -199,12 +194,8 @@ async function postToAdminReview(prediction, guildId) {
 
   const payload = buildAdminCard(prediction, profile?.upshot_url);
 
-  const files = prediction.images?.length > 0
-    ? getAttachmentBuilders(prediction.id, prediction.images)
-    : [];
-
   try {
-    const msg = await channel.send({ ...payload, files });
+    const msg = await channel.send(payload);
     updatePrediction(prediction.id, { admin_message_id: msg.id });
     return msg;
   } catch (err) {
@@ -219,7 +210,7 @@ async function syncPredictionEmbeds(predictionId, guildId) {
 
   const profile = getUpshotProfile(prediction.author_id);
 
-  // Update public embed (re-attach images from disk)
+  // Update public embed
   if (prediction.embed_message_id) {
     const channelId = getPredictionsChannelId(guildId);
     if (channelId) {
@@ -229,10 +220,7 @@ async function syncPredictionEmbeds(predictionId, guildId) {
         if (msg) {
           try {
             const payload = buildPredictionCard(prediction, profile?.upshot_url);
-            const files = prediction.images?.length > 0
-              ? getAttachmentBuilders(prediction.id, prediction.images)
-              : [];
-            await msg.edit({ ...payload, files });
+            await msg.edit(payload);
           } catch (err) {
             console.error(`Failed to edit public embed #${predictionId}:`, err.message);
           }
@@ -241,7 +229,7 @@ async function syncPredictionEmbeds(predictionId, guildId) {
     }
   }
 
-  // Update admin embed (re-attach images from disk every time)
+  // Update admin embed
   if (prediction.admin_message_id) {
     const channelId = getAdminChannelId(guildId);
     if (channelId) {
@@ -251,10 +239,7 @@ async function syncPredictionEmbeds(predictionId, guildId) {
         if (msg) {
           try {
             const payload = buildAdminCard(prediction, profile?.upshot_url);
-            const files = prediction.images?.length > 0
-              ? getAttachmentBuilders(prediction.id, prediction.images)
-              : [];
-            await msg.edit({ ...payload, files });
+            await msg.edit(payload);
           } catch (err) {
             console.error(`Failed to edit admin embed #${predictionId}:`, err.message);
           }
@@ -298,11 +283,13 @@ async function refreshLeaderboard(guildId) {
 
 // ── Slash commands ──────────────────────────────────────────
 
-// Temporary storage for attachments between command → modal flow
-// Map<userId, { imageUrls: string[], tweetUrl: string|null, guildId: string }>
+// Temporary storage for guild context between command/button → modal flow
 const pendingSubmissions = new Map();
 
-async function handlePredict(interaction) {
+/**
+ * Show the prediction modal. Works from both /predict command and panel button.
+ */
+async function showPredictModal(interaction) {
   const profile = getUpshotProfile(interaction.user.id);
   if (!profile) {
     return interaction.reply({
@@ -320,21 +307,10 @@ async function handlePredict(interaction) {
     });
   }
 
-  // Grab attachments and tweet URL from command options
-  const imageUrls = [];
-  for (const key of ['image1', 'image2', 'image3']) {
-    const att = interaction.options.getAttachment(key);
-    if (att && att.contentType?.startsWith('image/')) {
-      imageUrls.push(att.url);
-    }
-  }
-  // Store attachments temporarily — they'll be retrieved when the modal is submitted
+  // Store guild context for modal submit
   pendingSubmissions.set(interaction.user.id, {
-    imageUrls,
     guildId: interaction.guildId,
   });
-
-  // Auto-clear after 5 min if modal is never submitted
   setTimeout(() => pendingSubmissions.delete(interaction.user.id), 5 * 60 * 1000);
 
   const modal = new ModalBuilder()
@@ -380,9 +356,9 @@ async function handlePredict(interaction) {
     ),
     new ActionRowBuilder().addComponents(
       new TextInputBuilder()
-        .setCustomId('tweet_url')
-        .setLabel('Tweet URL (optional — +1 bonus point on hit)')
-        .setPlaceholder('https://x.com/... or https://twitter.com/...')
+        .setCustomId('card_url')
+        .setLabel('Card URL or ID (optional — enables auto-check)')
+        .setPlaceholder('https://upshot.cards/card-detail/cm... or cm...')
         .setStyle(TextInputStyle.Short)
         .setMaxLength(280)
         .setRequired(false)
@@ -397,15 +373,21 @@ async function handleLinkUpshot(interaction) {
 
   if (!url.startsWith('https://') || !url.includes('upshot')) {
     return interaction.reply({
-      content: '❌ Invalid Upshot profile URL. Expected format: `https://upshot.xyz/user/yourname`',
+      content: '❌ Invalid Upshot profile URL. Expected format: `https://upshot.cards/profile/0x...`',
       flags: ['Ephemeral'],
     });
   }
 
-  linkUpshot(interaction.user.id, url);
+  // Extract wallet address from profile URL (e.g. https://upshot.cards/profile/0x89A8...)
+  const wallet = extractWallet(url);
+  linkUpshot(interaction.user.id, url, wallet);
+
+  const walletNote = wallet
+    ? `\n🔑 Wallet: \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\` (auto-detected for card ownership checks)`
+    : '\n⚠️ Could not detect wallet address — card ownership checks won\'t work. Use a profile URL with your wallet address.';
 
   await interaction.reply({
-    content: `✅ Upshot profile linked!\n🔗 ${url}\n\nYou can now submit predictions with \`/predict\`.`,
+    content: `✅ Upshot profile linked!\n🔗 ${url}${walletNote}\n\nYou can now submit predictions with \`/predict\`.`,
     flags: ['Ephemeral'],
   });
 }
@@ -414,6 +396,17 @@ async function handleMyStats(interaction) {
   const stats = getUserStats(interaction.user.id, currentMonthKey());
   const payload = buildStatsCard(stats, interaction.user.id, currentMonthLabel());
   await interaction.reply({ ...payload, flags: ['Ephemeral'] });
+}
+
+async function handlePanel(interaction) {
+  const title = interaction.options.getString('title', true);
+  const description = interaction.options.getString('description', true);
+  const imageAtt = interaction.options.getAttachment('image');
+  const imageUrl = imageAtt?.contentType?.startsWith('image/') ? imageAtt.url : null;
+
+  const payload = buildPredictionPanel(title, description, imageUrl);
+  await interaction.channel.send(payload);
+  await interaction.reply({ content: '✅ Panel posted!', flags: ['Ephemeral'] });
 }
 
 async function handleLeaderboardCommand(interaction) {
@@ -511,11 +504,11 @@ async function handleSetup(interaction) {
 // ── Modal submits ───────────────────────────────────────────
 
 async function handlePredictModalSubmit(interaction) {
-  // Retrieve attachments stored during /predict command
+  // Retrieve guild context stored during /predict command or panel button
   const pending = pendingSubmissions.get(interaction.user.id);
   if (!pending) {
     return interaction.reply({
-      content: '❌ Submission expired. Please run `/predict` again.',
+      content: '❌ Submission expired. Please run `/predict` again or click the Predict button.',
       flags: ['Ephemeral'],
     });
   }
@@ -525,7 +518,7 @@ async function handlePredictModalSubmit(interaction) {
   const category = interaction.fields.getTextInputValue('category').trim();
   const description = interaction.fields.getTextInputValue('description');
   const deadline = interaction.fields.getTextInputValue('deadline');
-  const rawTweetUrl = interaction.fields.getTextInputValue('tweet_url')?.trim() || null;
+  const rawCardUrl = interaction.fields.getTextInputValue('card_url')?.trim() || null;
 
   // Fuzzy match category — tolerates typos
   const categories = getCategoryList(interaction.guildId);
@@ -549,76 +542,65 @@ async function handlePredictModalSubmit(interaction) {
   const [, dd, mm, yyyy] = deadlineMatch;
   const deadlineFormatted = `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
 
-  // Validate tweet URL if provided
-  const tweetUrl = rawTweetUrl && rawTweetUrl.startsWith('https://') && (rawTweetUrl.includes('twitter') || rawTweetUrl.includes('x.com'))
-    ? rawTweetUrl
-    : null;
-
-  if (rawTweetUrl && !tweetUrl) {
-    return interaction.reply({
-      content: '❌ Invalid tweet URL. Must start with `https://` and be from twitter.com or x.com.',
-      flags: ['Ephemeral'],
-    });
-  }
-
-  // Defer — downloading images + posting to channels takes time
+  // Defer — API calls + posting to channels takes time
   await interaction.deferReply({ flags: ['Ephemeral'] });
 
-  const { imageUrls, guildId } = pending;
-  const proofType = tweetUrl ? 'tweet' : (imageUrls.length > 0 ? 'images' : 'none');
+  const { guildId } = pending;
 
-  // Download images to disk immediately (URLs expire)
-  let filenames = [];
-  if (imageUrls.length > 0) {
-    // Create a temp prediction ID for download, then update
-    const prediction = createPrediction({
-      authorId: interaction.user.id,
-      title,
-      category: matchedCategory,
-      description,
-      deadline: deadlineFormatted,
-      proofType,
-      tweetUrl,
-      images: [],
-      status: Status.PendingVerification,
-    });
+  // Extract card ID and run API pre-check if card URL/ID provided
+  const cardId = rawCardUrl ? extractCardId(rawCardUrl) : null;
+  let cardImage = null;
+  let ownershipCheck = null;
 
-    filenames = await downloadAndSave(prediction.id, imageUrls);
-    updatePrediction(prediction.id, { images: filenames });
-    const updated = getPrediction(prediction.id);
+  if (cardId) {
+    // Fetch card details (name, Arweave image)
+    const cardDetails = await getCardDetails(cardId);
+    if (cardDetails?.arweaveUrl) {
+      cardImage = cardDetails.arweaveUrl;
+    }
 
-    await postPredictionToFeed(updated, guildId).catch(e => console.error('Feed post failed:', e.message));
-    await postToAdminReview(updated, guildId).catch(e => console.error('Admin post failed:', e.message));
-    await refreshLeaderboard(guildId).catch(() => {});
-
-    const imgCount = filenames.length;
-    const proofNote = tweetUrl ? ` and tweet proof` : '';
-    await interaction.editReply({
-      content: `✅ Prediction **#${String(prediction.id).padStart(4, '0')}** submitted with ${imgCount} card image${imgCount > 1 ? 's' : ''}${proofNote}! Now in the review queue.`,
-    });
-  } else {
-    // No images — tweet proof or no proof
-    const prediction = createPrediction({
-      authorId: interaction.user.id,
-      title,
-      category: matchedCategory,
-      description,
-      deadline: deadlineFormatted,
-      proofType,
-      tweetUrl,
-      images: [],
-      status: Status.PendingVerification,
-    });
-
-    await postPredictionToFeed(prediction, guildId).catch(e => console.error('Feed post failed:', e.message));
-    await postToAdminReview(prediction, guildId).catch(e => console.error('Admin post failed:', e.message));
-    await refreshLeaderboard(guildId).catch(() => {});
-
-    const proofNote = tweetUrl ? ' with tweet proof' : '';
-    await interaction.editReply({
-      content: `✅ Prediction **#${String(prediction.id).padStart(4, '0')}** submitted${proofNote}! Now in the review queue.`,
-    });
+    // Check ownership via API
+    const profile = getUpshotProfile(interaction.user.id);
+    const wallet = profile?.wallet_address;
+    if (wallet) {
+      const result = await checkCardOwnership(wallet, cardId);
+      if (result.error) {
+        ownershipCheck = 'error';
+      } else {
+        ownershipCheck = result.owned ? 'verified' : 'not_found';
+      }
+    }
   }
+
+  const prediction = createPrediction({
+    authorId: interaction.user.id,
+    title,
+    category: matchedCategory,
+    description,
+    deadline: deadlineFormatted,
+    proofType: 'none',
+    tweetUrl: null,
+    images: [],
+    status: Status.PendingVerification,
+    cardId,
+    cardImage,
+    ownershipCheck,
+  });
+
+  await postPredictionToFeed(prediction, guildId).catch(e => console.error('Feed post failed:', e.message));
+  await postToAdminReview(prediction, guildId).catch(e => console.error('Admin post failed:', e.message));
+  await refreshLeaderboard(guildId).catch(() => {});
+
+  let statusNote = '';
+  if (ownershipCheck === 'verified') {
+    statusNote = ' — Card ownership confirmed via API!';
+  } else if (ownershipCheck === 'not_found') {
+    statusNote = ' — ⚠️ Card not found in your wallet (admin will review)';
+  }
+
+  await interaction.editReply({
+    content: `✅ Prediction **#${String(prediction.id).padStart(4, '0')}** submitted! Now in the review queue.${statusNote}`,
+  });
 }
 
 /**
@@ -716,6 +698,11 @@ async function handleStarsModalSubmit(interaction) {
 // ── Button handlers ─────────────────────────────────────────
 
 async function handleButton(interaction) {
+  // Panel predict button has no ID suffix
+  if (interaction.customId === 'panel_predict') {
+    return showPredictModal(interaction);
+  }
+
   const [action, idStr] = interaction.customId.split(':');
   const predictionId = parseInt(idStr, 10);
 
@@ -967,15 +954,14 @@ async function handleConfirmDelete(interaction, predictionId) {
   });
 }
 
-// ── Image collection (message listener) ──────────────────────
-
 // ── Event routing ────────────────────────────────────────────
 
 client.on(Events.InteractionCreate, async interaction => {
   try {
     if (interaction.isChatInputCommand()) {
       switch (interaction.commandName) {
-        case 'predict': return await handlePredict(interaction);
+        case 'predict': return await showPredictModal(interaction);
+        case 'panel': return await handlePanel(interaction);
         case 'link-upshot': return await handleLinkUpshot(interaction);
         case 'mystats': return await handleMyStats(interaction);
         case 'leaderboard': return await handleLeaderboardCommand(interaction);

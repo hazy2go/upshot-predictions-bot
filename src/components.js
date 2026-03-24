@@ -42,10 +42,34 @@ function mediaGallery(filenames) {
   };
 }
 
+// ── Prediction panel (posted by admin to any channel) ─────────
+
+export function buildPredictionPanel(title, description, imageUrl) {
+  const children = [];
+
+  children.push(text(`## ${title}`));
+  children.push(separator());
+  children.push(text(description));
+
+  if (imageUrl) {
+    children.push({
+      type: CT.MediaGallery,
+      items: [{ media: { url: imageUrl } }],
+    });
+  }
+
+  children.push(separator());
+  children.push(actionRow(
+    button('panel_predict', '🔮 Make a Prediction', ButtonStyle.Primary),
+  ));
+
+  return {
+    components: [container(Colors.Leaderboard, children)],
+    flags: 1 << 15,
+  };
+}
+
 // ── Prediction card (public #predictions) ────────────────────
-//
-// Public cards include images via attachment:// protocol.
-// Files are attached from disk when sending/editing (handled by index.js).
 
 export function buildPredictionCard(prediction, upshotUrl) {
   const color = statusColor(prediction.status);
@@ -67,15 +91,21 @@ export function buildPredictionCard(prediction, upshotUrl) {
     : prediction.description;
   children.push(text(desc));
 
-  // Card images via attachment:// protocol
-  if (prediction.images && prediction.images.length > 0) {
-    children.push(mediaGallery(prediction.images));
+  // Card image from Arweave (fetched via API)
+  if (prediction.card_image) {
+    children.push({
+      type: CT.MediaGallery,
+      items: [{ media: { url: prediction.card_image } }],
+    });
   }
 
   // Proof indicators
   const proofParts = [];
   if (prediction.ownership_verified) {
     proofParts.push('✅ Card ownership verified');
+  }
+  if (prediction.ownership_check === 'verified') {
+    proofParts.push('🤖 API: card ownership confirmed');
   }
   if (prediction.tweet_url) {
     proofParts.push(`📎 [Tweet Proof](${prediction.tweet_url})`);
@@ -126,10 +156,6 @@ export function buildPredictionCard(prediction, upshotUrl) {
 }
 
 // ── Admin review card (#admin-review) ────────────────────────
-//
-// Admin cards DO include images via attachment:// protocol.
-// The actual files are attached using AttachmentBuilder when
-// sending/editing the message (handled by index.js).
 
 export function buildAdminCard(prediction, upshotUrl) {
   const children = [];
@@ -149,9 +175,26 @@ export function buildAdminCard(prediction, upshotUrl) {
   // Full description (no truncation for admin)
   children.push(text(prediction.description));
 
-  // Card images — uses attachment:// protocol referencing attached files
-  if (prediction.images && prediction.images.length > 0) {
-    children.push(mediaGallery(prediction.images));
+  // Card image from Arweave
+  if (prediction.card_image) {
+    children.push({
+      type: CT.MediaGallery,
+      items: [{ media: { url: prediction.card_image } }],
+    });
+  }
+
+  // API ownership pre-check result
+  if (prediction.ownership_check === 'verified') {
+    children.push(text('🤖 **API Pre-check:** ✅ User owns this card'));
+  } else if (prediction.ownership_check === 'not_found') {
+    children.push(text('🤖 **API Pre-check:** ❌ Card NOT found in user\'s wallet'));
+  } else if (prediction.ownership_check === 'error') {
+    children.push(text('🤖 **API Pre-check:** ⚠️ Could not verify (API error)'));
+  }
+
+  // Card ID
+  if (prediction.card_id) {
+    children.push(text(`🃏 **Card:** \`${prediction.card_id}\``));
   }
 
   // Tweet proof

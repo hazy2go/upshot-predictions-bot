@@ -3,20 +3,25 @@ import { SlashCommandBuilder, PermissionFlagsBits, ChannelType } from 'discord.j
 export const commands = [
   new SlashCommandBuilder()
     .setName('predict')
-    .setDescription('Submit a prediction — prove your alpha with your Upshot cards')
-    .addAttachmentOption(opt =>
-      opt.setName('image1')
-        .setDescription('Card screenshot #1')
-        .setRequired(false)
+    .setDescription('Submit a prediction — prove your alpha with your Upshot cards'),
+
+  new SlashCommandBuilder()
+    .setName('panel')
+    .setDescription('Post a prediction panel with a Predict button (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption(opt =>
+      opt.setName('title')
+        .setDescription('Panel title')
+        .setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('description')
+        .setDescription('Panel description')
+        .setRequired(true)
     )
     .addAttachmentOption(opt =>
-      opt.setName('image2')
-        .setDescription('Card screenshot #2')
-        .setRequired(false)
-    )
-    .addAttachmentOption(opt =>
-      opt.setName('image3')
-        .setDescription('Card screenshot #3')
+      opt.setName('image')
+        .setDescription('Panel banner image')
         .setRequired(false)
     ),
 
@@ -25,7 +30,7 @@ export const commands = [
     .setDescription('Link your Upshot profile to your Discord account')
     .addStringOption(opt =>
       opt.setName('url')
-        .setDescription('Your Upshot profile URL (e.g. https://upshot.xyz/user/yourname)')
+        .setDescription('Your Upshot profile URL (e.g. https://upshot.cards/profile/0x...)')
         .setRequired(true)
     ),
 

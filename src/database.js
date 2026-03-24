@@ -19,6 +19,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     discord_id       TEXT PRIMARY KEY,
     upshot_url       TEXT NOT NULL,
+    wallet_address   TEXT,
     linked_at        TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -29,7 +30,10 @@ db.exec(`
     category            TEXT NOT NULL,
     description         TEXT NOT NULL,
     deadline            TEXT NOT NULL,
-    proof_type          TEXT NOT NULL DEFAULT 'images',   -- 'images' | 'tweet'
+    card_id             TEXT,                              -- Upshot card ID (cm...)
+    card_image          TEXT,                              -- Arweave image URL
+    ownership_check     TEXT,                              -- API pre-check result: 'verified' | 'not_found' | 'error' | NULL
+    proof_type          TEXT NOT NULL DEFAULT 'none',      -- 'tweet' | 'none'
     tweet_url           TEXT,
     images              TEXT NOT NULL DEFAULT '[]',        -- JSON array of filenames (saved to disk)
     status              TEXT NOT NULL DEFAULT 'pending_verification',
@@ -57,15 +61,21 @@ db.exec(`
   );
 `);
 
+// ── Migrations (add columns to existing tables) ─────────────
+try { db.exec('ALTER TABLE users ADD COLUMN wallet_address TEXT'); } catch { /* already exists */ }
+try { db.exec('ALTER TABLE predictions ADD COLUMN card_id TEXT'); } catch { /* already exists */ }
+try { db.exec('ALTER TABLE predictions ADD COLUMN card_image TEXT'); } catch { /* already exists */ }
+try { db.exec('ALTER TABLE predictions ADD COLUMN ownership_check TEXT'); } catch { /* already exists */ }
+
 // ── User queries ────────────────────────────────────────────
 
-export function linkUpshot(discordId, upshotUrl) {
+export function linkUpshot(discordId, upshotUrl, walletAddress = null) {
   const stmt = db.prepare(`
-    INSERT INTO users (discord_id, upshot_url)
-    VALUES (?, ?)
-    ON CONFLICT(discord_id) DO UPDATE SET upshot_url = excluded.upshot_url, linked_at = datetime('now')
+    INSERT INTO users (discord_id, upshot_url, wallet_address)
+    VALUES (?, ?, ?)
+    ON CONFLICT(discord_id) DO UPDATE SET upshot_url = excluded.upshot_url, wallet_address = COALESCE(excluded.wallet_address, wallet_address), linked_at = datetime('now')
   `);
-  return stmt.run(discordId, upshotUrl);
+  return stmt.run(discordId, upshotUrl, walletAddress);
 }
 
 export function getUpshotProfile(discordId) {
@@ -74,17 +84,17 @@ export function getUpshotProfile(discordId) {
 
 // ── Prediction CRUD ─────────────────────────────────────────
 
-export function createPrediction({ authorId, title, category, description, deadline, proofType, tweetUrl, images, status }) {
+export function createPrediction({ authorId, title, category, description, deadline, proofType, tweetUrl, images, status, cardId, cardImage, ownershipCheck }) {
   const now = new Date();
   const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   const initialStatus = status || 'pending_verification';
 
   const stmt = db.prepare(`
-    INSERT INTO predictions (author_id, title, category, description, deadline, proof_type, tweet_url, images, status, month_key)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO predictions (author_id, title, category, description, deadline, proof_type, tweet_url, images, status, month_key, card_id, card_image, ownership_check)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
-  const result = stmt.run(authorId, title, category, description, deadline, proofType, tweetUrl || null, JSON.stringify(images || []), initialStatus, monthKey);
+  const result = stmt.run(authorId, title, category, description, deadline, proofType, tweetUrl || null, JSON.stringify(images || []), initialStatus, monthKey, cardId || null, cardImage || null, ownershipCheck || null);
   return getPrediction(result.lastInsertRowid);
 }
 
@@ -101,6 +111,7 @@ export function updatePrediction(id, updates) {
     'ownership_verified', 'verified_by', 'verified_at',
     'rated_by', 'resolved_by',
     'embed_message_id', 'admin_message_id', 'proof_type',
+    'card_id', 'card_image', 'ownership_check',
   ];
 
   const entries = Object.entries(updates).filter(([k]) => allowed.includes(k));
