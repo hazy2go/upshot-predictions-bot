@@ -408,7 +408,7 @@ async function handleLinkUpshot(interaction) {
 async function handleMyStats(interaction) {
   const stats = getUserStats(interaction.user.id, currentMonthKey());
   const payload = buildStatsCard(stats, interaction.user.id, currentMonthLabel());
-  await interaction.reply({ ...payload, flags: ['Ephemeral'] });
+  await interaction.reply({ ...payload, flags: (1 << 15) | (1 << 6) });
 }
 
 async function handlePanel(interaction) {
