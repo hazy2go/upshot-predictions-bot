@@ -64,7 +64,9 @@ export async function getCardDetails(cardId) {
       name: card.name,
       rarity: card.rarity,
       image: card.image,
-      arweaveUrl: card.image ? `https://arweave.net/${card.image}` : null,
+      arweaveUrl: card.image
+        ? (card.image.startsWith('http') ? card.image : `https://arweave.net/${card.image}`)
+        : null,
       maxSupply: card.maxSupply,
       pointsValue: card.pointsValue,
       event: card.event || null,
