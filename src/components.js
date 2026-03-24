@@ -61,11 +61,93 @@ export function buildPredictionPanel(title, description, imageUrl) {
   children.push(separator());
   children.push(actionRow(
     button('panel_predict', '🔮 Make a Prediction', ButtonStyle.Primary),
+    button('panel_help:0', '❓ How It Works', ButtonStyle.Secondary),
   ));
 
   return {
     components: [container(Colors.Leaderboard, children)],
     flags: 1 << 15,
+  };
+}
+
+// ── Help pages (ephemeral, paginated) ─────────────────────────
+
+const helpPages = [
+  // Page 1 — Getting Started
+  [
+    '## How It Works',
+    '',
+    '**1. Link your Upshot profile**',
+    'Click "Make a Prediction" — if it\'s your first time, you\'ll be asked to paste your Upshot profile URL. This links your wallet so the bot can verify your card ownership.',
+    '',
+    '**2. Submit a prediction**',
+    'Fill out the form:',
+    '- **Title** — Your prediction in one line',
+    '- **Description** — Your thesis and reasoning',
+    '- **Card URL/ID** — The Upshot card backing your prediction (required)',
+    '- **Tweet URL** — Optional, earns +1 bonus point if your prediction hits',
+    '',
+    'The bot automatically pulls the card image and deadline from Upshot, and checks if you own the card.',
+  ].join('\n'),
+
+  // Page 2 — Points & Scoring
+  [
+    '## Points & Scoring',
+    '',
+    'After you submit, an admin reviews your prediction:',
+    '',
+    '**Quality Rating (1-3 stars)**',
+    '⭐ 1 star = 1 pt',
+    '⭐⭐ 2 stars = 3 pts',
+    '⭐⭐⭐ 3 stars = 5 pts',
+    '',
+    '**Outcome Bonuses**',
+    '🟢 Prediction hits = **+10 pts**',
+    '📎 Tweet linked + hit = **+1 pt**',
+    '🔴 Prediction fails = quality pts only',
+    '',
+    '-# Example: 3-star prediction with tweet that hits = 5 + 10 + 1 = **16 pts**',
+  ].join('\n'),
+
+  // Page 3 — Rules & Tips
+  [
+    '## Rules & Tips',
+    '',
+    '- **1 prediction per day** — make it count',
+    '- **Edit window** — you can edit within 1 hour of submitting',
+    '- **Leaderboard** — resets monthly, top predictors earn rewards',
+    '- **Card required** — every prediction must be backed by an Upshot card you own',
+    '',
+    '**Quick links**',
+    '`/predict` — Submit via command',
+    '`/mystats` — Check your stats and rank',
+    '`/link-upshot` — Update your profile link',
+  ].join('\n'),
+];
+
+export function buildHelpPage(page) {
+  const total = helpPages.length;
+  const idx = Math.max(0, Math.min(page, total - 1));
+  const children = [];
+
+  children.push(text(helpPages[idx]));
+  children.push(separator());
+  children.push(text(`-# Page ${idx + 1} of ${total}`));
+
+  const btns = [];
+  if (idx > 0) {
+    btns.push(button(`panel_help:${idx - 1}`, '← Back', ButtonStyle.Secondary));
+  }
+  if (idx < total - 1) {
+    btns.push(button(`panel_help:${idx + 1}`, 'Next →', ButtonStyle.Secondary));
+  }
+  if (btns.length > 0) {
+    children.push(actionRow(...btns));
+  }
+
+  return {
+    components: [container(Colors.Stats, children)],
+    flags: (1 << 15) | (1 << 6), // Components v2 + Ephemeral
   };
 }
 

@@ -18,7 +18,7 @@ import {
 import {
   buildPredictionCard, buildAdminCard,
   buildLeaderboard, buildStatsCard, buildDeleteConfirm,
-  buildPredictionPanel,
+  buildPredictionPanel, buildHelpPage,
 } from './components.js';
 
 import { commands } from './commands.js';
@@ -772,9 +772,20 @@ async function handleStarsModalSubmit(interaction) {
 // ── Button handlers ─────────────────────────────────────────
 
 async function handleButton(interaction) {
-  // Panel predict button has no ID suffix
+  // Panel predict button
   if (interaction.customId === 'panel_predict') {
     return showPredictModal(interaction);
+  }
+
+  // Help page buttons (panel_help:0, panel_help:1, etc.)
+  if (interaction.customId.startsWith('panel_help:')) {
+    const page = parseInt(interaction.customId.split(':')[1], 10);
+    const payload = buildHelpPage(page);
+    // First help click = reply, page navigation = update existing message
+    if (interaction.message.flags.has(1 << 6)) {
+      return interaction.update(payload);
+    }
+    return interaction.reply(payload);
   }
 
   const [action, idStr] = interaction.customId.split(':');
