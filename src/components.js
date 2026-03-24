@@ -327,6 +327,7 @@ export function buildAdminCard(prediction, upshotUrl) {
   }
 
   if (prediction.star_rating && !prediction.outcome) {
+    buttons.push(button(`check_resolve:${prediction.id}`, '🔍 Check Resolution', ButtonStyle.Primary));
     buttons.push(button(`mark_hit:${prediction.id}`, '🟢 Mark Hit', ButtonStyle.Success));
     buttons.push(button(`mark_fail:${prediction.id}`, '🔴 Mark Fail', ButtonStyle.Danger));
   }

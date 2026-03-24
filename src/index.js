@@ -13,6 +13,7 @@ import {
   getCategories, addCategory, removeCategory,
   resetUser, resetAllUsers, deleteLastPrediction,
   deleteUserProfile, deleteAllProfiles,
+  getUnresolvedRatedPredictions, getResolvedCount, getUnresolvedCount,
 } from './database.js';
 
 import {
@@ -29,7 +30,7 @@ import {
 
 import {
   extractWallet, extractCardId,
-  getCardDetails, checkCardOwnership,
+  getCardDetails, checkCardOwnership, checkCardResolution,
 } from './api.js';
 
 // ── Client ──────────────────────────────────────────────────
@@ -528,6 +529,11 @@ async function handleSetup(interaction) {
     case 'view': {
       const cfg = getAllConfig(guildId);
       const cats = getCategoryList(guildId);
+      const unresolvedCount = getUnresolvedCount();
+      const resolvedCount = getResolvedCount();
+      const nextCheck = nextResolveCheck
+        ? `<t:${Math.floor(nextResolveCheck.getTime() / 1000)}:R>`
+        : '`not scheduled`';
       const lines = [
         '**Current Configuration**',
         '',
@@ -537,6 +543,11 @@ async function handleSetup(interaction) {
         `**Admin role:** ${cfg.admin_role ? `<@&${cfg.admin_role}>` : '`not set (using .env)`'}`,
         `**Max daily predictions:** ${cfg.max_daily || '`not set (default: 3)`'}`,
         `**Categories:** ${cats.join(', ')}`,
+        '',
+        '**Auto-resolve**',
+        `**Next check:** ${nextCheck}`,
+        `**Unresolved (rated):** ${unresolvedCount}`,
+        `**Total resolved:** ${resolvedCount}`,
       ];
       return interaction.reply({ content: lines.join('\n'), flags: ['Ephemeral'] });
     }
@@ -802,6 +813,8 @@ async function handleButton(interaction) {
       return handleVerifyOwnership(interaction, predictionId);
     case 'assign_stars':
       return handleAssignStars(interaction, predictionId);
+    case 'check_resolve':
+      return handleCheckResolve(interaction, predictionId);
     case 'mark_hit':
       return handleMarkOutcome(interaction, predictionId, 'hit');
     case 'mark_fail':
@@ -949,6 +962,50 @@ async function handleAssignStars(interaction, predictionId) {
   await interaction.showModal(modal);
 }
 
+async function handleCheckResolve(interaction, predictionId) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+
+  const prediction = getPrediction(predictionId);
+  if (!prediction) return interaction.reply({ content: '❌ Not found.', flags: ['Ephemeral'] });
+  if (!prediction.card_id) return interaction.reply({ content: '❌ No card ID on this prediction.', flags: ['Ephemeral'] });
+  if (prediction.outcome) return interaction.reply({ content: `❌ Already resolved as **${prediction.outcome}**.`, flags: ['Ephemeral'] });
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  const result = await checkCardResolution(prediction.card_id);
+
+  if (result.error) {
+    return interaction.editReply({ content: `⚠️ API error: ${result.error}` });
+  }
+
+  if (!result.resolved) {
+    return interaction.editReply({ content: '⏳ Card event is still **active** — not resolved yet.' });
+  }
+
+  // Auto-resolve it
+  const outcome = result.won ? 'hit' : 'fail';
+  const hasTweet = !!prediction.tweet_url;
+  const pts = totalPoints(prediction.star_rating, outcome, hasTweet);
+  const status = outcome === 'hit' ? Status.Hit : Status.Fail;
+
+  updatePrediction(predictionId, {
+    outcome,
+    total_points: pts,
+    status,
+    resolved_by: 'auto',
+  });
+
+  await syncPredictionEmbeds(predictionId, interaction.guildId);
+  await refreshLeaderboard(interaction.guildId).catch(() => {});
+
+  const emoji = outcome === 'hit' ? '🟢' : '🔴';
+  await interaction.editReply({
+    content: `${emoji} **#${String(predictionId).padStart(4, '0')}** resolved via API — **${outcome}** (${pts} pts)`,
+  });
+}
+
 async function handleMarkOutcome(interaction, predictionId, outcome) {
   if (!isAdmin(interaction.member)) {
     return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
@@ -1041,6 +1098,114 @@ async function handleConfirmDelete(interaction, predictionId) {
   });
 }
 
+// ── Admin notifications ──────────────────────────────────────
+
+async function notifyAdmin(guildId, message) {
+  const channelId = getAdminChannelId(guildId);
+  if (!channelId) return;
+  const channel = await safeGetChannel(channelId);
+  if (!channel) return;
+  try {
+    await channel.send({ content: message });
+  } catch { /* can't send — channel may be inaccessible */ }
+}
+
+// ── Auto-resolve engine ──────────────────────────────────────
+
+const RESOLVE_INTERVAL = 12 * 60 * 60 * 1000; // 12 hours
+let nextResolveCheck = null;
+let resolveTimer = null;
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function runAutoResolve() {
+  const guildId = process.env.GUILD_ID;
+  if (!guildId) {
+    console.error('Auto-resolve: GUILD_ID not set, skipping');
+    return;
+  }
+
+  console.log('Auto-resolve: Starting check...');
+  const predictions = getUnresolvedRatedPredictions();
+
+  if (predictions.length === 0) {
+    console.log('Auto-resolve: No unresolved rated predictions');
+    return;
+  }
+
+  console.log(`Auto-resolve: Checking ${predictions.length} prediction(s)...`);
+  let resolved = 0;
+  let errors = 0;
+
+  for (const prediction of predictions) {
+    try {
+      const result = await checkCardResolution(prediction.card_id);
+
+      if (result.error) {
+        errors++;
+        console.error(`Auto-resolve: Error checking #${prediction.id}:`, result.error);
+        continue;
+      }
+
+      if (!result.resolved) continue; // still active, skip
+
+      const outcome = result.won ? 'hit' : 'fail';
+      const hasTweet = !!prediction.tweet_url;
+      const pts = totalPoints(prediction.star_rating, outcome, hasTweet);
+      const status = outcome === 'hit' ? Status.Hit : Status.Fail;
+
+      updatePrediction(prediction.id, {
+        outcome,
+        total_points: pts,
+        status,
+        resolved_by: 'auto',
+      });
+
+      await syncPredictionEmbeds(prediction.id, guildId);
+      resolved++;
+
+      const emoji = outcome === 'hit' ? '🟢' : '🔴';
+      const id = String(prediction.id).padStart(4, '0');
+      await notifyAdmin(guildId,
+        `${emoji} **Auto-resolved #${id}** — **${outcome}** (${pts} pts) · <@${prediction.author_id}>`
+      );
+    } catch (err) {
+      errors++;
+      console.error(`Auto-resolve: Unexpected error on #${prediction.id}:`, err.message);
+    }
+
+    // 3 second delay between checks to be nice to the API
+    await sleep(3000);
+  }
+
+  if (resolved > 0) {
+    await refreshLeaderboard(guildId).catch(() => {});
+  }
+
+  const summary = `🤖 **Auto-resolve complete** — ${resolved} resolved, ${errors} error(s), ${predictions.length - resolved - errors} still active`;
+  console.log(`Auto-resolve: ${resolved} resolved, ${errors} errors`);
+  await notifyAdmin(guildId, summary);
+}
+
+async function safeRunAutoResolve() {
+  try {
+    await runAutoResolve();
+  } catch (err) {
+    console.error('Auto-resolve: Fatal error:', err);
+    const guildId = process.env.GUILD_ID;
+    if (guildId) {
+      await notifyAdmin(guildId, `❌ **Auto-resolve crashed:** ${err.message}`).catch(() => {});
+    }
+  }
+  scheduleNextResolve();
+}
+
+function scheduleNextResolve() {
+  nextResolveCheck = new Date(Date.now() + RESOLVE_INTERVAL);
+  resolveTimer = setTimeout(safeRunAutoResolve, RESOLVE_INTERVAL);
+  console.log(`Auto-resolve: Next check at ${nextResolveCheck.toISOString()}`);
+}
+
 // ── Event routing ────────────────────────────────────────────
 
 client.on(Events.InteractionCreate, async interaction => {
@@ -1084,6 +1249,12 @@ client.on(Events.InteractionCreate, async interaction => {
         await interaction.reply(reply);
       }
     } catch { /* can't reply — interaction may have timed out */ }
+
+    // Notify admin channel of errors
+    if (interaction.guildId) {
+      const cmd = interaction.commandName || interaction.customId || 'unknown';
+      notifyAdmin(interaction.guildId, `⚠️ **Interaction error** (\`${cmd}\`): ${error.message}`).catch(() => {});
+    }
   }
 });
 
@@ -1113,6 +1284,20 @@ client.once(Events.ClientReady, async () => {
 
   console.log(`   Use /setup to configure channels, admin role, and limits`);
 
+  // Start auto-resolve timer (first run after 1 minute to let bot settle)
+  setTimeout(safeRunAutoResolve, 60_000);
+  nextResolveCheck = new Date(Date.now() + 60_000);
+  console.log(`   Auto-resolve: first check in 1 minute, then every 12h`);
+});
+
+// ── Global error handling → admin channel ────────────────────
+
+process.on('unhandledRejection', async (err) => {
+  console.error('Unhandled rejection:', err);
+  const guildId = process.env.GUILD_ID;
+  if (guildId) {
+    await notifyAdmin(guildId, `❌ **Unhandled error:** ${err?.message || err}`).catch(() => {});
+  }
 });
 
 client.login(process.env.DISCORD_TOKEN);

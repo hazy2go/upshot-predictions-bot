@@ -71,6 +71,10 @@ export async function getCardDetails(cardId) {
       pointsValue: card.pointsValue,
       event: card.event || null,
       eventDate: card.event?.eventDate || null,
+      outcomeId: card.outcomeId || null,
+      eventStatus: card.event?.status || null,
+      winningOutcomeId: card.event?.winningOutcomeId || null,
+      resolvedAt: card.event?.resolvedAt || null,
     };
   } catch (err) {
     console.error(`Upshot API: getCardDetails(${cardId}) failed:`, err.message);
@@ -165,6 +169,30 @@ async function checkCardInContests(walletAddress, cardId) {
   } catch (err) {
     console.error(`Upshot API: checkCardInContests failed:`, err.message);
     return false;
+  }
+}
+
+/**
+ * Check if a card's event has been resolved and whether the card won.
+ * Returns { resolved: boolean, won: boolean | null, error?: string }
+ *   - resolved=false: event still active
+ *   - resolved=true, won=true: card outcome matches winning outcome (hit)
+ *   - resolved=true, won=false: card lost (fail)
+ */
+export async function checkCardResolution(cardId) {
+  try {
+    const card = await getCardDetails(cardId);
+    if (!card) return { resolved: false, won: null, error: 'card_not_found' };
+
+    if (card.eventStatus !== 'RESOLVED') {
+      return { resolved: false, won: null };
+    }
+
+    const won = card.outcomeId === card.winningOutcomeId;
+    return { resolved: true, won };
+  } catch (err) {
+    console.error(`Upshot API: checkCardResolution(${cardId}) failed:`, err.message);
+    return { resolved: false, won: null, error: err.message };
   }
 }
 

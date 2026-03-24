@@ -192,6 +192,25 @@ export function getPendingPredictions() {
   return rows.map(r => ({ ...r, images: JSON.parse(r.images) }));
 }
 
+export function getUnresolvedRatedPredictions() {
+  const rows = db.prepare(
+    "SELECT * FROM predictions WHERE status = 'rated' AND outcome IS NULL AND card_id IS NOT NULL ORDER BY created_at ASC"
+  ).all();
+  return rows.map(r => ({ ...r, images: JSON.parse(r.images) }));
+}
+
+export function getResolvedCount() {
+  return db.prepare(
+    "SELECT COUNT(*) as count FROM predictions WHERE outcome IS NOT NULL"
+  ).get().count;
+}
+
+export function getUnresolvedCount() {
+  return db.prepare(
+    "SELECT COUNT(*) as count FROM predictions WHERE status = 'rated' AND outcome IS NULL"
+  ).get().count;
+}
+
 export function getLeaderboardMessageId(guildId) {
   const row = db.prepare("SELECT value FROM bot_state WHERE key = ?").get(`leaderboard_msg_${guildId}`);
   return row?.value;
