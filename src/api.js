@@ -68,6 +68,7 @@ export async function getCardDetails(cardId) {
       maxSupply: card.maxSupply,
       pointsValue: card.pointsValue,
       event: card.event || null,
+      eventDate: card.event?.eventDate || null,
     };
   } catch (err) {
     console.error(`Upshot API: getCardDetails(${cardId}) failed:`, err.message);

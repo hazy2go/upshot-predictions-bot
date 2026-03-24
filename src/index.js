@@ -360,15 +360,6 @@ async function showPredictModal(interaction) {
     ),
     new ActionRowBuilder().addComponents(
       new TextInputBuilder()
-        .setCustomId('deadline')
-        .setLabel('Deadline (DD/MM/YYYY)')
-        .setPlaceholder('01/06/2026')
-        .setStyle(TextInputStyle.Short)
-        .setMaxLength(10)
-        .setRequired(true)
-    ),
-    new ActionRowBuilder().addComponents(
-      new TextInputBuilder()
         .setCustomId('card_url')
         .setLabel('Card URL or ID')
         .setPlaceholder('https://upshot.cards/card-detail/cm... or cm...')
@@ -593,7 +584,6 @@ async function handlePredictModalSubmit(interaction) {
 
   const title = interaction.fields.getTextInputValue('title');
   const description = interaction.fields.getTextInputValue('description');
-  const deadline = interaction.fields.getTextInputValue('deadline');
   const rawCardUrl = interaction.fields.getTextInputValue('card_url')?.trim() || null;
   const rawTweetUrl = interaction.fields.getTextInputValue('tweet_url')?.trim() || null;
 
@@ -609,34 +599,28 @@ async function handlePredictModalSubmit(interaction) {
     });
   }
 
-  // Validate deadline format
-  const deadlineMatch = deadline.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/);
-  if (!deadlineMatch) {
-    return interaction.reply({
-      content: '❌ Invalid deadline format. Use DD/MM/YYYY.',
-      flags: ['Ephemeral'],
-    });
-  }
-
-  const [, dd, mm, yyyy] = deadlineMatch;
-  const deadlineFormatted = `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
-
   // Defer — API calls + posting to channels takes time
   await interaction.deferReply({ flags: ['Ephemeral'] });
 
   const { guildId } = pending;
 
-  // Extract card ID and run API pre-check if card URL/ID provided
+  // Extract card ID and fetch card details + ownership check
   // API failures are non-blocking — prediction still submits without card data
   const cardId = rawCardUrl ? extractCardId(rawCardUrl) : null;
   let cardImage = null;
   let ownershipCheck = null;
+  let deadlineFormatted = null;
 
   if (cardId) {
     try {
       const cardDetails = await getCardDetails(cardId);
       if (cardDetails?.arweaveUrl) {
         cardImage = cardDetails.arweaveUrl;
+      }
+      // Auto-fill deadline from card's event date
+      if (cardDetails?.eventDate) {
+        const d = new Date(cardDetails.eventDate);
+        deadlineFormatted = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
       }
     } catch (err) {
       console.error(`API pre-check: getCardDetails failed for ${cardId}:`, err.message);
@@ -657,6 +641,11 @@ async function handlePredictModalSubmit(interaction) {
       console.error(`API pre-check: checkCardOwnership failed for ${cardId}:`, err.message);
       ownershipCheck = 'error';
     }
+  }
+
+  // Fallback deadline if API didn't return one
+  if (!deadlineFormatted) {
+    deadlineFormatted = 'TBD';
   }
 
   const proofType = tweetUrl ? 'tweet' : 'none';
