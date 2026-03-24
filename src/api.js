@@ -30,10 +30,11 @@ export function extractCardId(input) {
   if (!input) return null;
   const trimmed = input.trim();
 
-  // Full URL — grab last path segment
+  // Full URL — grab last path segment, strip query string
   if (trimmed.startsWith('https://')) {
-    const parts = trimmed.replace(/\/+$/, '').split('/');
-    return parts[parts.length - 1];
+    const url = new URL(trimmed);
+    const segments = url.pathname.replace(/\/+$/, '').split('/');
+    return segments[segments.length - 1];
   }
 
   // Raw card ID (starts with cm, ~25 chars)
