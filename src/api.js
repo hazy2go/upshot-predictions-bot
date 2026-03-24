@@ -80,7 +80,9 @@ export async function getCardDetails(cardId) {
 
 /**
  * Check if a wallet owns a specific card.
- * Returns { owned: boolean, quantity: number, winning: boolean, card: object|null }
+ * First checks wallet balances, then falls back to scanning active contests
+ * (cards entered in contests don't show in balances).
+ * Returns { owned: boolean, quantity: number, winning: boolean, card: object|null, inContest: boolean }
  */
 export async function checkCardOwnership(walletAddress, cardId) {
   try {
@@ -91,23 +93,78 @@ export async function checkCardOwnership(walletAddress, cardId) {
     const json = await res.json();
     const data = json.data;
 
-    if (!data || !data[cardId]) {
-      return { owned: false, quantity: 0, winning: false, card: null };
+    if (data && data[cardId]) {
+      const entry = data[cardId];
+      const claimed = parseInt(entry.claimedQuantity || '0', 10);
+      const unclaimed = parseInt(entry.unclaimedQuantity || '0', 10);
+
+      if ((claimed + unclaimed) > 0) {
+        return {
+          owned: true,
+          quantity: claimed + unclaimed,
+          winning: !!entry.winning,
+          card: entry.card || null,
+          inContest: false,
+        };
+      }
     }
 
-    const entry = data[cardId];
-    const claimed = parseInt(entry.claimedQuantity || '0', 10);
-    const unclaimed = parseInt(entry.unclaimedQuantity || '0', 10);
+    // Card not in wallet — check if it's entered in an active contest
+    const contestResult = await checkCardInContests(walletAddress, cardId);
+    if (contestResult) {
+      return { owned: true, quantity: 1, winning: false, card: null, inContest: true };
+    }
 
-    return {
-      owned: (claimed + unclaimed) > 0,
-      quantity: claimed + unclaimed,
-      winning: !!entry.winning,
-      card: entry.card || null,
-    };
+    return { owned: false, quantity: 0, winning: false, card: null, inContest: false };
   } catch (err) {
     console.error(`Upshot API: checkCardOwnership(${walletAddress}, ${cardId}) failed:`, err.message);
     return { owned: false, quantity: 0, winning: false, card: null, error: err.message };
+  }
+}
+
+/**
+ * Check if a wallet has a card entered in any active/live contest.
+ * Scans standings of all live contests for the wallet+card combo.
+ * Returns true if found, false otherwise.
+ */
+async function checkCardInContests(walletAddress, cardId) {
+  try {
+    const res = await fetch(`${BASE}/contests?status=LIVE`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return false;
+    const json = await res.json();
+    const contests = json.data || json;
+    if (!Array.isArray(contests)) return false;
+
+    const lowerWallet = walletAddress.toLowerCase();
+
+    // Check each live contest's standings
+    for (const contest of contests) {
+      try {
+        const sRes = await fetch(`${BASE}/contests/${contest.id}/standings`, {
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!sRes.ok) continue;
+        const sJson = await sRes.json();
+        const standings = sJson.data?.standings || [];
+
+        for (const entry of standings) {
+          if (entry.user?.walletAddress?.toLowerCase() === lowerWallet) {
+            if (entry.lineup?.cardIds?.includes(cardId)) {
+              return true;
+            }
+          }
+        }
+      } catch {
+        continue; // skip this contest on error
+      }
+    }
+
+    return false;
+  } catch (err) {
+    console.error(`Upshot API: checkCardInContests failed:`, err.message);
+    return false;
   }
 }
 

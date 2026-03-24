@@ -633,6 +633,8 @@ async function handlePredictModalSubmit(interaction) {
         const result = await checkCardOwnership(wallet, cardId);
         if (result.error) {
           ownershipCheck = 'error';
+        } else if (result.owned && result.inContest) {
+          ownershipCheck = 'verified_contest';
         } else {
           ownershipCheck = result.owned ? 'verified' : 'not_found';
         }
@@ -670,7 +672,7 @@ async function handlePredictModalSubmit(interaction) {
   await refreshLeaderboard(guildId).catch(() => {});
 
   let statusNote = '';
-  if (ownershipCheck === 'verified') {
+  if (ownershipCheck === 'verified' || ownershipCheck === 'verified_contest') {
     statusNote = ' — Card ownership confirmed via API!';
   } else if (ownershipCheck === 'not_found') {
     statusNote = ' — ⚠️ Card not found in your wallet (admin will review)';

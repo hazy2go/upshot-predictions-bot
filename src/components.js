@@ -278,7 +278,9 @@ export function buildAdminCard(prediction, upshotUrl) {
   }
 
   // API ownership pre-check result
-  if (prediction.ownership_check === 'verified') {
+  if (prediction.ownership_check === 'verified_contest') {
+    children.push(text('🤖 **API Pre-check:** ✅ Card in user\'s active contest lineup'));
+  } else if (prediction.ownership_check === 'verified') {
     children.push(text('🤖 **API Pre-check:** ✅ User owns this card'));
   } else if (prediction.ownership_check === 'not_found') {
     children.push(text('🤖 **API Pre-check:** ❌ Card NOT found in user\'s wallet'));
