@@ -261,7 +261,7 @@ export function addCategory(guildId, category) {
   return current;
 }
 
-// ── Reset functions ──────────────────────────────────────────
+// ── Reset / Delete functions ──────────────────────────────────
 
 export function resetUser(authorId, monthKey) {
   return db.prepare(
@@ -273,6 +273,23 @@ export function resetAllUsers(monthKey) {
   return db.prepare(
     'DELETE FROM predictions WHERE month_key = ?'
   ).run(monthKey);
+}
+
+export function deleteLastPrediction(authorId) {
+  const last = db.prepare(
+    'SELECT id FROM predictions WHERE author_id = ? ORDER BY created_at DESC LIMIT 1'
+  ).get(authorId);
+  if (!last) return { changes: 0, id: null };
+  db.prepare('DELETE FROM predictions WHERE id = ?').run(last.id);
+  return { changes: 1, id: last.id };
+}
+
+export function deleteUserProfile(discordId) {
+  return db.prepare('DELETE FROM users WHERE discord_id = ?').run(discordId);
+}
+
+export function deleteAllProfiles() {
+  return db.prepare('DELETE FROM users').run();
 }
 
 export function removeCategory(guildId, category) {

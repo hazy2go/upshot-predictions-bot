@@ -120,7 +120,7 @@ export const commands = [
     )
     .addSubcommand(sub =>
       sub.setName('reset-user')
-        .setDescription('Reset a user\'s predictions for this month')
+        .setDescription('Delete all predictions for a user this month')
         .addUserOption(opt =>
           opt.setName('user')
             .setDescription('The user to reset')
@@ -129,6 +129,28 @@ export const commands = [
     )
     .addSubcommand(sub =>
       sub.setName('reset-all')
-        .setDescription('Reset ALL predictions for this month (dangerous!)')
+        .setDescription('Delete ALL predictions for this month (dangerous!)')
+    )
+    .addSubcommand(sub =>
+      sub.setName('undo-last')
+        .setDescription('Delete a user\'s most recent prediction')
+        .addUserOption(opt =>
+          opt.setName('user')
+            .setDescription('The user whose last prediction to remove')
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('delete-profile')
+        .setDescription('Delete a user\'s linked Upshot profile')
+        .addUserOption(opt =>
+          opt.setName('user')
+            .setDescription('The user whose profile to delete')
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('delete-all-profiles')
+        .setDescription('Delete ALL linked Upshot profiles (dangerous!)')
     ),
 ];

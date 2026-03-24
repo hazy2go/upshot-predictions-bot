@@ -11,7 +11,8 @@ import {
   getLeaderboardMessageId, setLeaderboardMessageId,
   getConfig, setConfig, getAllConfig,
   getCategories, addCategory, removeCategory,
-  resetUser, resetAllUsers,
+  resetUser, resetAllUsers, deleteLastPrediction,
+  deleteUserProfile, deleteAllProfiles,
 } from './database.js';
 
 import {
@@ -288,14 +289,35 @@ const pendingSubmissions = new Map();
 
 /**
  * Show the prediction modal. Works from both /predict command and panel button.
+ * If user hasn't linked their profile yet, show the link-profile modal first.
  */
 async function showPredictModal(interaction) {
   const profile = getUpshotProfile(interaction.user.id);
   if (!profile) {
-    return interaction.reply({
-      content: '❌ You must link your Upshot profile first.\nRun `/link-upshot` with your profile URL.',
-      flags: ['Ephemeral'],
+    // Show profile-link modal first — prediction modal follows after submit
+    pendingSubmissions.set(interaction.user.id, {
+      guildId: interaction.guildId,
+      awaitingLink: true,
     });
+    setTimeout(() => pendingSubmissions.delete(interaction.user.id), 5 * 60 * 1000);
+
+    const modal = new ModalBuilder()
+      .setCustomId('link_profile_modal')
+      .setTitle('Link Your Upshot Profile');
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('profile_url')
+          .setLabel('Your Upshot profile URL')
+          .setPlaceholder('https://upshot.cards/profile/0x89A8f58daF80b0B7...')
+          .setStyle(TextInputStyle.Short)
+          .setMaxLength(200)
+          .setRequired(true)
+      ),
+    );
+
+    return interaction.showModal(modal);
   }
 
   const maxDaily = getMaxDaily(interaction.guildId);
@@ -483,6 +505,35 @@ async function handleSetup(interaction) {
         flags: ['Ephemeral'],
       });
     }
+    case 'undo-last': {
+      const user = interaction.options.getUser('user', true);
+      const result = deleteLastPrediction(user.id);
+      if (result.changes === 0) {
+        return interaction.reply({ content: `❌ <@${user.id}> has no predictions to undo.`, flags: ['Ephemeral'] });
+      }
+      await refreshLeaderboard(guildId).catch(() => {});
+      return interaction.reply({
+        content: `✅ Deleted last prediction **#${String(result.id).padStart(4, '0')}** from <@${user.id}>.`,
+        flags: ['Ephemeral'],
+      });
+    }
+    case 'delete-profile': {
+      const user = interaction.options.getUser('user', true);
+      const result = deleteUserProfile(user.id);
+      return interaction.reply({
+        content: result.changes > 0
+          ? `✅ Deleted <@${user.id}>'s linked Upshot profile.`
+          : `❌ <@${user.id}> has no linked profile.`,
+        flags: ['Ephemeral'],
+      });
+    }
+    case 'delete-all-profiles': {
+      const result = deleteAllProfiles();
+      return interaction.reply({
+        content: `✅ Deleted **${result.changes}** linked profile(s).`,
+        flags: ['Ephemeral'],
+      });
+    }
     case 'view': {
       const cfg = getAllConfig(guildId);
       const cats = getCategoryList(guildId);
@@ -502,6 +553,32 @@ async function handleSetup(interaction) {
 }
 
 // ── Modal submits ───────────────────────────────────────────
+
+async function handleLinkProfileModalSubmit(interaction) {
+  const url = interaction.fields.getTextInputValue('profile_url').trim();
+
+  if (!url.startsWith('https://') || !url.includes('upshot')) {
+    return interaction.reply({
+      content: '❌ Invalid URL. Please use your Upshot profile URL.\nExample: `https://upshot.cards/profile/0x89A8f58daF80b0B7a5419848c114AD272a72F887`',
+      flags: ['Ephemeral'],
+    });
+  }
+
+  const wallet = extractWallet(url);
+  if (!wallet) {
+    return interaction.reply({
+      content: '❌ Could not find a wallet address (0x...) in that URL.\nMake sure you use the full profile URL from upshot.cards, e.g.:\n`https://upshot.cards/profile/0x89A8f58daF80b0B7a5419848c114AD272a72F887`',
+      flags: ['Ephemeral'],
+    });
+  }
+
+  linkUpshot(interaction.user.id, url, wallet);
+
+  await interaction.reply({
+    content: `✅ Profile linked! Wallet: \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\`\n\nNow use \`/predict\` or click the Predict button to submit your first prediction.`,
+    flags: ['Ephemeral'],
+  });
+}
 
 async function handlePredictModalSubmit(interaction) {
   // Retrieve guild context stored during /predict command or panel button
@@ -548,27 +625,35 @@ async function handlePredictModalSubmit(interaction) {
   const { guildId } = pending;
 
   // Extract card ID and run API pre-check if card URL/ID provided
+  // API failures are non-blocking — prediction still submits without card data
   const cardId = rawCardUrl ? extractCardId(rawCardUrl) : null;
   let cardImage = null;
   let ownershipCheck = null;
 
   if (cardId) {
-    // Fetch card details (name, Arweave image)
-    const cardDetails = await getCardDetails(cardId);
-    if (cardDetails?.arweaveUrl) {
-      cardImage = cardDetails.arweaveUrl;
+    try {
+      const cardDetails = await getCardDetails(cardId);
+      if (cardDetails?.arweaveUrl) {
+        cardImage = cardDetails.arweaveUrl;
+      }
+    } catch (err) {
+      console.error(`API pre-check: getCardDetails failed for ${cardId}:`, err.message);
     }
 
-    // Check ownership via API
-    const profile = getUpshotProfile(interaction.user.id);
-    const wallet = profile?.wallet_address;
-    if (wallet) {
-      const result = await checkCardOwnership(wallet, cardId);
-      if (result.error) {
-        ownershipCheck = 'error';
-      } else {
-        ownershipCheck = result.owned ? 'verified' : 'not_found';
+    try {
+      const profile = getUpshotProfile(interaction.user.id);
+      const wallet = profile?.wallet_address;
+      if (wallet) {
+        const result = await checkCardOwnership(wallet, cardId);
+        if (result.error) {
+          ownershipCheck = 'error';
+        } else {
+          ownershipCheck = result.owned ? 'verified' : 'not_found';
+        }
       }
+    } catch (err) {
+      console.error(`API pre-check: checkCardOwnership failed for ${cardId}:`, err.message);
+      ownershipCheck = 'error';
     }
   }
 
@@ -603,10 +688,6 @@ async function handlePredictModalSubmit(interaction) {
   });
 }
 
-/**
- * Called when the image upload window expires.
- * Posts the prediction without images.
- */
 async function handleEditModalSubmit(interaction) {
   const predictionId = parseInt(interaction.customId.split(':')[1], 10);
   const prediction = getPrediction(predictionId);
@@ -970,6 +1051,9 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.isModalSubmit()) {
+      if (interaction.customId === 'link_profile_modal') {
+        return await handleLinkProfileModalSubmit(interaction);
+      }
       if (interaction.customId === 'predict_modal') {
         return await handlePredictModalSubmit(interaction);
       }
