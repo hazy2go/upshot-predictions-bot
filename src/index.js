@@ -809,9 +809,9 @@ async function handleButton(interaction) {
     case 'confirm_delete':
       return handleConfirmDelete(interaction, predictionId);
     case 'cancel_delete':
-      return interaction.update({
+      return interaction.reply({
         content: '❌ Deletion cancelled.',
-        components: [],
+        flags: ['Ephemeral'],
       });
     default:
       return interaction.reply({ content: '❓ Unknown action.', flags: ['Ephemeral'] });
@@ -1003,7 +1003,7 @@ async function handleConfirmDelete(interaction, predictionId) {
 
   const prediction = getPrediction(predictionId);
   if (!prediction) {
-    return interaction.update({ content: '❌ Already deleted.', components: [] });
+    return interaction.reply({ content: '❌ Already deleted.', flags: ['Ephemeral'] });
   }
 
   // Delete public embed
@@ -1033,9 +1033,9 @@ async function handleConfirmDelete(interaction, predictionId) {
   deletePrediction(predictionId);
   await refreshLeaderboard(interaction.guildId).catch(() => {});
 
-  await interaction.update({
+  await interaction.reply({
     content: `🗑 Prediction **#${String(predictionId).padStart(4, '0')}** deleted.`,
-    components: [],
+    flags: ['Ephemeral'],
   });
 }
 
