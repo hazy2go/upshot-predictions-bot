@@ -656,6 +656,17 @@ async function handlePredictModalSubmit(interaction) {
     }
   }
 
+  // Check if card event has already passed or is today
+  if (deadlineFormatted && deadlineFormatted !== 'TBD') {
+    const today = new Date();
+    const todayStr = `${today.getUTCFullYear()}-${String(today.getUTCMonth() + 1).padStart(2, '0')}-${String(today.getUTCDate()).padStart(2, '0')}`;
+    if (deadlineFormatted <= todayStr) {
+      return interaction.editReply({
+        content: `❌ This card's event deadline has already passed (**${deadlineFormatted}**). You can only submit predictions for upcoming events.`,
+      });
+    }
+  }
+
   // Fallback deadline if API didn't return one
   if (!deadlineFormatted) {
     deadlineFormatted = 'TBD';
