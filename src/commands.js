@@ -152,5 +152,18 @@ export const commands = [
     .addSubcommand(sub =>
       sub.setName('delete-all-profiles')
         .setDescription('Delete ALL linked Upshot profiles (dangerous!)')
+    )
+    .addSubcommand(sub =>
+      sub.setName('export-db')
+        .setDescription('Download the full database file')
+    )
+    .addSubcommand(sub =>
+      sub.setName('user-info')
+        .setDescription('View a user\'s profile, stats, and predictions')
+        .addUserOption(opt =>
+          opt.setName('user')
+            .setDescription('The user to look up')
+            .setRequired(true)
+        )
     ),
 ];

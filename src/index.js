@@ -1,5 +1,5 @@
 import {
-  Client, GatewayIntentBits, Events, Routes,
+  Client, GatewayIntentBits, Events, Routes, AttachmentBuilder,
   ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder,
 } from 'discord.js';
 import 'dotenv/config';
@@ -14,6 +14,7 @@ import {
   resetUser, resetAllUsers, deleteLastPrediction,
   deleteUserProfile, deleteAllProfiles,
   getUnresolvedRatedPredictions, getResolvedCount, getUnresolvedCount,
+  getProfileByWallet, getProfileByUrl, getAllUsers, getDbPath,
 } from './database.js';
 
 import {
@@ -382,6 +383,24 @@ async function showPredictModal(interaction) {
   await interaction.showModal(modal);
 }
 
+/**
+ * Check if a profile URL or wallet is already linked to another user.
+ * Returns the existing profile row if duplicate, null if clear.
+ */
+function checkDuplicateProfile(url, wallet, currentUserId) {
+  // Check by URL
+  const byUrl = getProfileByUrl(url);
+  if (byUrl && byUrl.discord_id !== currentUserId) return byUrl;
+
+  // Check by wallet
+  if (wallet) {
+    const byWallet = getProfileByWallet(wallet);
+    if (byWallet && byWallet.discord_id !== currentUserId) return byWallet;
+  }
+
+  return null;
+}
+
 async function handleLinkUpshot(interaction) {
   const url = interaction.options.getString('url', true).trim();
 
@@ -392,8 +411,24 @@ async function handleLinkUpshot(interaction) {
     });
   }
 
-  // Extract wallet address from profile URL (e.g. https://upshot.cards/profile/0x89A8...)
   const wallet = extractWallet(url);
+
+  // Duplicate check
+  const existing = checkDuplicateProfile(url, wallet, interaction.user.id);
+  if (existing) {
+    notifyAdmin(interaction.guildId,
+      `⚠️ **Duplicate profile attempt**\n` +
+      `**User:** <@${interaction.user.id}> tried to link\n` +
+      `**URL:** ${url}\n` +
+      `**Already belongs to:** <@${existing.discord_id}> (linked ${existing.linked_at})`
+    ).catch(() => {});
+
+    return interaction.reply({
+      content: '❌ This Upshot profile is already linked to another user.',
+      flags: ['Ephemeral'],
+    });
+  }
+
   linkUpshot(interaction.user.id, url, wallet);
 
   const walletNote = wallet
@@ -526,6 +561,35 @@ async function handleSetup(interaction) {
         flags: ['Ephemeral'],
       });
     }
+    case 'export-db': {
+      await interaction.deferReply({ flags: ['Ephemeral'] });
+      const dbFile = new AttachmentBuilder(getDbPath(), { name: 'predictions.db' });
+      return interaction.editReply({ content: '📦 Database export:', files: [dbFile] });
+    }
+    case 'user-info': {
+      const user = interaction.options.getUser('user', true);
+      const profile = getUpshotProfile(user.id);
+      if (!profile) {
+        return interaction.reply({ content: `❌ <@${user.id}> has no linked profile.`, flags: ['Ephemeral'] });
+      }
+      const stats = getUserStats(user.id, currentMonthKey());
+      const hitRate = stats.resolved > 0 ? Math.round((stats.hits / stats.resolved) * 100) : 0;
+      const lines = [
+        `**User Info — <@${user.id}>**`,
+        '',
+        `**Upshot URL:** ${profile.upshot_url}`,
+        `**Wallet:** \`${profile.wallet_address || 'not detected'}\``,
+        `**Linked:** ${profile.linked_at}`,
+        '',
+        `**--- ${currentMonthLabel()} Stats ---**`,
+        `**Predictions:** ${stats.prediction_count || 0}`,
+        `**Points:** ${stats.total_points || 0}`,
+        `**Hit Rate:** ${hitRate}% (${stats.hits || 0}/${stats.resolved || 0})`,
+        `**Rank:** ${stats.rank ? `#${stats.rank} of ${stats.total_entries}` : 'Unranked'}`,
+        `**Avg Rating:** ${stats.avg_rating ? stats.avg_rating.toFixed(1) : '—'} ⭐`,
+      ];
+      return interaction.reply({ content: lines.join('\n'), flags: ['Ephemeral'] });
+    }
     case 'view': {
       const cfg = getAllConfig(guildId);
       const cats = getCategoryList(guildId);
@@ -570,6 +634,22 @@ async function handleLinkProfileModalSubmit(interaction) {
   if (!wallet) {
     return interaction.reply({
       content: '❌ Could not find a wallet address (0x...) in that URL.\nMake sure you use the full profile URL from upshot.cards, e.g.:\n`https://upshot.cards/profile/0x89A8f58daF80b0B7a5419848c114AD272a72F887`',
+      flags: ['Ephemeral'],
+    });
+  }
+
+  // Duplicate check
+  const existing = checkDuplicateProfile(url, wallet, interaction.user.id);
+  if (existing) {
+    notifyAdmin(interaction.guildId,
+      `⚠️ **Duplicate profile attempt**\n` +
+      `**User:** <@${interaction.user.id}> tried to link\n` +
+      `**URL:** ${url}\n` +
+      `**Already belongs to:** <@${existing.discord_id}> (linked ${existing.linked_at})`
+    ).catch(() => {});
+
+    return interaction.reply({
+      content: '❌ This Upshot profile is already linked to another user.',
       flags: ['Ephemeral'],
     });
   }

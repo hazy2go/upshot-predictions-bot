@@ -82,6 +82,22 @@ export function getUpshotProfile(discordId) {
   return db.prepare('SELECT * FROM users WHERE discord_id = ?').get(discordId);
 }
 
+export function getProfileByWallet(walletAddress) {
+  return db.prepare('SELECT * FROM users WHERE wallet_address = ?').get(walletAddress);
+}
+
+export function getProfileByUrl(upshotUrl) {
+  return db.prepare('SELECT * FROM users WHERE upshot_url = ?').get(upshotUrl);
+}
+
+export function getAllUsers() {
+  return db.prepare('SELECT * FROM users ORDER BY linked_at DESC').all();
+}
+
+export function getDbPath() {
+  return dbPath;
+}
+
 // ── Prediction CRUD ─────────────────────────────────────────
 
 export function createPrediction({ authorId, title, category, description, deadline, proofType, tweetUrl, images, status, cardId, cardImage, ownershipCheck }) {
