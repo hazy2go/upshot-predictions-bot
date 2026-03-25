@@ -15,6 +15,7 @@ import {
   deleteUserProfile, deleteAllProfiles,
   getUnresolvedRatedPredictions, getResolvedCount, getUnresolvedCount,
   getProfileByWallet, getProfileByUrl, getAllUsers, getDbPath,
+  upsertCommunityVote, getCommunityVoteSummary,
 } from './database.js';
 
 import {
@@ -26,7 +27,7 @@ import {
 import { commands } from './commands.js';
 
 import {
-  Status, DefaultCategories, starPoints, totalPoints,
+  Status, DefaultCategories, starPoints, totalPoints, weightedStarRating,
 } from './constants.js';
 
 import {
@@ -134,6 +135,23 @@ function currentMonthKey() {
 
 function currentMonthLabel() {
   return new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+}
+
+/**
+ * Central point calculation. Uses weighted star rating (admin 70% + community 30%).
+ * Call after any change to stars, outcome, or community votes.
+ * Returns the updated prediction.
+ */
+function recalculatePoints(predictionId) {
+  const prediction = getPrediction(predictionId);
+  if (!prediction || !prediction.star_rating) return prediction;
+
+  const effectiveStars = weightedStarRating(prediction.star_rating, prediction.community_star_avg);
+  const hasTweet = !!prediction.tweet_url;
+  const pts = totalPoints(effectiveStars, prediction.outcome, hasTweet);
+
+  updatePrediction(predictionId, { total_points: pts });
+  return getPrediction(predictionId);
 }
 
 function isAdmin(member) {
@@ -703,8 +721,9 @@ async function handlePredictModalSubmit(interaction) {
   let deadlineFormatted = null;
 
   if (cardId) {
+    let cardDetails = null;
     try {
-      const cardDetails = await getCardDetails(cardId);
+      cardDetails = await getCardDetails(cardId);
       if (cardDetails?.arweaveUrl) {
         cardImage = cardDetails.arweaveUrl;
       }
@@ -715,6 +734,23 @@ async function handlePredictModalSubmit(interaction) {
       }
     } catch (err) {
       console.error(`API pre-check: getCardDetails failed for ${cardId}:`, err.message);
+    }
+
+    // Reject if card not found AND we didn't get any data (API was reachable but card invalid)
+    // If API failed entirely (network error), cardDetails is null but we let it through
+    if (cardDetails === null) {
+      // Check if API is reachable with a simple test
+      try {
+        const test = await fetch('https://api-mainnet.upshotcards.net/api/v1/categories', { signal: AbortSignal.timeout(5000) });
+        if (test.ok) {
+          // API is up but card not found — reject
+          return interaction.editReply({
+            content: '❌ Could not find that card on Upshot. Double-check the card URL or ID and try again.',
+          });
+        }
+      } catch {
+        // API is down — let through, admins will check
+      }
     }
 
     try {
@@ -856,19 +892,17 @@ async function handleStarsModalSubmit(interaction) {
 
   await interaction.deferReply({ flags: ['Ephemeral'] });
 
-  const hasTweet = !!prediction.tweet_url;
-  const pts = totalPoints(stars, prediction.outcome, hasTweet);
   updatePrediction(predictionId, {
     star_rating: stars,
-    total_points: pts,
     status: prediction.outcome ? prediction.status : Status.Rated,
     rated_by: interaction.user.id,
   });
+  const updated = recalculatePoints(predictionId);
 
   await syncPredictionEmbeds(predictionId, interaction.guildId);
   await refreshLeaderboard(interaction.guildId).catch(() => {});
   await interaction.editReply({
-    content: `⭐ Rated **#${String(predictionId).padStart(4, '0')}** — ${stars} star${stars > 1 ? 's' : ''} (${pts} pts)`,
+    content: `⭐ Rated **#${String(predictionId).padStart(4, '0')}** — ${stars} star${stars > 1 ? 's' : ''} (${updated.total_points} pts)`,
     flags: ['Ephemeral'],
   });
 }
@@ -892,8 +926,16 @@ async function handleButton(interaction) {
     return interaction.reply(payload);
   }
 
-  const [action, idStr] = interaction.customId.split(':');
-  const predictionId = parseInt(idStr, 10);
+  const parts = interaction.customId.split(':');
+  const action = parts[0];
+  const predictionId = parseInt(parts[1], 10);
+
+  // Community vote: community_vote:{id}:{stars}
+  if (action === 'community_vote') {
+    const stars = parseInt(parts[2], 10);
+    if (![1, 2, 3].includes(stars)) return interaction.reply({ content: '❌ Invalid vote.', flags: ['Ephemeral'] });
+    return handleCommunityVote(interaction, predictionId, stars);
+  }
 
   switch (action) {
     case 'read_more':
@@ -1077,23 +1119,46 @@ async function handleCheckResolve(interaction, predictionId) {
 
   // Auto-resolve it
   const outcome = result.won ? 'hit' : 'fail';
-  const hasTweet = !!prediction.tweet_url;
-  const pts = totalPoints(prediction.star_rating, outcome, hasTweet);
   const status = outcome === 'hit' ? Status.Hit : Status.Fail;
 
-  updatePrediction(predictionId, {
-    outcome,
-    total_points: pts,
-    status,
-    resolved_by: 'auto',
-  });
+  updatePrediction(predictionId, { outcome, status, resolved_by: 'auto' });
+  const updated = recalculatePoints(predictionId);
 
   await syncPredictionEmbeds(predictionId, interaction.guildId);
   await refreshLeaderboard(interaction.guildId).catch(() => {});
 
   const emoji = outcome === 'hit' ? '🟢' : '🔴';
   await interaction.editReply({
-    content: `${emoji} **#${String(predictionId).padStart(4, '0')}** resolved via API — **${outcome}** (${pts} pts)`,
+    content: `${emoji} **#${String(predictionId).padStart(4, '0')}** resolved via API — **${outcome}** (${updated.total_points} pts)`,
+  });
+}
+
+async function handleCommunityVote(interaction, predictionId, stars) {
+  const prediction = getPrediction(predictionId);
+  if (!prediction) return interaction.reply({ content: '❌ Not found.', flags: ['Ephemeral'] });
+
+  if (prediction.author_id === interaction.user.id) {
+    return interaction.reply({ content: '❌ You can\'t vote on your own prediction.', flags: ['Ephemeral'] });
+  }
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  upsertCommunityVote(predictionId, interaction.user.id, stars);
+
+  // Recalculate points if admin has already rated
+  if (prediction.star_rating) {
+    recalculatePoints(predictionId);
+    await syncPredictionEmbeds(predictionId, interaction.guildId);
+    if (prediction.outcome) {
+      await refreshLeaderboard(interaction.guildId).catch(() => {});
+    }
+  } else {
+    await syncPredictionEmbeds(predictionId, interaction.guildId);
+  }
+
+  const summary = getCommunityVoteSummary(predictionId);
+  await interaction.editReply({
+    content: `${' ⭐'.repeat(stars).trim()} You rated this prediction **${stars} star${stars > 1 ? 's' : ''}**. Community avg: **${summary.avg?.toFixed(1)}** (${summary.count} vote${summary.count > 1 ? 's' : ''})`,
   });
 }
 
@@ -1115,23 +1180,17 @@ async function handleMarkOutcome(interaction, predictionId, outcome) {
 
   await interaction.deferReply({ flags: ['Ephemeral'] });
 
-  const hasTweet = !!prediction.tweet_url;
-  const pts = totalPoints(prediction.star_rating, outcome, hasTweet);
   const status = outcome === 'hit' ? Status.Hit : Status.Fail;
 
-  updatePrediction(predictionId, {
-    outcome,
-    total_points: pts,
-    status,
-    resolved_by: interaction.user.id,
-  });
+  updatePrediction(predictionId, { outcome, status, resolved_by: interaction.user.id });
+  const updated = recalculatePoints(predictionId);
 
   await syncPredictionEmbeds(predictionId, interaction.guildId);
   await refreshLeaderboard(interaction.guildId).catch(() => {});
 
   const emoji = outcome === 'hit' ? '🟢' : '🔴';
   await interaction.editReply({
-    content: `${emoji} **#${String(predictionId).padStart(4, '0')}** marked as **${outcome}** — ${pts} pts total`,
+    content: `${emoji} **#${String(predictionId).padStart(4, '0')}** marked as **${outcome}** — ${updated.total_points} pts total`,
   });
 }
 
@@ -1241,24 +1300,19 @@ async function runAutoResolve() {
       if (!result.resolved) continue; // still active, skip
 
       const outcome = result.won ? 'hit' : 'fail';
-      const hasTweet = !!prediction.tweet_url;
-      const pts = totalPoints(prediction.star_rating, outcome, hasTweet);
       const status = outcome === 'hit' ? Status.Hit : Status.Fail;
 
-      updatePrediction(prediction.id, {
-        outcome,
-        total_points: pts,
-        status,
-        resolved_by: 'auto',
-      });
+      updatePrediction(prediction.id, { outcome, status, resolved_by: 'auto' });
+      recalculatePoints(prediction.id);
 
       await syncPredictionEmbeds(prediction.id, guildId);
       resolved++;
 
+      const updatedPred = getPrediction(prediction.id);
       const emoji = outcome === 'hit' ? '🟢' : '🔴';
       const id = String(prediction.id).padStart(4, '0');
       await notifyAdmin(guildId,
-        `${emoji} **Auto-resolved #${id}** — **${outcome}** (${pts} pts) · <@${prediction.author_id}>`
+        `${emoji} **Auto-resolved #${id}** — **${outcome}** (${updatedPred.total_points} pts) · <@${prediction.author_id}>`
       );
     } catch (err) {
       errors++;

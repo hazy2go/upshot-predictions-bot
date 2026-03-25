@@ -1,6 +1,6 @@
 import {
   ComponentType as CT, ButtonStyle, Colors, Points,
-  statusLabel, statusColor, starPoints, Status,
+  statusLabel, statusColor, starPoints, weightedStarRating, Status,
 } from './constants.js';
 
 // ── Helpers ─────────────────────────────────────────────────
@@ -210,13 +210,27 @@ export function buildPredictionCard(prediction, upshotUrl) {
 
   children.push(separator());
 
+  // Community rating display
+  if (prediction.community_star_avg) {
+    const communityStars = prediction.community_star_avg.toFixed(1);
+    const communityLine = `👥 Community: **${communityStars}** avg`;
+    if (prediction.star_rating) {
+      const effective = weightedStarRating(prediction.star_rating, prediction.community_star_avg);
+      const adminStars = '⭐'.repeat(prediction.star_rating);
+      children.push(text(`${communityLine} · Admin: ${adminStars} · Weighted: **${effective}**/3`));
+    } else {
+      children.push(text(communityLine));
+    }
+  }
+
   // Points display (if rated)
   if (prediction.star_rating) {
-    const stars = '⭐'.repeat(prediction.star_rating) + '☆'.repeat(3 - prediction.star_rating);
-    let pointsLine = `${stars} ${starPoints(prediction.star_rating)} pts`;
+    const effective = weightedStarRating(prediction.star_rating, prediction.community_star_avg);
+    const stars = '⭐'.repeat(effective) + '☆'.repeat(3 - effective);
+    let pointsLine = `${stars} ${starPoints(effective)} pts`;
 
     if (prediction.outcome === 'hit') {
-      const parts = [`+${starPoints(prediction.star_rating)} quality`, '+10 hit bonus'];
+      const parts = [`+${starPoints(effective)} quality`, '+10 hit bonus'];
       if (prediction.tweet_url) parts.push(`+${Points.TweetBonus} tweet bonus`);
       pointsLine = `${stars} **${prediction.total_points} pts awarded** (${parts.join(', ')})`;
     } else if (prediction.outcome === 'fail') {
@@ -242,6 +256,13 @@ export function buildPredictionCard(prediction, upshotUrl) {
   if (btns.length > 0) {
     children.push(actionRow(...btns));
   }
+
+  // Community vote buttons
+  children.push(actionRow(
+    button(`community_vote:${prediction.id}:1`, '1 ⭐', ButtonStyle.Secondary),
+    button(`community_vote:${prediction.id}:2`, '2 ⭐⭐', ButtonStyle.Secondary),
+    button(`community_vote:${prediction.id}:3`, '3 ⭐⭐⭐', ButtonStyle.Secondary),
+  ));
 
   return {
     components: [container(color, children)],
@@ -298,14 +319,20 @@ export function buildAdminCard(prediction, upshotUrl) {
     children.push(text(`📎 [Tweet Proof](${prediction.tweet_url})`));
   }
 
+  // Community rating
+  if (prediction.community_star_avg) {
+    children.push(text(`👥 **Community rating:** ${prediction.community_star_avg.toFixed(1)} avg`));
+  }
+
   children.push(separator());
 
   // Status info
   const label = statusLabel(prediction.status);
   let statusInfo = `**Status:** ${label}`;
   if (prediction.star_rating) {
+    const effective = weightedStarRating(prediction.star_rating, prediction.community_star_avg);
     const stars = '⭐'.repeat(prediction.star_rating) + '☆'.repeat(3 - prediction.star_rating);
-    statusInfo += ` · **Rating:** ${stars} (${starPoints(prediction.star_rating)} pts)`;
+    statusInfo += ` · **Admin:** ${stars} · **Weighted:** ${effective}/3 (${starPoints(effective)} pts)`;
   }
   if (prediction.ownership_verified) {
     statusInfo += ` · ✅ Ownership verified by <@${prediction.verified_by}>`;

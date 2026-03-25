@@ -68,6 +68,12 @@ export function starPoints(stars) {
   return [0, Points.Star1, Points.Star2, Points.Star3][stars] || 0;
 }
 
+export function weightedStarRating(adminStars, communityAvg) {
+  if (!communityAvg || communityAvg === 0) return adminStars;
+  const weighted = adminStars * 0.7 + communityAvg * 0.3;
+  return Math.max(1, Math.min(3, Math.round(weighted)));
+}
+
 export function totalPoints(stars, outcome, hasTweet = false) {
   const base = starPoints(stars);
   const hitBonus = outcome === 'hit' ? Points.HitBonus : 0;

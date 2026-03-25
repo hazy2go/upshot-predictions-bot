@@ -59,6 +59,17 @@ db.exec(`
     key   TEXT PRIMARY KEY,
     value TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS community_votes (
+    prediction_id  INTEGER NOT NULL,
+    voter_id       TEXT NOT NULL,
+    stars          INTEGER NOT NULL CHECK (stars BETWEEN 1 AND 3),
+    voted_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (prediction_id, voter_id),
+    FOREIGN KEY (prediction_id) REFERENCES predictions(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_votes_prediction ON community_votes(prediction_id);
 `);
 
 // ── Migrations (add columns to existing tables) ─────────────
@@ -66,6 +77,7 @@ try { db.exec('ALTER TABLE users ADD COLUMN wallet_address TEXT'); } catch { /* 
 try { db.exec('ALTER TABLE predictions ADD COLUMN card_id TEXT'); } catch { /* already exists */ }
 try { db.exec('ALTER TABLE predictions ADD COLUMN card_image TEXT'); } catch { /* already exists */ }
 try { db.exec('ALTER TABLE predictions ADD COLUMN ownership_check TEXT'); } catch { /* already exists */ }
+try { db.exec('ALTER TABLE predictions ADD COLUMN community_star_avg REAL'); } catch { /* already exists */ }
 
 // ── User queries ────────────────────────────────────────────
 
@@ -127,7 +139,7 @@ export function updatePrediction(id, updates) {
     'ownership_verified', 'verified_by', 'verified_at',
     'rated_by', 'resolved_by',
     'embed_message_id', 'admin_message_id', 'proof_type',
-    'card_id', 'card_image', 'ownership_check',
+    'card_id', 'card_image', 'ownership_check', 'community_star_avg',
   ];
 
   const entries = Object.entries(updates).filter(([k]) => allowed.includes(k));
@@ -294,6 +306,34 @@ export function addCategory(guildId, category) {
     setCategories(guildId, current);
   }
   return current;
+}
+
+// ── Community votes ──────────────────────────────────────────
+
+export function upsertCommunityVote(predictionId, voterId, stars) {
+  const upsert = db.prepare(`
+    INSERT INTO community_votes (prediction_id, voter_id, stars)
+    VALUES (?, ?, ?)
+    ON CONFLICT(prediction_id, voter_id) DO UPDATE SET stars = excluded.stars, voted_at = datetime('now')
+  `);
+  const updateAvg = db.prepare(`
+    UPDATE predictions
+    SET community_star_avg = (SELECT AVG(stars) FROM community_votes WHERE prediction_id = ?)
+    WHERE id = ?
+  `);
+  const txn = db.transaction(() => {
+    upsert.run(predictionId, voterId, stars);
+    updateAvg.run(predictionId, predictionId);
+  });
+  txn();
+  return getPrediction(predictionId);
+}
+
+export function getCommunityVoteSummary(predictionId) {
+  return db.prepare(`
+    SELECT COUNT(*) as count, AVG(stars) as avg
+    FROM community_votes WHERE prediction_id = ?
+  `).get(predictionId);
 }
 
 // ── Reset / Delete functions ──────────────────────────────────
