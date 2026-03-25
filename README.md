@@ -1,19 +1,20 @@
 # Upshot Predictions Bot
 
-A Discord bot that lets community members submit predictions backed by their [Upshot](https://upshot.cards) card holdings. Admins verify, rate, and resolve predictions — and the best predictors climb a monthly leaderboard.
+A Discord bot that lets community members submit predictions backed by their [Upshot](https://upshot.cards) card holdings. Admins verify and rate predictions — outcomes are resolved automatically via the Upshot API. The best predictors climb a monthly leaderboard.
 
 ## How It Works
 
 ### For Users
 
-1. **Link your Upshot profile** — Use `/link-upshot` or just click "Predict" and you'll be prompted automatically. Paste your profile URL (e.g. `https://upshot.cards/profile/0x89A8...`). The bot extracts your wallet address for automatic card ownership checks.
+1. **Link your Upshot profile** — Use `/predict` or click "Make a Prediction" on a panel. If it's your first time, you'll be prompted to paste your profile URL. Go to [upshot.cards](https://upshot.cards), click **View Profile**, then copy the URL or click **Share Profile**.
 
-2. **Submit a prediction** — Use `/predict` or click the "Make a Prediction" button on any prediction panel posted by an admin. Fill out the modal:
-   - **Title** — A short, clear prediction (e.g. "BTC breaks $100K before April 2026")
-   - **Category** — One of the configured categories (typo-tolerant fuzzy matching)
+2. **Submit a prediction** — Fill out the modal:
+   - **Title** — A short, clear prediction
    - **Description** — Your thesis, evidence, reasoning
-   - **Deadline** — When the prediction should be resolved (DD/MM/YYYY)
-   - **Card URL/ID** *(optional)* — Link your Upshot card and the bot will auto-verify ownership via the API and display the card image
+   - **Card URL/ID** *(required)* — The Upshot card backing your prediction. Click any card you own on [upshot.cards](https://upshot.cards), copy the URL or click **Share**
+   - **Tweet URL** *(optional)* — Link a tweet for +1 bonus point if your prediction hits
+
+   The bot automatically pulls the card image, deadline, and verifies you own the card. Cards with past or same-day deadlines are rejected.
 
 3. **Track your stats** — Use `/mystats` to see your points, hit rate, and rank for the current month.
 
@@ -22,17 +23,34 @@ A Discord bot that lets community members submit predictions backed by their [Up
 Predictions flow through a review pipeline in the admin channel:
 
 ```
-Submitted  -->  Verify Ownership  -->  Assign Stars (1-3)  -->  Mark Hit / Fail
+Submitted  →  Verify Ownership  →  Assign Stars (1-3)  →  Auto/Manual Resolve
 ```
 
-Each step has a button on the admin review card. The bot also runs an **automatic API pre-check** when a user submits a card URL — you'll see one of:
-- **API: card ownership confirmed** — the user's wallet holds this card
+Each step has a button on the admin review card. The bot runs an **automatic API pre-check** on submission — you'll see one of:
+- **User owns this card** — wallet holds the card
+- **Card in user's active contest lineup** — card is entered in a contest
 - **Card NOT found in user's wallet** — flag for closer review
 - **Could not verify (API error)** — API was down, check manually
 
+### Auto-Resolution
+
+The bot automatically resolves predictions by checking if a card's event has settled on Upshot:
+
+- **Every 12 hours**, the bot scans all rated (unresolved) predictions
+- Checks each card's event status via the API (`outcomeId` vs `winningOutcomeId`)
+- If resolved: auto-marks as **hit** or **fail**, updates embeds, leaderboard, and notifies in admin channel
+- Admins can also click **Check Resolution** on any rated prediction to trigger an immediate check
+- Manual **Mark Hit / Mark Fail** buttons remain available as fallback
+
 ### Prediction Panels
 
-Admins can post prediction panels to any channel using `/panel`. These are styled Components v2 cards with a title, description, optional banner image, and a "Make a Prediction" button — a clean way to drive engagement without requiring users to remember slash commands.
+Admins can post prediction panels to any channel using `/panel`. These are styled Components v2 cards with a title, description, optional banner image, and two buttons:
+- **Make a Prediction** — opens the submission modal
+- **How It Works** — opens a paginated guide explaining the system
+
+### Error Notifications
+
+All errors, API issues, and crashes are automatically reported to the admin channel. The bot handles failures gracefully — predictions still submit when the API is down.
 
 ## Points & Scoring
 
@@ -46,7 +64,7 @@ Admins can post prediction panels to any channel using `/panel`. These are style
 
 **Total = quality points + hit bonus + tweet bonus**
 
-Points are awarded when an admin assigns stars and resolves the outcome. The leaderboard updates in real-time.
+Example: 3-star prediction with tweet that hits = 5 + 10 + 1 = **16 pts**
 
 ## Prediction Lifecycle
 
@@ -54,9 +72,9 @@ Points are awarded when an admin assigns stars and resolves the outcome. The lea
 |--------|---------|
 | Pending Verification | Submitted, awaiting admin ownership verification |
 | Pending Review | Ownership verified, awaiting star rating |
-| Rated | Stars assigned, awaiting outcome resolution |
-| Hit | Prediction was correct |
-| Fail | Prediction was incorrect |
+| Rated | Stars assigned, awaiting outcome (auto-checked every 12h) |
+| Hit | Prediction was correct (auto or manual) |
+| Fail | Prediction was incorrect (auto or manual) |
 
 Users can edit their predictions (title, description, deadline) within **1 hour** of submission. Edits are logged in the admin channel.
 
@@ -74,7 +92,7 @@ Users can edit their predictions (title, description, deadline) within **1 hour*
 
 | Command | Description |
 |---------|-------------|
-| `/panel` | Post a prediction panel with a Predict button |
+| `/panel` | Post a prediction panel with Predict + Help buttons |
 | `/leaderboard` | Force-refresh the leaderboard |
 | `/setup predictions-channel` | Set the public predictions feed channel |
 | `/setup admin-channel` | Set the private admin review channel |
@@ -88,26 +106,29 @@ Users can edit their predictions (title, description, deadline) within **1 hour*
 | `/setup undo-last @user` | Delete a user's most recent prediction |
 | `/setup delete-profile @user` | Remove a user's linked Upshot profile |
 | `/setup delete-all-profiles` | Remove all linked profiles |
-| `/setup view` | View current bot configuration |
+| `/setup view` | View config, auto-resolve timer, and prediction stats |
 
 ## Limits
 
 - **Daily prediction limit** — Configurable per server (default: 3 per day)
 - **Edit window** — 1 hour from submission
-- **Categories** — Configurable, defaults: DeFi, NFTs, L1-L2, Gaming, Macro
 - **Description** — Up to 2,000 characters
 - **Title** — Up to 100 characters
-- **Deadline format** — DD/MM/YYYY (also accepts DD-MM-YYYY, DD.MM.YYYY)
+- **Deadline** — Auto-filled from card's event date via API
+- **Past events** — Cards with deadlines on or before today are rejected
 
 ## Upshot API Integration
 
 The bot uses the [Upshot public API](https://api-mainnet.upshotcards.net/api/v1) to:
 
-- **Auto-check card ownership** — When a user submits a card URL/ID, the bot queries the API to verify the card exists in their wallet
-- **Fetch card images** — Card images are loaded from Arweave and displayed directly in prediction posts
+- **Auto-check card ownership** — Verifies the card exists in the user's wallet, including cards entered in active contests
+- **Fetch card images** — Card images are loaded from Arweave or assets.upshotcards.net and displayed in prediction posts
+- **Auto-fill deadlines** — Event dates are pulled from the card's event data
+- **Reject past events** — Cards with expired event dates cannot be submitted
+- **Auto-resolve predictions** — Every 12h, checks if card events have settled and auto-marks hit/fail based on `outcomeId` vs `winningOutcomeId`
 - **Extract wallet addresses** — Parsed automatically from Upshot profile URLs during linking
 
-API failures are handled gracefully — if the API is down, predictions still submit normally without the auto-check or card image. Admins can always verify manually.
+API failures are handled gracefully — if the API is down, predictions still submit normally. Admins can always verify and resolve manually. Errors are reported to the admin channel.
 
 ## Setup
 
@@ -150,6 +171,7 @@ On first startup, use `/setup` commands to configure channels and roles:
 /setup admin-channel #admin-review
 /setup leaderboard-channel #leaderboard
 /setup admin-role @Moderator
+/setup max-daily 1
 ```
 
 ### Running with PM2
@@ -163,5 +185,5 @@ pm2 start ecosystem.config.cjs
 - **Runtime** — Node.js (ESM)
 - **Discord** — discord.js v14 with Components v2
 - **Database** — SQLite via better-sqlite3 (WAL mode)
-- **Images** — Sharp (compression), Arweave (card images from Upshot API)
-- **API** — Upshot public API (no auth required for reads)
+- **API** — Upshot public API (card details, ownership, resolution)
+- **Auto-resolve** — 12h interval, checks card event outcomes via API
