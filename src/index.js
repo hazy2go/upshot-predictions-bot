@@ -708,6 +708,18 @@ async function handlePredictModalSubmit(interaction) {
     });
   }
 
+  // Validate card URL/ID format before hitting API
+  if (rawCardUrl) {
+    const isUrl = rawCardUrl.startsWith('https://') && rawCardUrl.includes('upshot');
+    const isRawId = /^cm[a-z0-9]{10,}$/i.test(rawCardUrl);
+    if (!isUrl && !isRawId) {
+      return interaction.reply({
+        content: '❌ Invalid card URL or ID. Use the full card URL from upshot.cards or a card ID starting with `cm`.\nExample: `https://upshot.cards/card-detail/cm...`',
+        flags: ['Ephemeral'],
+      });
+    }
+  }
+
   // Defer — API calls + posting to channels takes time
   await interaction.deferReply({ flags: ['Ephemeral'] });
 
