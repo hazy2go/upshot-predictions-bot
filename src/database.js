@@ -325,7 +325,12 @@ export function upsertCommunityVote(predictionId, voterId, stars) {
     upsert.run(predictionId, voterId, stars);
     updateAvg.run(predictionId, predictionId);
   });
-  txn();
+  try {
+    txn();
+  } catch (err) {
+    console.error('Community vote transaction failed:', err.message);
+    throw err;
+  }
   return getPrediction(predictionId);
 }
 

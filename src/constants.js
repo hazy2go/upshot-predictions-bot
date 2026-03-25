@@ -69,8 +69,10 @@ export function starPoints(stars) {
 }
 
 export function weightedStarRating(adminStars, communityAvg) {
-  if (!communityAvg || communityAvg === 0) return adminStars;
-  const weighted = adminStars * 0.7 + communityAvg * 0.3;
+  const admin = Math.max(1, Math.min(3, adminStars || 1));
+  if (!communityAvg || communityAvg === 0) return admin;
+  const community = Math.max(0, Math.min(3, communityAvg));
+  const weighted = admin * 0.7 + community * 0.3;
   return Math.max(1, Math.min(3, Math.round(weighted)));
 }
 

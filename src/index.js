@@ -287,6 +287,8 @@ async function refreshLeaderboard(guildId) {
         return msg;
       } catch (err) {
         console.error('Failed to edit leaderboard:', err.message);
+        // Clear stale reference so we create a fresh one below
+        setLeaderboardMessageId(guildId, '');
       }
     }
   }
@@ -306,6 +308,19 @@ async function refreshLeaderboard(guildId) {
 
 // Temporary storage for guild context between command/button → modal flow
 const pendingSubmissions = new Map();
+const pendingTimers = new Map();
+
+function setPendingSubmission(userId, data) {
+  // Clear old timer if exists
+  const oldTimer = pendingTimers.get(userId);
+  if (oldTimer) clearTimeout(oldTimer);
+  pendingSubmissions.set(userId, data);
+  const timer = setTimeout(() => {
+    pendingSubmissions.delete(userId);
+    pendingTimers.delete(userId);
+  }, 5 * 60 * 1000);
+  pendingTimers.set(userId, timer);
+}
 
 /**
  * Show the prediction modal. Works from both /predict command and panel button.
@@ -315,11 +330,10 @@ async function showPredictModal(interaction) {
   const profile = getUpshotProfile(interaction.user.id);
   if (!profile) {
     // Show profile-link modal first — prediction modal follows after submit
-    pendingSubmissions.set(interaction.user.id, {
+    setPendingSubmission(interaction.user.id, {
       guildId: interaction.guildId,
       awaitingLink: true,
     });
-    setTimeout(() => pendingSubmissions.delete(interaction.user.id), 5 * 60 * 1000);
 
     const modal = new ModalBuilder()
       .setCustomId('link_profile_modal')
@@ -350,10 +364,9 @@ async function showPredictModal(interaction) {
   }
 
   // Store guild context for modal submit
-  pendingSubmissions.set(interaction.user.id, {
+  setPendingSubmission(interaction.user.id, {
     guildId: interaction.guildId,
   });
-  setTimeout(() => pendingSubmissions.delete(interaction.user.id), 5 * 60 * 1000);
 
   const modal = new ModalBuilder()
     .setCustomId('predict_modal')
@@ -772,10 +785,12 @@ async function handlePredictModalSubmit(interaction) {
         const result = await checkCardOwnership(wallet, cardId);
         if (result.error) {
           ownershipCheck = 'error';
-        } else if (result.owned && result.inContest) {
+        } else if (result.inContest) {
           ownershipCheck = 'verified_contest';
+        } else if (result.owned) {
+          ownershipCheck = 'verified';
         } else {
-          ownershipCheck = result.owned ? 'verified' : 'not_found';
+          ownershipCheck = 'not_found';
         }
       }
     } catch (err) {
@@ -802,20 +817,26 @@ async function handlePredictModalSubmit(interaction) {
 
   const proofType = tweetUrl ? 'tweet' : 'none';
 
-  const prediction = createPrediction({
-    authorId: interaction.user.id,
-    title,
-    category: 'General',
-    description,
-    deadline: deadlineFormatted,
-    proofType,
-    tweetUrl,
-    images: [],
-    status: Status.PendingVerification,
-    cardId,
-    cardImage,
-    ownershipCheck,
-  });
+  let prediction;
+  try {
+    prediction = createPrediction({
+      authorId: interaction.user.id,
+      title,
+      category: 'General',
+      description,
+      deadline: deadlineFormatted,
+      proofType,
+      tweetUrl,
+      images: [],
+      status: Status.PendingVerification,
+      cardId,
+      cardImage,
+      ownershipCheck,
+    });
+  } catch (err) {
+    console.error('Failed to create prediction:', err);
+    return interaction.editReply({ content: '❌ Failed to save prediction. Please try again.' });
+  }
 
   await postPredictionToFeed(prediction, guildId).catch(e => console.error('Feed post failed:', e.message));
   await postToAdminReview(prediction, guildId).catch(e => console.error('Admin post failed:', e.message));
@@ -940,7 +961,11 @@ async function handleButton(interaction) {
 
   const parts = interaction.customId.split(':');
   const action = parts[0];
-  const predictionId = parseInt(parts[1], 10);
+  const predictionId = parseInt(parts[1] || '', 10);
+
+  if (isNaN(predictionId)) {
+    return interaction.reply({ content: '❓ Unknown action.', flags: ['Ephemeral'] });
+  }
 
   // Community vote: community_vote:{id}:{stars}
   if (action === 'community_vote') {
@@ -1169,8 +1194,10 @@ async function handleCommunityVote(interaction, predictionId, stars) {
   }
 
   const summary = getCommunityVoteSummary(predictionId);
+  const avgStr = summary?.avg ? summary.avg.toFixed(1) : '—';
+  const voteCount = summary?.count || 0;
   await interaction.editReply({
-    content: `${' ⭐'.repeat(stars).trim()} You rated this prediction **${stars} star${stars > 1 ? 's' : ''}**. Community avg: **${summary.avg?.toFixed(1)}** (${summary.count} vote${summary.count > 1 ? 's' : ''})`,
+    content: `${'⭐'.repeat(stars)} You rated this prediction **${stars} star${stars > 1 ? 's' : ''}**. Community avg: **${avgStr}** (${voteCount} vote${voteCount !== 1 ? 's' : ''})`,
   });
 }
 
@@ -1455,6 +1482,19 @@ process.on('unhandledRejection', async (err) => {
   if (guildId) {
     await notifyAdmin(guildId, `❌ **Unhandled error:** ${err?.message || err}`).catch(() => {});
   }
+});
+
+// Clean shutdown
+process.on('SIGTERM', () => {
+  if (resolveTimer) clearTimeout(resolveTimer);
+  client.destroy();
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  if (resolveTimer) clearTimeout(resolveTimer);
+  client.destroy();
+  process.exit(0);
 });
 
 client.login(process.env.DISCORD_TOKEN);
