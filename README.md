@@ -1,6 +1,6 @@
 # Upshot Predictions Bot
 
-A Discord bot that lets community members submit predictions backed by their [Upshot](https://upshot.cards) card holdings. Admins verify and rate predictions — outcomes are resolved automatically via the Upshot API. The best predictors climb a monthly leaderboard.
+A Discord bot that lets community members submit predictions backed by their [Upshot](https://upshot.cards) card holdings. Admins verify and rate predictions, the community votes on quality, and outcomes are resolved automatically via the Upshot API. The best predictors climb a monthly leaderboard.
 
 ## How It Works
 
@@ -14,9 +14,11 @@ A Discord bot that lets community members submit predictions backed by their [Up
    - **Card URL/ID** *(required)* — The Upshot card backing your prediction. Click any card you own on [upshot.cards](https://upshot.cards), copy the URL or click **Share**
    - **Tweet URL** *(optional)* — Link a tweet for +1 bonus point if your prediction hits
 
-   The bot automatically pulls the card image, deadline, and verifies you own the card. Cards with past or same-day deadlines are rejected.
+   The bot automatically pulls the card image, deadline, and verifies you own the card. Invalid card URLs and cards with past deadlines are rejected.
 
-3. **Track your stats** — Use `/mystats` to see your points, hit rate, and rank for the current month.
+3. **Vote on predictions** — Every prediction has star vote buttons (1-3 stars). Rate other members' predictions to influence the quality score. You can't vote on your own predictions, and you can change your vote at any time.
+
+4. **Track your stats** — Use `/mystats` to see your points, hit rate, and rank for the current month.
 
 ### For Admins
 
@@ -32,6 +34,16 @@ Each step has a button on the admin review card. The bot runs an **automatic API
 - **Card NOT found in user's wallet** — flag for closer review
 - **Could not verify (API error)** — API was down, check manually
 
+### Community Weighting
+
+Quality stars are determined by a weighted combination of admin and community votes:
+
+- **Admin rating (70%)** — Assigned by admins during review (1-3 stars)
+- **Community average (30%)** — Average of all community votes on the prediction
+- **Final rating** = `round(admin × 0.7 + community × 0.3)`
+- If no community votes, admin rating counts as 100%
+- Points recalculate in real-time when votes come in
+
 ### Auto-Resolution
 
 The bot automatically resolves predictions by checking if a card's event has settled on Upshot:
@@ -46,25 +58,29 @@ The bot automatically resolves predictions by checking if a card's event has set
 
 Admins can post prediction panels to any channel using `/panel`. These are styled Components v2 cards with a title, description, optional banner image, and two buttons:
 - **Make a Prediction** — opens the submission modal
-- **How It Works** — opens a paginated guide explaining the system
+- **How It Works** — opens a paginated guide explaining the system (profile linking, card URLs, scoring, community voting, rules)
 
 ### Error Notifications
 
 All errors, API issues, and crashes are automatically reported to the admin channel. The bot handles failures gracefully — predictions still submit when the API is down.
 
+### Duplicate Detection
+
+If a user tries to link an Upshot profile that's already linked to another account, the attempt is rejected and a detailed notification is sent to the admin channel (who tried, which URL, who it belongs to).
+
 ## Points & Scoring
 
 | Component | Points | When |
 |-----------|--------|------|
-| 1-Star quality | 1 pt | Always (after admin rates) |
-| 2-Star quality | 3 pts | Always |
-| 3-Star quality | 5 pts | Always |
+| 1-Star quality (weighted) | 1 pt | After admin rates |
+| 2-Star quality (weighted) | 3 pts | After admin rates |
+| 3-Star quality (weighted) | 5 pts | After admin rates |
 | Hit bonus | +10 pts | Prediction outcome is correct |
 | Tweet bonus | +1 pt | Prediction has a linked tweet AND hits |
 
-**Total = quality points + hit bonus + tweet bonus**
+**Total = weighted quality points + hit bonus + tweet bonus**
 
-Example: 3-star prediction with tweet that hits = 5 + 10 + 1 = **16 pts**
+Quality stars use the weighted rating (70% admin + 30% community). Example: admin gives 3 stars, community averages 2 stars → weighted = 3 → 5 pts quality. With hit + tweet = 5 + 10 + 1 = **16 pts**.
 
 ## Prediction Lifecycle
 
@@ -106,6 +122,8 @@ Users can edit their predictions (title, description, deadline) within **1 hour*
 | `/setup undo-last @user` | Delete a user's most recent prediction |
 | `/setup delete-profile @user` | Remove a user's linked Upshot profile |
 | `/setup delete-all-profiles` | Remove all linked profiles |
+| `/setup export-db` | Download the full database file |
+| `/setup user-info @user` | View a user's profile, stats, and predictions |
 | `/setup view` | View config, auto-resolve timer, and prediction stats |
 
 ## Limits
@@ -116,11 +134,14 @@ Users can edit their predictions (title, description, deadline) within **1 hour*
 - **Title** — Up to 100 characters
 - **Deadline** — Auto-filled from card's event date via API
 - **Past events** — Cards with deadlines on or before today are rejected
+- **Card format** — Must be a valid upshot.cards URL or card ID starting with `cm`
+- **Community votes** — One vote per user per prediction, can be changed anytime
 
 ## Upshot API Integration
 
 The bot uses the [Upshot public API](https://api-mainnet.upshotcards.net/api/v1) to:
 
+- **Validate card URLs** — Rejects invalid card IDs when the API is reachable
 - **Auto-check card ownership** — Verifies the card exists in the user's wallet, including cards entered in active contests
 - **Fetch card images** — Card images are loaded from Arweave or assets.upshotcards.net and displayed in prediction posts
 - **Auto-fill deadlines** — Event dates are pulled from the card's event data

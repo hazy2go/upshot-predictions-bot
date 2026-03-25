@@ -105,23 +105,24 @@ const helpPages = [
     'Link a tweet about your prediction for a **+1 bonus point** if it hits. Must be from twitter.com or x.com.',
   ].join('\n'),
 
-  // Page 3 — Points & Scoring
+  // Page 3 — Points & Community Voting
   [
-    '## Points & Scoring',
+    '## Points & Community Voting',
     '',
-    'After you submit, an admin reviews your prediction:',
+    '**Admin rates quality (1-3 stars)**',
+    '⭐ 1 star = 1 pt · ⭐⭐ 2 stars = 3 pts · ⭐⭐⭐ 3 stars = 5 pts',
     '',
-    '**Quality Rating (1-3 stars)**',
-    '⭐ 1 star = 1 pt',
-    '⭐⭐ 2 stars = 3 pts',
-    '⭐⭐⭐ 3 stars = 5 pts',
+    '**Community voting**',
+    'Every prediction has vote buttons — rate others\' predictions 1-3 stars! You can\'t vote on your own. The final quality rating is:',
+    '- **70% admin** + **30% community average**',
+    '- You can change your vote at any time',
     '',
     '**Outcome Bonuses**',
     '🟢 Prediction hits = **+10 pts**',
     '📎 Tweet linked + hit = **+1 pt**',
     '🔴 Prediction fails = quality pts only',
     '',
-    '-# Example: 3-star prediction with tweet that hits = 5 + 10 + 1 = **16 pts**',
+    '-# Example: admin 3⭐, community avg 2⭐ → weighted 3⭐ (5pts) + hit (10) + tweet (1) = **16 pts**',
   ].join('\n'),
 
   // Page 4 — Rules & Tips
@@ -132,6 +133,7 @@ const helpPages = [
     '- **Edit window** — you can edit within 1 hour of submitting',
     '- **Leaderboard** — resets monthly, top predictors earn rewards',
     '- **Card required** — every prediction must be backed by an Upshot card you own',
+    '- **Auto-resolve** — outcomes are checked automatically via the Upshot API every 12h',
     '',
     '**Quick links**',
     '`/predict` — Submit via command',
