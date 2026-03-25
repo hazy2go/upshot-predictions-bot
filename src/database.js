@@ -220,6 +220,12 @@ export function getPendingPredictions() {
   return rows.map(r => ({ ...r, images: JSON.parse(r.images) }));
 }
 
+export function countUserUnresolved(authorId) {
+  return db.prepare(
+    "SELECT COUNT(*) as count FROM predictions WHERE author_id = ? AND outcome IS NULL"
+  ).get(authorId).count;
+}
+
 export function getUnresolvedRatedPredictions() {
   const rows = db.prepare(
     "SELECT * FROM predictions WHERE status = 'rated' AND outcome IS NULL AND card_id IS NOT NULL ORDER BY created_at ASC"

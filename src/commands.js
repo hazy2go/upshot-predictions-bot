@@ -97,6 +97,17 @@ export const commands = [
         )
     )
     .addSubcommand(sub =>
+      sub.setName('max-open')
+        .setDescription('Set max unresolved predictions per user')
+        .addIntegerOption(opt =>
+          opt.setName('limit')
+            .setDescription('Max open predictions (1-50)')
+            .setMinValue(1)
+            .setMaxValue(50)
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
       sub.setName('add-category')
         .setDescription('Add a prediction category')
         .addStringOption(opt =>

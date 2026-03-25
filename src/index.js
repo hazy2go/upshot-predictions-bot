@@ -13,6 +13,7 @@ import {
   getCategories, addCategory, removeCategory,
   resetUser, resetAllUsers, deleteLastPrediction,
   deleteUserProfile, deleteAllProfiles,
+  countUserUnresolved,
   getUnresolvedRatedPredictions, getResolvedCount, getUnresolvedCount,
   getProfileByWallet, getProfileByUrl, getAllUsers, getDbPath,
   upsertCommunityVote, getCommunityVoteSummary,
@@ -70,6 +71,10 @@ function getAdminRoleId(guildId) {
 
 function getMaxDaily(guildId) {
   return parseInt(cfg(guildId, 'max_daily', 'MAX_DAILY_PREDICTIONS') || '3', 10);
+}
+
+function getMaxOpen(guildId) {
+  return parseInt(cfg(guildId, 'max_open', 'MAX_OPEN_PREDICTIONS') || '5', 10);
 }
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -363,6 +368,15 @@ async function showPredictModal(interaction) {
     });
   }
 
+  const maxOpen = getMaxOpen(interaction.guildId);
+  const openCount = countUserUnresolved(interaction.user.id);
+  if (openCount >= maxOpen) {
+    return interaction.reply({
+      content: `❌ You have **${openCount}** open predictions (max **${maxOpen}**). Wait for some to resolve before submitting more.`,
+      flags: ['Ephemeral'],
+    });
+  }
+
   // Store guild context for modal submit
   setPendingSubmission(interaction.user.id, {
     guildId: interaction.guildId,
@@ -534,6 +548,11 @@ async function handleSetup(interaction) {
       setConfig(guildId, 'max_daily', limit);
       return interaction.reply({ content: `✅ Max daily predictions set to **${limit}**`, flags: ['Ephemeral'] });
     }
+    case 'max-open': {
+      const limit = interaction.options.getInteger('limit', true);
+      setConfig(guildId, 'max_open', limit);
+      return interaction.reply({ content: `✅ Max open predictions set to **${limit}**`, flags: ['Ephemeral'] });
+    }
     case 'add-category': {
       const name = interaction.options.getString('name', true).trim();
       const updated = addCategory(guildId, name);
@@ -637,6 +656,7 @@ async function handleSetup(interaction) {
         `**Leaderboard channel:** ${cfg.leaderboard_channel ? `<#${cfg.leaderboard_channel}>` : '`not set (using .env)`'}`,
         `**Admin role:** ${cfg.admin_role ? `<@&${cfg.admin_role}>` : '`not set (using .env)`'}`,
         `**Max daily predictions:** ${cfg.max_daily || '`not set (default: 3)`'}`,
+        `**Max open predictions:** ${cfg.max_open || '`not set (default: 5)`'}`,
         `**Categories:** ${cats.join(', ')}`,
         '',
         '**Auto-resolve**',
