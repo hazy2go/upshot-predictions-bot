@@ -34,6 +34,7 @@ import {
 import {
   extractWallet, extractCardId,
   getCardDetails, checkCardOwnership, checkCardResolution,
+  getSeasonRank,
 } from './api.js';
 
 // ── Client ──────────────────────────────────────────────────
@@ -490,6 +491,41 @@ async function handleMyStats(interaction) {
   const stats = getUserStats(interaction.user.id, currentMonthKey());
   const payload = buildStatsCard(stats, interaction.user.id, currentMonthLabel());
   await interaction.reply({ ...payload, flags: (1 << 15) | (1 << 6) });
+}
+
+async function handleUpshotRank(interaction) {
+  const profile = getUpshotProfile(interaction.user.id);
+  if (!profile?.wallet_address) {
+    return interaction.reply({
+      content: '❌ Link your Upshot profile first with `/link-upshot` or click "Make a Prediction".',
+      flags: ['Ephemeral'],
+    });
+  }
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  const rank = await getSeasonRank(profile.wallet_address);
+  if (!rank) {
+    return interaction.editReply({ content: '❌ Could not fetch your Upshot rank. The API may be down or you may not have any season activity.' });
+  }
+
+  const seasonEnd = rank.seasonEnd ? new Date(rank.seasonEnd).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
+  const name = rank.displayName || rank.username || 'Unknown';
+  const lines = [
+    `**🏆 Upshot Season Rank — ${name}**`,
+    '',
+    `**Rank:** #${rank.rank.toLocaleString()} of ${rank.totalParticipants.toLocaleString()}`,
+    `**Total XP:** ${rank.effectiveXP.toLocaleString()}`,
+    '',
+    `**Breakdown:**`,
+    `- Winning cards: ${rank.winningCardPoints.toLocaleString()} pts`,
+    `- Set completion: ${rank.setCompletionPoints.toLocaleString()} pts`,
+    `- Other: ${rank.otherRankPoints.toLocaleString()} pts`,
+    '',
+    `-# Season ends ${seasonEnd}`,
+  ];
+
+  await interaction.editReply({ content: lines.join('\n') });
 }
 
 async function handlePanel(interaction) {
@@ -1420,6 +1456,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'panel': return await handlePanel(interaction);
         case 'link-upshot': return await handleLinkUpshot(interaction);
         case 'mystats': return await handleMyStats(interaction);
+        case 'upshotrank': return await handleUpshotRank(interaction);
         case 'leaderboard': return await handleLeaderboardCommand(interaction);
         case 'setup': return await handleSetup(interaction);
       }

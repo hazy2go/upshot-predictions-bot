@@ -39,6 +39,10 @@ export const commands = [
     .setDescription('View your personal prediction stats for this month'),
 
   new SlashCommandBuilder()
+    .setName('upshotrank')
+    .setDescription('View your Upshot season rank and XP'),
+
+  new SlashCommandBuilder()
     .setName('leaderboard')
     .setDescription('Refresh the leaderboard (admin only)'),
 

@@ -197,6 +197,51 @@ export async function checkCardResolution(cardId) {
 }
 
 /**
+ * Get a user's season rank and XP from the Upshot leaderboard.
+ * Returns { rank, effectiveXP, winningCardPoints, setCompletionPoints, otherRankPoints, totalParticipants, seasonEnd } or null.
+ */
+export async function getSeasonRank(walletAddress) {
+  try {
+    // 1. Get current season
+    const seasonsRes = await fetch(`${BASE}/seasons`, { signal: AbortSignal.timeout(10_000) });
+    if (!seasonsRes.ok) return null;
+    const seasonsJson = await seasonsRes.json();
+    const seasons = seasonsJson.data || [];
+    if (seasons.length === 0) return null;
+    const season = seasons[0]; // most recent season
+
+    // 2. Get userId from wallet
+    const userRes = await fetch(`${BASE}/users/${walletAddress}`, { signal: AbortSignal.timeout(10_000) });
+    if (!userRes.ok) return null;
+    const userJson = await userRes.json();
+    const userId = userJson.data?.id;
+    if (!userId) return null;
+
+    // 3. Get season rank for user
+    const rankRes = await fetch(`${BASE}/seasons/${season.id}/users/${userId}`, { signal: AbortSignal.timeout(10_000) });
+    if (!rankRes.ok) return null;
+    const rankJson = await rankRes.json();
+    const data = rankJson.data;
+    if (!data) return null;
+
+    return {
+      rank: data.rank,
+      effectiveXP: parseInt(data.effectiveXP || '0', 10),
+      winningCardPoints: data.winningCardPoints || 0,
+      setCompletionPoints: data.setCompletionPoints || 0,
+      otherRankPoints: data.otherRankPoints || 0,
+      totalParticipants: season.totalParticipants || 0,
+      seasonEnd: season.endDate,
+      username: userJson.data?.username || null,
+      displayName: userJson.data?.displayName || null,
+    };
+  } catch (err) {
+    console.error(`Upshot API: getSeasonRank(${walletAddress}) failed:`, err.message);
+    return null;
+  }
+}
+
+/**
  * Look up a user profile by wallet address.
  * Returns { username, displayName, address, ... } or null.
  */
