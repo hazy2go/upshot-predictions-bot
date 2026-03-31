@@ -185,59 +185,70 @@ export async function getUserContestLineups(walletAddress) {
     if (!Array.isArray(contests)) return [];
 
     const lowerWallet = walletAddress.toLowerCase();
-    const results = [];
 
-    // Build a card name cache to avoid duplicate fetches
-    const cardCache = new Map();
-    async function getCardName(cardId) {
-      if (cardCache.has(cardId)) return cardCache.get(cardId);
-      try {
-        const cRes = await fetch(`${BASE}/cards/${cardId}`, { signal: AbortSignal.timeout(10_000) });
-        if (cRes.ok) {
-          const name = (await cRes.json()).data?.name || cardId;
-          cardCache.set(cardId, name);
-          return name;
-        }
-      } catch { /* fallback */ }
-      cardCache.set(cardId, cardId);
-      return cardId;
-    }
-
-    for (const contest of contests) {
-      try {
+    // Fetch all contest standings in parallel
+    const standingsResults = await Promise.allSettled(
+      contests.map(async (contest) => {
         const sRes = await fetch(`${BASE}/contests/${contest.id}/standings`, { signal: AbortSignal.timeout(15_000) });
-        if (!sRes.ok) continue;
+        if (!sRes.ok) return null;
         const sJson = await sRes.json();
-        const standings = sJson.data?.standings || [];
-        const totalLineups = sJson.data?.totalLineups || 0;
+        return { contest, standings: sJson.data?.standings || [], totalLineups: sJson.data?.totalLineups || 0 };
+      })
+    );
 
-        // Find ALL entries for this user (multiple lineups per contest)
-        const entries = standings.filter(s => s.user?.walletAddress?.toLowerCase() === lowerWallet);
-        if (entries.length === 0) continue;
+    // Collect all unique card IDs and user entries
+    const allEntries = []; // { contest, entry, totalLineups }
+    const allCardIds = new Set();
 
-        const lineups = [];
-        for (const entry of entries) {
-          const cardIds = entry.lineup?.cardIds || [];
-          const cards = [];
-          for (const cardId of cardIds) {
-            const name = await getCardName(cardId);
-            cards.push({ id: cardId, name });
-          }
-          lineups.push({
-            rank: entry.rank,
-            totalLineups,
-            score: parseInt(entry.currentScore || '0', 10),
-            cards,
-          });
+    for (const result of standingsResults) {
+      if (result.status !== 'fulfilled' || !result.value) continue;
+      const { contest, standings, totalLineups } = result.value;
+      const entries = standings.filter(s => s.user?.walletAddress?.toLowerCase() === lowerWallet);
+      for (const entry of entries) {
+        allEntries.push({ contest, entry, totalLineups });
+        for (const cardId of (entry.lineup?.cardIds || [])) {
+          allCardIds.add(cardId);
         }
-
-        results.push({ contestName: contest.name, lineups });
-      } catch {
-        continue;
       }
     }
 
-    return results;
+    if (allEntries.length === 0) return [];
+
+    // Fetch all card names in parallel (batch)
+    const cardNames = new Map();
+    const cardFetches = await Promise.allSettled(
+      [...allCardIds].map(async (cardId) => {
+        const cRes = await fetch(`${BASE}/cards/${cardId}`, { signal: AbortSignal.timeout(10_000) });
+        if (cRes.ok) {
+          const name = (await cRes.json()).data?.name || cardId;
+          return { cardId, name };
+        }
+        return { cardId, name: cardId };
+      })
+    );
+    for (const r of cardFetches) {
+      if (r.status === 'fulfilled') cardNames.set(r.value.cardId, r.value.name);
+    }
+
+    // Assemble results grouped by contest
+    const contestMap = new Map();
+    for (const { contest, entry, totalLineups } of allEntries) {
+      if (!contestMap.has(contest.name)) {
+        contestMap.set(contest.name, { contestName: contest.name, lineups: [] });
+      }
+      const cards = (entry.lineup?.cardIds || []).map(id => ({
+        id,
+        name: cardNames.get(id) || id,
+      }));
+      contestMap.get(contest.name).lineups.push({
+        rank: entry.rank,
+        totalLineups,
+        score: parseInt(entry.currentScore || '0', 10),
+        cards,
+      });
+    }
+
+    return [...contestMap.values()];
   } catch (err) {
     console.error(`Upshot API: getUserContestLineups(${walletAddress}) failed:`, err.message);
     return [];
