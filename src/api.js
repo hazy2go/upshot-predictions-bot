@@ -173,8 +173,8 @@ async function checkCardInContests(walletAddress, cardId) {
 }
 
 /**
- * Get all contests a user is entered in, with their lineup card details.
- * Returns array of { contestName, rank, totalLineups, score, cards: [{ id, name }] }
+ * Get all contests a user is entered in, with ALL their lineups and card details.
+ * Returns array of { contestName, lineups: [{ rank, totalLineups, score, cards: [{ id, name }] }] }
  */
 export async function getUserContestLineups(walletAddress) {
   try {
@@ -187,39 +187,51 @@ export async function getUserContestLineups(walletAddress) {
     const lowerWallet = walletAddress.toLowerCase();
     const results = [];
 
+    // Build a card name cache to avoid duplicate fetches
+    const cardCache = new Map();
+    async function getCardName(cardId) {
+      if (cardCache.has(cardId)) return cardCache.get(cardId);
+      try {
+        const cRes = await fetch(`${BASE}/cards/${cardId}`, { signal: AbortSignal.timeout(10_000) });
+        if (cRes.ok) {
+          const name = (await cRes.json()).data?.name || cardId;
+          cardCache.set(cardId, name);
+          return name;
+        }
+      } catch { /* fallback */ }
+      cardCache.set(cardId, cardId);
+      return cardId;
+    }
+
     for (const contest of contests) {
       try {
-        const sRes = await fetch(`${BASE}/contests/${contest.id}/standings`, { signal: AbortSignal.timeout(10_000) });
+        const sRes = await fetch(`${BASE}/contests/${contest.id}/standings`, { signal: AbortSignal.timeout(15_000) });
         if (!sRes.ok) continue;
         const sJson = await sRes.json();
         const standings = sJson.data?.standings || [];
+        const totalLineups = sJson.data?.totalLineups || 0;
 
-        const entry = standings.find(s => s.user?.walletAddress?.toLowerCase() === lowerWallet);
-        if (!entry) continue;
+        // Find ALL entries for this user (multiple lineups per contest)
+        const entries = standings.filter(s => s.user?.walletAddress?.toLowerCase() === lowerWallet);
+        if (entries.length === 0) continue;
 
-        // Fetch card names
-        const cards = [];
-        for (const cardId of (entry.lineup?.cardIds || [])) {
-          try {
-            const cRes = await fetch(`${BASE}/cards/${cardId}`, { signal: AbortSignal.timeout(10_000) });
-            if (cRes.ok) {
-              const cJson = await cRes.json();
-              cards.push({ id: cardId, name: cJson.data?.name || cardId });
-            } else {
-              cards.push({ id: cardId, name: cardId });
-            }
-          } catch {
-            cards.push({ id: cardId, name: cardId });
+        const lineups = [];
+        for (const entry of entries) {
+          const cardIds = entry.lineup?.cardIds || [];
+          const cards = [];
+          for (const cardId of cardIds) {
+            const name = await getCardName(cardId);
+            cards.push({ id: cardId, name });
           }
+          lineups.push({
+            rank: entry.rank,
+            totalLineups,
+            score: parseInt(entry.currentScore || '0', 10),
+            cards,
+          });
         }
 
-        results.push({
-          contestName: contest.name,
-          rank: entry.rank,
-          totalLineups: sJson.data?.totalLineups || 0,
-          score: parseInt(entry.currentScore || '0', 10),
-          cards,
-        });
+        results.push({ contestName: contest.name, lineups });
       } catch {
         continue;
       }

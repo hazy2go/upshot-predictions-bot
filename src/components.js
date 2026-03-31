@@ -168,6 +168,62 @@ export function buildHelpPage(page) {
   };
 }
 
+// ── Contest lineups (paginated, ephemeral) ───────────────────
+
+export function buildContestPages(contests) {
+  // Flatten all lineups into pages (one lineup per page)
+  const pages = [];
+  for (const contest of contests) {
+    for (let i = 0; i < contest.lineups.length; i++) {
+      pages.push({ contestName: contest.name, lineupIndex: i + 1, totalLineups: contest.lineups.length, ...contest.lineups[i] });
+    }
+  }
+  return pages;
+}
+
+export function buildContestPage(pages, pageIdx) {
+  const total = pages.length;
+  const idx = Math.max(0, Math.min(pageIdx, total - 1));
+  const p = pages[idx];
+  const children = [];
+
+  // Header
+  children.push(text(`## 🏅 ${p.contestName}`));
+  children.push(text(`Lineup ${p.lineupIndex} of ${p.totalLineups_count || p.totalLineups} · Rank **#${p.rank}** / ${p.totalLineups_global || '—'}`));
+  children.push(separator());
+
+  // Score
+  const score = (p.score / 1_000_000).toFixed(2);
+  children.push(text(`**Score:** ${score} pts`));
+  children.push(separator());
+
+  // Cards
+  for (let i = 0; i < p.cards.length; i++) {
+    const card = p.cards[i];
+    children.push(text(`**${i + 1}.** ${card.name}\n-# \`${card.id}\``));
+  }
+
+  children.push(separator());
+  children.push(text(`-# Lineup ${idx + 1} of ${total} total`));
+
+  // Navigation
+  const btns = [];
+  if (idx > 0) {
+    btns.push(button(`contest_page:${idx - 1}`, '← Prev', ButtonStyle.Secondary));
+  }
+  if (idx < total - 1) {
+    btns.push(button(`contest_page:${idx + 1}`, 'Next →', ButtonStyle.Secondary));
+  }
+  if (btns.length > 0) {
+    children.push(actionRow(...btns));
+  }
+
+  return {
+    components: [container(Colors.Gold, children)],
+    flags: (1 << 15) | (1 << 6),
+  };
+}
+
 // ── Prediction card (public #predictions) ────────────────────
 
 export function buildPredictionCard(prediction, upshotUrl) {

@@ -23,6 +23,7 @@ import {
   buildPredictionCard, buildAdminCard,
   buildLeaderboard, buildStatsCard, buildDeleteConfirm,
   buildPredictionPanel, buildHelpPage,
+  buildContestPages, buildContestPage,
 } from './components.js';
 
 import { commands } from './commands.js';
@@ -528,6 +529,9 @@ async function handleUpshotRank(interaction) {
   await interaction.editReply({ content: lines.join('\n') });
 }
 
+// Cache contest pages per user for navigation (cleared after 10 min)
+const contestPageCache = new Map();
+
 async function handleMyContests(interaction) {
   const profile = getUpshotProfile(interaction.user.id);
   if (!profile?.wallet_address) {
@@ -539,25 +543,24 @@ async function handleMyContests(interaction) {
 
   await interaction.deferReply({ flags: ['Ephemeral'] });
 
-  const lineups = await getUserContestLineups(profile.wallet_address);
-  if (lineups.length === 0) {
+  const contests = await getUserContestLineups(profile.wallet_address);
+  if (contests.length === 0) {
     return interaction.editReply({ content: 'You\'re not entered in any active contests.' });
   }
 
-  const sections = lineups.map(l => {
-    const score = (l.score / 1_000_000).toFixed(2);
-    const cardLines = l.cards.map(c => `  - ${c.name}\n    \`${c.id}\``).join('\n');
-    return `**${l.contestName}**\nRank #${l.rank} / ${l.totalLineups} · ${score} pts\n${cardLines}`;
-  });
-
-  const content = `**🏅 Your Active Contests**\n\n${sections.join('\n\n')}`;
-
-  // Discord has a 2000 char limit — split if needed
-  if (content.length <= 2000) {
-    return interaction.editReply({ content });
+  // Build pages and enrich with global totalLineups
+  const pages = buildContestPages(contests);
+  for (const p of pages) {
+    p.totalLineups_global = p.totalLineups;
+    p.totalLineups_count = contests.find(c => c.contestName === p.contestName)?.lineups.length || 0;
   }
-  await interaction.editReply({ content: content.slice(0, 2000) });
-  await interaction.followUp({ content: content.slice(2000, 4000), flags: ['Ephemeral'] });
+
+  // Cache for pagination
+  contestPageCache.set(interaction.user.id, pages);
+  setTimeout(() => contestPageCache.delete(interaction.user.id), 10 * 60 * 1000);
+
+  const payload = buildContestPage(pages, 0);
+  await interaction.editReply(payload);
 }
 
 async function handlePanel(interaction) {
@@ -1052,11 +1055,20 @@ async function handleButton(interaction) {
   if (interaction.customId.startsWith('panel_help:')) {
     const page = parseInt(interaction.customId.split(':')[1], 10);
     const payload = buildHelpPage(page);
-    // First help click = reply, page navigation = update existing message
     if (interaction.message.flags.has(1 << 6)) {
       return interaction.update(payload);
     }
     return interaction.reply(payload);
+  }
+
+  // Contest page navigation (contest_page:0, contest_page:1, etc.)
+  if (interaction.customId.startsWith('contest_page:')) {
+    const page = parseInt(interaction.customId.split(':')[1], 10);
+    const pages = contestPageCache.get(interaction.user.id);
+    if (!pages) {
+      return interaction.reply({ content: '❌ Session expired. Run `/mycontests` again.', flags: ['Ephemeral'] });
+    }
+    return interaction.update(buildContestPage(pages, page));
   }
 
   const parts = interaction.customId.split(':');
