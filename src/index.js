@@ -23,7 +23,7 @@ import {
   buildPredictionCard, buildAdminCard,
   buildLeaderboard, buildStatsCard, buildDeleteConfirm,
   buildPredictionPanel, buildHelpPage,
-  buildContestPages, buildContestPage,
+  buildContestOverview, buildContestLineupPage,
 } from './components.js';
 
 import { commands } from './commands.js';
@@ -529,8 +529,8 @@ async function handleUpshotRank(interaction) {
   await interaction.editReply({ content: lines.join('\n') });
 }
 
-// Cache contest pages per user for navigation (cleared after 10 min)
-const contestPageCache = new Map();
+// Cache contest data per user for navigation (cleared after 10 min)
+const contestCache = new Map();
 
 async function handleMyContests(interaction) {
   const profile = getUpshotProfile(interaction.user.id);
@@ -548,18 +548,11 @@ async function handleMyContests(interaction) {
     return interaction.editReply({ content: 'You\'re not entered in any active contests.' });
   }
 
-  // Build pages and enrich with global totalLineups
-  const pages = buildContestPages(contests);
-  for (const p of pages) {
-    p.totalLineups_global = p.totalLineups;
-    p.totalLineups_count = contests.find(c => c.contestName === p.contestName)?.lineups.length || 0;
-  }
+  // Cache for navigation
+  contestCache.set(interaction.user.id, contests);
+  setTimeout(() => contestCache.delete(interaction.user.id), 10 * 60 * 1000);
 
-  // Cache for pagination
-  contestPageCache.set(interaction.user.id, pages);
-  setTimeout(() => contestPageCache.delete(interaction.user.id), 10 * 60 * 1000);
-
-  const payload = buildContestPage(pages, 0);
+  const payload = buildContestOverview(contests);
   await interaction.editReply(payload);
 }
 
@@ -1061,14 +1054,20 @@ async function handleButton(interaction) {
     return interaction.reply(payload);
   }
 
-  // Contest page navigation (contest_page:0, contest_page:1, etc.)
-  if (interaction.customId.startsWith('contest_page:')) {
-    const page = parseInt(interaction.customId.split(':')[1], 10);
-    const pages = contestPageCache.get(interaction.user.id);
-    if (!pages) {
-      return interaction.reply({ content: '❌ Session expired. Run `/mycontests` again.', flags: ['Ephemeral'] });
-    }
-    return interaction.update(buildContestPage(pages, page));
+  // Contest navigation
+  if (interaction.customId === 'contest_back') {
+    const contests = contestCache.get(interaction.user.id);
+    if (!contests) return interaction.reply({ content: '❌ Session expired. Run `/mycontests` again.', flags: ['Ephemeral'] });
+    return interaction.update(buildContestOverview(contests));
+  }
+  if (interaction.customId.startsWith('contest_select:')) {
+    const [, contestIdxStr, lineupIdxStr] = interaction.customId.split(':');
+    const contests = contestCache.get(interaction.user.id);
+    if (!contests) return interaction.reply({ content: '❌ Session expired. Run `/mycontests` again.', flags: ['Ephemeral'] });
+    const contestIdx = parseInt(contestIdxStr, 10);
+    const lineupIdx = parseInt(lineupIdxStr, 10);
+    if (contestIdx >= contests.length) return interaction.reply({ content: '❌ Contest not found.', flags: ['Ephemeral'] });
+    return interaction.update(buildContestLineupPage(contests[contestIdx], lineupIdx, contestIdx));
   }
 
   const parts = interaction.customId.split(':');

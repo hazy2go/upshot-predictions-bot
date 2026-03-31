@@ -170,53 +170,71 @@ export function buildHelpPage(page) {
 
 // ── Contest lineups (paginated, ephemeral) ───────────────────
 
-export function buildContestPages(contests) {
-  // Flatten all lineups into pages (one lineup per page)
-  const pages = [];
-  for (const contest of contests) {
-    for (let i = 0; i < contest.lineups.length; i++) {
-      pages.push({ contestName: contest.name, lineupIndex: i + 1, totalLineups: contest.lineups.length, ...contest.lineups[i] });
-    }
-  }
-  return pages;
-}
-
-export function buildContestPage(pages, pageIdx) {
-  const total = pages.length;
-  const idx = Math.max(0, Math.min(pageIdx, total - 1));
-  const p = pages[idx];
+/**
+ * Build the contest overview page — lists all contests with a button for each.
+ */
+export function buildContestOverview(contests) {
   const children = [];
-
-  // Header
-  children.push(text(`## 🏅 ${p.contestName}`));
-  children.push(text(`Lineup ${p.lineupIndex} of ${p.totalLineups_count || p.totalLineups} · Rank **#${p.rank}** / ${p.totalLineups_global || '—'}`));
+  children.push(text('## 🏅 Your Active Contests'));
   children.push(separator());
 
-  // Score
-  const score = (p.score / 1_000_000).toFixed(2);
+  for (let i = 0; i < contests.length; i++) {
+    const c = contests[i];
+    const lineupCount = c.lineups.length;
+    const bestRank = Math.min(...c.lineups.map(l => l.rank));
+    children.push(text(`**${c.contestName}**\n${lineupCount} lineup${lineupCount > 1 ? 's' : ''} · Best rank: #${bestRank}`));
+  }
+
+  children.push(separator());
+
+  // One button per contest (max 5 per row)
+  const btns = contests.map((c, i) =>
+    button(`contest_select:${i}:0`, c.contestName.length > 40 ? c.contestName.slice(0, 37) + '...' : c.contestName, ButtonStyle.Primary)
+  );
+  for (let i = 0; i < btns.length; i += 5) {
+    children.push(actionRow(...btns.slice(i, i + 5)));
+  }
+
+  return {
+    components: [container(Colors.Gold, children)],
+    flags: (1 << 15) | (1 << 6),
+  };
+}
+
+/**
+ * Build a single lineup page within a contest.
+ */
+export function buildContestLineupPage(contest, lineupIdx, contestIdx) {
+  const total = contest.lineups.length;
+  const idx = Math.max(0, Math.min(lineupIdx, total - 1));
+  const lineup = contest.lineups[idx];
+  const children = [];
+
+  children.push(text(`## 🏅 ${contest.contestName}`));
+  children.push(separator());
+
+  children.push(text(`**Lineup ${idx + 1} of ${total}** · Rank **#${lineup.rank}** / ${lineup.totalLineups}`));
+  const score = (lineup.score / 1_000_000).toFixed(2);
   children.push(text(`**Score:** ${score} pts`));
   children.push(separator());
 
-  // Cards
-  for (let i = 0; i < p.cards.length; i++) {
-    const card = p.cards[i];
+  for (let i = 0; i < lineup.cards.length; i++) {
+    const card = lineup.cards[i];
     children.push(text(`**${i + 1}.** ${card.name}\n-# \`${card.id}\``));
   }
 
   children.push(separator());
-  children.push(text(`-# Lineup ${idx + 1} of ${total} total`));
 
   // Navigation
   const btns = [];
+  btns.push(button('contest_back', '← All Contests', ButtonStyle.Secondary));
   if (idx > 0) {
-    btns.push(button(`contest_page:${idx - 1}`, '← Prev', ButtonStyle.Secondary));
+    btns.push(button(`contest_select:${contestIdx}:${idx - 1}`, '← Prev', ButtonStyle.Secondary));
   }
   if (idx < total - 1) {
-    btns.push(button(`contest_page:${idx + 1}`, 'Next →', ButtonStyle.Secondary));
+    btns.push(button(`contest_select:${contestIdx}:${idx + 1}`, 'Next →', ButtonStyle.Secondary));
   }
-  if (btns.length > 0) {
-    children.push(actionRow(...btns));
-  }
+  children.push(actionRow(...btns));
 
   return {
     components: [container(Colors.Gold, children)],
