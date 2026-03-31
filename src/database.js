@@ -193,6 +193,13 @@ export function getLeaderboard(monthKey, limit = 20) {
   `).all(monthKey, limit);
 }
 
+export function hasUnresolvedPredictionForCard(cardId) {
+  const row = db.prepare(
+    "SELECT id, author_id FROM predictions WHERE card_id = ? AND outcome IS NULL LIMIT 1"
+  ).get(cardId);
+  return row || null;
+}
+
 export function getUserStats(authorId, monthKey) {
   const stats = db.prepare(`
     SELECT

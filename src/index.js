@@ -13,7 +13,7 @@ import {
   getCategories, addCategory, removeCategory,
   resetUser, resetAllUsers, deleteLastPrediction,
   deleteUserProfile, deleteAllProfiles,
-  countUserUnresolved,
+  countUserUnresolved, hasUnresolvedPredictionForCard,
   getUnresolvedRatedPredictions, getResolvedCount, getUnresolvedCount,
   getProfileByWallet, getProfileByUrl, getAllUsers, getDbPath,
   upsertCommunityVote, getCommunityVoteSummary,
@@ -863,6 +863,18 @@ async function handlePredictModalSubmit(interaction) {
       return interaction.editReply({
         content: `❌ This card's event deadline has already passed (**${deadlineFormatted}**). You can only submit predictions for upcoming events.`,
       });
+    }
+  }
+
+  // Check for duplicate — reject if anyone has an unresolved prediction for the same card
+  if (cardId) {
+    const existing = hasUnresolvedPredictionForCard(cardId);
+    if (existing) {
+      const isSelf = existing.author_id === interaction.user.id;
+      const msg = isSelf
+        ? '❌ You already have an open prediction for this card. Wait for it to resolve first.'
+        : '❌ Someone else already has an open prediction for this card.';
+      return interaction.editReply({ content: msg });
     }
   }
 
