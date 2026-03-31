@@ -173,6 +173,66 @@ async function checkCardInContests(walletAddress, cardId) {
 }
 
 /**
+ * Get all contests a user is entered in, with their lineup card details.
+ * Returns array of { contestName, rank, totalLineups, score, cards: [{ id, name }] }
+ */
+export async function getUserContestLineups(walletAddress) {
+  try {
+    const res = await fetch(`${BASE}/contests?status=LIVE`, { signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) return [];
+    const json = await res.json();
+    const contests = json.data || json;
+    if (!Array.isArray(contests)) return [];
+
+    const lowerWallet = walletAddress.toLowerCase();
+    const results = [];
+
+    for (const contest of contests) {
+      try {
+        const sRes = await fetch(`${BASE}/contests/${contest.id}/standings`, { signal: AbortSignal.timeout(10_000) });
+        if (!sRes.ok) continue;
+        const sJson = await sRes.json();
+        const standings = sJson.data?.standings || [];
+
+        const entry = standings.find(s => s.user?.walletAddress?.toLowerCase() === lowerWallet);
+        if (!entry) continue;
+
+        // Fetch card names
+        const cards = [];
+        for (const cardId of (entry.lineup?.cardIds || [])) {
+          try {
+            const cRes = await fetch(`${BASE}/cards/${cardId}`, { signal: AbortSignal.timeout(10_000) });
+            if (cRes.ok) {
+              const cJson = await cRes.json();
+              cards.push({ id: cardId, name: cJson.data?.name || cardId });
+            } else {
+              cards.push({ id: cardId, name: cardId });
+            }
+          } catch {
+            cards.push({ id: cardId, name: cardId });
+          }
+        }
+
+        results.push({
+          contestName: contest.name,
+          rank: entry.rank,
+          totalLineups: sJson.data?.totalLineups || 0,
+          score: parseInt(entry.currentScore || '0', 10),
+          cards,
+        });
+      } catch {
+        continue;
+      }
+    }
+
+    return results;
+  } catch (err) {
+    console.error(`Upshot API: getUserContestLineups(${walletAddress}) failed:`, err.message);
+    return [];
+  }
+}
+
+/**
  * Check if a card's event has been resolved and whether the card won.
  * Returns { resolved: boolean, won: boolean | null, error?: string }
  *   - resolved=false: event still active

@@ -34,7 +34,7 @@ import {
 import {
   extractWallet, extractCardId,
   getCardDetails, checkCardOwnership, checkCardResolution,
-  getSeasonRank,
+  getSeasonRank, getUserContestLineups,
 } from './api.js';
 
 // ── Client ──────────────────────────────────────────────────
@@ -526,6 +526,38 @@ async function handleUpshotRank(interaction) {
   ];
 
   await interaction.editReply({ content: lines.join('\n') });
+}
+
+async function handleMyContests(interaction) {
+  const profile = getUpshotProfile(interaction.user.id);
+  if (!profile?.wallet_address) {
+    return interaction.reply({
+      content: '❌ Link your Upshot profile first with `/link-upshot` or click "Make a Prediction".',
+      flags: ['Ephemeral'],
+    });
+  }
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  const lineups = await getUserContestLineups(profile.wallet_address);
+  if (lineups.length === 0) {
+    return interaction.editReply({ content: 'You\'re not entered in any active contests.' });
+  }
+
+  const sections = lineups.map(l => {
+    const score = (l.score / 1_000_000).toFixed(2);
+    const cardLines = l.cards.map(c => `  - ${c.name}\n    \`${c.id}\``).join('\n');
+    return `**${l.contestName}**\nRank #${l.rank} / ${l.totalLineups} · ${score} pts\n${cardLines}`;
+  });
+
+  const content = `**🏅 Your Active Contests**\n\n${sections.join('\n\n')}`;
+
+  // Discord has a 2000 char limit — split if needed
+  if (content.length <= 2000) {
+    return interaction.editReply({ content });
+  }
+  await interaction.editReply({ content: content.slice(0, 2000) });
+  await interaction.followUp({ content: content.slice(2000, 4000), flags: ['Ephemeral'] });
 }
 
 async function handlePanel(interaction) {
@@ -1469,6 +1501,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'link-upshot': return await handleLinkUpshot(interaction);
         case 'mystats': return await handleMyStats(interaction);
         case 'upshotrank': return await handleUpshotRank(interaction);
+        case 'mycontests': return await handleMyContests(interaction);
         case 'leaderboard': return await handleLeaderboardCommand(interaction);
         case 'setup': return await handleSetup(interaction);
       }

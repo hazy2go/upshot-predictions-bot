@@ -43,6 +43,10 @@ export const commands = [
     .setDescription('View your Upshot season rank and XP'),
 
   new SlashCommandBuilder()
+    .setName('mycontests')
+    .setDescription('View your active contest lineups and card IDs'),
+
+  new SlashCommandBuilder()
     .setName('leaderboard')
     .setDescription('Refresh the leaderboard (admin only)'),
 
