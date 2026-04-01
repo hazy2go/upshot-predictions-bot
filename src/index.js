@@ -529,6 +529,19 @@ async function handleUpshotRank(interaction) {
   await interaction.editReply({ content: lines.join('\n') });
 }
 
+async function handlePastLeaderboard(interaction) {
+  const monthInput = interaction.options.getString('month', true).trim();
+  if (!/^\d{4}-\d{2}$/.test(monthInput)) {
+    return interaction.reply({ content: '❌ Invalid format. Use `YYYY-MM` (e.g. `2026-03`).', flags: ['Ephemeral'] });
+  }
+
+  const entries = getLeaderboard(monthInput);
+  const [yyyy, mm] = monthInput.split('-');
+  const label = new Date(parseInt(yyyy), parseInt(mm) - 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  const payload = buildLeaderboard(entries, label);
+  await interaction.reply({ ...payload, flags: (1 << 15) | (1 << 6) });
+}
+
 // Cache contest data per user for navigation (cleared after 10 min)
 const contestCache = new Map();
 
@@ -1512,6 +1525,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'link-upshot': return await handleLinkUpshot(interaction);
         case 'mystats': return await handleMyStats(interaction);
         case 'upshotrank': return await handleUpshotRank(interaction);
+        case 'pastleaderboard': return await handlePastLeaderboard(interaction);
         case 'mycontests': return await handleMyContests(interaction);
         case 'leaderboard': return await handleLeaderboardCommand(interaction);
         case 'setup': return await handleSetup(interaction);

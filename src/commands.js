@@ -43,6 +43,15 @@ export const commands = [
     .setDescription('View your Upshot season rank and XP'),
 
   new SlashCommandBuilder()
+    .setName('pastleaderboard')
+    .setDescription('View a past month\'s leaderboard')
+    .addStringOption(opt =>
+      opt.setName('month')
+        .setDescription('Month to view (e.g. 2026-03, 2026-02)')
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
     .setName('mycontests')
     .setDescription('View your active contest lineups and card IDs'),
 
