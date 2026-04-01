@@ -79,14 +79,6 @@ try { db.exec('ALTER TABLE predictions ADD COLUMN card_image TEXT'); } catch { /
 try { db.exec('ALTER TABLE predictions ADD COLUMN ownership_check TEXT'); } catch { /* already exists */ }
 try { db.exec('ALTER TABLE predictions ADD COLUMN community_star_avg REAL'); } catch { /* already exists */ }
 
-// One-time migration: sync month_key with deadline month for all predictions where they differ
-db.exec(`
-  UPDATE predictions
-  SET month_key = substr(deadline, 1, 7)
-  WHERE deadline IS NOT NULL AND deadline != 'TBD' AND length(deadline) >= 7
-    AND month_key != substr(deadline, 1, 7)
-`);
-
 // ── User queries ────────────────────────────────────────────
 
 export function linkUpshot(discordId, upshotUrl, walletAddress = null) {
