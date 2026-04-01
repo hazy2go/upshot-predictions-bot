@@ -980,6 +980,7 @@ async function handleEditModalSubmit(interaction) {
   if (deadlineMatch) {
     const [, dd, mm, yyyy] = deadlineMatch;
     updates.deadline = `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
+    updates.month_key = `${yyyy}-${mm.padStart(2, '0')}`;
   }
 
   // Build diff for admin notification

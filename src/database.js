@@ -79,6 +79,14 @@ try { db.exec('ALTER TABLE predictions ADD COLUMN card_image TEXT'); } catch { /
 try { db.exec('ALTER TABLE predictions ADD COLUMN ownership_check TEXT'); } catch { /* already exists */ }
 try { db.exec('ALTER TABLE predictions ADD COLUMN community_star_avg REAL'); } catch { /* already exists */ }
 
+// One-time migration: sync month_key with deadline month for all predictions where they differ
+db.exec(`
+  UPDATE predictions
+  SET month_key = substr(deadline, 1, 7)
+  WHERE deadline IS NOT NULL AND deadline != 'TBD' AND length(deadline) >= 7
+    AND month_key != substr(deadline, 1, 7)
+`);
+
 // ── User queries ────────────────────────────────────────────
 
 export function linkUpshot(discordId, upshotUrl, walletAddress = null) {
@@ -113,8 +121,15 @@ export function getDbPath() {
 // ── Prediction CRUD ─────────────────────────────────────────
 
 export function createPrediction({ authorId, title, category, description, deadline, proofType, tweetUrl, images, status, cardId, cardImage, ownershipCheck }) {
-  const now = new Date();
-  const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  // Assign month_key from the deadline so predictions count toward the month they resolve in.
+  // Falls back to current month if deadline is missing or 'TBD'.
+  let monthKey;
+  if (deadline && deadline !== 'TBD' && deadline.match(/^\d{4}-\d{2}/)) {
+    monthKey = deadline.slice(0, 7); // 'YYYY-MM'
+  } else {
+    const now = new Date();
+    monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  }
   const initialStatus = status || 'pending_verification';
 
   const stmt = db.prepare(`
@@ -139,7 +154,7 @@ export function updatePrediction(id, updates) {
     'ownership_verified', 'verified_by', 'verified_at',
     'rated_by', 'resolved_by',
     'embed_message_id', 'admin_message_id', 'proof_type',
-    'card_id', 'card_image', 'ownership_check', 'community_star_avg',
+    'card_id', 'card_image', 'ownership_check', 'community_star_avg', 'month_key',
   ];
 
   const entries = Object.entries(updates).filter(([k]) => allowed.includes(k));
