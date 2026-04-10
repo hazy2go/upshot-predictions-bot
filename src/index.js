@@ -590,6 +590,40 @@ async function handleLeaderboardCommand(interaction) {
   await interaction.editReply({ content: '✅ Leaderboard refreshed.' });
 }
 
+async function handleResolveCommand(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+
+  const id = interaction.options.getInteger('id');
+  const outcome = interaction.options.getString('outcome');
+  const prediction = getPrediction(id);
+
+  if (!prediction) {
+    return interaction.reply({ content: `❌ Prediction #${id} not found.`, flags: ['Ephemeral'] });
+  }
+  if (!prediction.star_rating) {
+    return interaction.reply({ content: '❌ Assign stars first.', flags: ['Ephemeral'] });
+  }
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  const previousOutcome = prediction.outcome;
+  const status = outcome === 'hit' ? Status.Hit : Status.Fail;
+
+  updatePrediction(id, { outcome, status, resolved_by: interaction.user.id });
+  const updated = recalculatePoints(id);
+
+  await syncPredictionEmbeds(id, interaction.guildId);
+  await refreshLeaderboard(interaction.guildId).catch(() => {});
+
+  const emoji = outcome === 'hit' ? '🟢' : '🔴';
+  const override = previousOutcome ? ` (was **${previousOutcome}**)` : '';
+  await interaction.editReply({
+    content: `${emoji} **#${String(id).padStart(4, '0')}** resolved as **${outcome}**${override} — ${updated.total_points} pts total`,
+  });
+}
+
 async function handleRefreshCommand(interaction) {
   if (!isAdmin(interaction.member)) {
     return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
@@ -1543,6 +1577,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'pastleaderboard': return await handlePastLeaderboard(interaction);
         case 'mycontests': return await handleMyContests(interaction);
         case 'refresh': return await handleRefreshCommand(interaction);
+        case 'resolve': return await handleResolveCommand(interaction);
         case 'leaderboard': return await handleLeaderboardCommand(interaction);
         case 'setup': return await handleSetup(interaction);
       }

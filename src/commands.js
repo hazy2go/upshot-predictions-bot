@@ -66,6 +66,25 @@ export const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName('resolve')
+    .setDescription('Set or change the outcome of a prediction (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addIntegerOption(opt =>
+      opt.setName('id')
+        .setDescription('Prediction ID')
+        .setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('outcome')
+        .setDescription('Outcome to set')
+        .setRequired(true)
+        .addChoices(
+          { name: 'Hit', value: 'hit' },
+          { name: 'Fail', value: 'fail' },
+        )
+    ),
+
+  new SlashCommandBuilder()
     .setName('leaderboard')
     .setDescription('Refresh the leaderboard (admin only)'),
 
