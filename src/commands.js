@@ -56,6 +56,16 @@ export const commands = [
     .setDescription('View your active contest lineups and card IDs'),
 
   new SlashCommandBuilder()
+    .setName('refresh')
+    .setDescription('Re-sync a prediction embed to show updated buttons (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addIntegerOption(opt =>
+      opt.setName('id')
+        .setDescription('Prediction ID to refresh')
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
     .setName('leaderboard')
     .setDescription('Refresh the leaderboard (admin only)'),
 

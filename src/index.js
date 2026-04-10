@@ -590,6 +590,22 @@ async function handleLeaderboardCommand(interaction) {
   await interaction.editReply({ content: '✅ Leaderboard refreshed.' });
 }
 
+async function handleRefreshCommand(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+
+  const id = interaction.options.getInteger('id');
+  const prediction = getPrediction(id);
+  if (!prediction) {
+    return interaction.reply({ content: `❌ Prediction #${id} not found.`, flags: ['Ephemeral'] });
+  }
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+  await syncPredictionEmbeds(id, interaction.guildId);
+  await interaction.editReply({ content: `✅ Refreshed embeds for prediction **#${String(id).padStart(4, '0')}**.` });
+}
+
 async function handleSetup(interaction) {
   // Requires Administrator permission (enforced by Discord via defaultMemberPermissions)
   if (!interaction.memberPermissions.has('Administrator')) {
@@ -1526,6 +1542,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'upshotrank': return await handleUpshotRank(interaction);
         case 'pastleaderboard': return await handlePastLeaderboard(interaction);
         case 'mycontests': return await handleMyContests(interaction);
+        case 'refresh': return await handleRefreshCommand(interaction);
         case 'leaderboard': return await handleLeaderboardCommand(interaction);
         case 'setup': return await handleSetup(interaction);
       }
