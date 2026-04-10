@@ -1265,10 +1265,10 @@ async function handleCheckResolve(interaction, predictionId) {
   const prediction = getPrediction(predictionId);
   if (!prediction) return interaction.reply({ content: '❌ Not found.', flags: ['Ephemeral'] });
   if (!prediction.card_id) return interaction.reply({ content: '❌ No card ID on this prediction.', flags: ['Ephemeral'] });
-  if (prediction.outcome) return interaction.reply({ content: `❌ Already resolved as **${prediction.outcome}**.`, flags: ['Ephemeral'] });
 
   await interaction.deferReply({ flags: ['Ephemeral'] });
 
+  const previousOutcome = prediction.outcome;
   const result = await checkCardResolution(prediction.card_id);
 
   if (result.error) {
@@ -1279,7 +1279,6 @@ async function handleCheckResolve(interaction, predictionId) {
     return interaction.editReply({ content: '⏳ Card event is still **active** — not resolved yet.' });
   }
 
-  // Auto-resolve it
   const outcome = result.won ? 'hit' : 'fail';
   const status = outcome === 'hit' ? Status.Hit : Status.Fail;
 
@@ -1290,8 +1289,9 @@ async function handleCheckResolve(interaction, predictionId) {
   await refreshLeaderboard(interaction.guildId).catch(() => {});
 
   const emoji = outcome === 'hit' ? '🟢' : '🔴';
+  const change = previousOutcome && previousOutcome !== outcome ? ` (was **${previousOutcome}**)` : '';
   await interaction.editReply({
-    content: `${emoji} **#${String(predictionId).padStart(4, '0')}** resolved via API — **${outcome}** (${updated.total_points} pts)`,
+    content: `${emoji} **#${String(predictionId).padStart(4, '0')}** resolved via API — **${outcome}**${change} (${updated.total_points} pts)`,
   });
 }
 
@@ -1334,16 +1334,13 @@ async function handleMarkOutcome(interaction, predictionId, outcome) {
   const prediction = getPrediction(predictionId);
   if (!prediction) return interaction.reply({ content: '❌ Not found.', flags: ['Ephemeral'] });
 
-  if (prediction.outcome) {
-    return interaction.reply({ content: `❌ Already resolved as **${prediction.outcome}**.`, flags: ['Ephemeral'] });
-  }
-
   if (!prediction.star_rating) {
     return interaction.reply({ content: '❌ Assign stars first.', flags: ['Ephemeral'] });
   }
 
   await interaction.deferReply({ flags: ['Ephemeral'] });
 
+  const previousOutcome = prediction.outcome;
   const status = outcome === 'hit' ? Status.Hit : Status.Fail;
 
   updatePrediction(predictionId, { outcome, status, resolved_by: interaction.user.id });
@@ -1353,8 +1350,9 @@ async function handleMarkOutcome(interaction, predictionId, outcome) {
   await refreshLeaderboard(interaction.guildId).catch(() => {});
 
   const emoji = outcome === 'hit' ? '🟢' : '🔴';
+  const override = previousOutcome ? ` (was **${previousOutcome}**)` : '';
   await interaction.editReply({
-    content: `${emoji} **#${String(predictionId).padStart(4, '0')}** marked as **${outcome}** — ${updated.total_points} pts total`,
+    content: `${emoji} **#${String(predictionId).padStart(4, '0')}** marked as **${outcome}**${override} — ${updated.total_points} pts total`,
   });
 }
 
