@@ -13,7 +13,7 @@ import {
   getCategories, addCategory, removeCategory,
   resetUser, resetAllUsers, deleteLastPrediction,
   deleteUserProfile, deleteAllProfiles,
-  countUserUnresolved, hasUnresolvedPredictionForCard,
+  countUserUnresolved, getUserOpenPredictions, hasUnresolvedPredictionForCard,
   getUnresolvedRatedPredictions, getResolvedCount, getUnresolvedCount,
   getProfileByWallet, getProfileByUrl, getAllUsers, getDbPath,
   upsertCommunityVote, getCommunityVoteSummary,
@@ -83,6 +83,36 @@ function getMaxOpen(guildId) {
 
 function getCategoryList(guildId) {
   return getCategories(guildId) || DefaultCategories;
+}
+
+function chunkLines(lines, maxLength = 1800) {
+  const chunks = [];
+  let current = '';
+
+  for (const line of lines) {
+    const next = current ? `${current}\n${line}` : line;
+    if (next.length <= maxLength) {
+      current = next;
+      continue;
+    }
+
+    if (current) chunks.push(current);
+
+    if (line.length <= maxLength) {
+      current = line;
+      continue;
+    }
+
+    let remaining = line;
+    while (remaining.length > maxLength) {
+      chunks.push(remaining.slice(0, maxLength));
+      remaining = remaining.slice(maxLength);
+    }
+    current = remaining;
+  }
+
+  if (current) chunks.push(current);
+  return chunks;
 }
 
 /**
@@ -746,17 +776,16 @@ async function handleSetup(interaction) {
     case 'user-info': {
       const user = interaction.options.getUser('user', true);
       const profile = getUpshotProfile(user.id);
-      if (!profile) {
-        return interaction.reply({ content: `❌ <@${user.id}> has no linked profile.`, flags: ['Ephemeral'] });
-      }
       const stats = getUserStats(user.id, currentMonthKey());
       const hitRate = stats.resolved > 0 ? Math.round((stats.hits / stats.resolved) * 100) : 0;
-      const lines = [
+      const maxOpen = getMaxOpen(guildId);
+      const openPredictions = getUserOpenPredictions(user.id);
+      const summaryLines = [
         `**User Info — <@${user.id}>**`,
         '',
-        `**Upshot URL:** ${profile.upshot_url}`,
-        `**Wallet:** \`${profile.wallet_address || 'not detected'}\``,
-        `**Linked:** ${profile.linked_at}`,
+        `**Upshot URL:** ${profile?.upshot_url || 'Not linked'}`,
+        `**Wallet:** \`${profile?.wallet_address || 'not detected'}\``,
+        `**Linked:** ${profile?.linked_at || 'Not linked'}`,
         '',
         `**--- ${currentMonthLabel()} Stats ---**`,
         `**Predictions:** ${stats.prediction_count || 0}`,
@@ -764,8 +793,31 @@ async function handleSetup(interaction) {
         `**Hit Rate:** ${hitRate}% (${stats.hits || 0}/${stats.resolved || 0})`,
         `**Rank:** ${stats.rank ? `#${stats.rank} of ${stats.total_entries}` : 'Unranked'}`,
         `**Avg Rating:** ${stats.avg_rating ? stats.avg_rating.toFixed(1) : '—'} ⭐`,
+        '',
+        `**Open Predictions:** ${openPredictions.length}/${maxOpen}`,
       ];
-      return interaction.reply({ content: lines.join('\n'), flags: ['Ephemeral'] });
+
+      const openLines = openPredictions.length > 0
+        ? openPredictions.map(prediction => {
+          const shortTitle = prediction.title.length > 80
+            ? `${prediction.title.slice(0, 77)}...`
+            : prediction.title;
+          return `• #${String(prediction.id).padStart(4, '0')} [${prediction.status}] ${prediction.deadline} - ${shortTitle}`;
+        })
+        : ['• None'];
+
+      const messageChunks = chunkLines([
+        ...summaryLines,
+        '',
+        '**Open Prediction List**',
+        ...openLines,
+      ]);
+
+      await interaction.reply({ content: messageChunks[0], flags: ['Ephemeral'] });
+      for (const chunk of messageChunks.slice(1)) {
+        await interaction.followUp({ content: chunk, flags: ['Ephemeral'] });
+      }
+      return;
     }
     case 'view': {
       const cfg = getAllConfig(guildId);

@@ -236,8 +236,15 @@ export function getPendingPredictions() {
 
 export function countUserUnresolved(authorId) {
   return db.prepare(
-    "SELECT COUNT(*) as count FROM predictions WHERE author_id = ? AND outcome IS NULL"
+    "SELECT COUNT(*) as count FROM predictions WHERE author_id = ? AND status = 'rated' AND outcome IS NULL"
   ).get(authorId).count;
+}
+
+export function getUserOpenPredictions(authorId) {
+  const rows = db.prepare(
+    "SELECT * FROM predictions WHERE author_id = ? AND status = 'rated' AND outcome IS NULL ORDER BY created_at DESC"
+  ).all(authorId);
+  return rows.map(r => ({ ...r, images: JSON.parse(r.images) }));
 }
 
 export function getUnresolvedRatedPredictions() {
