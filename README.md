@@ -18,7 +18,7 @@ A Discord bot that lets community members submit predictions backed by their [Up
 
 3. **Vote on predictions** — Every prediction has star vote buttons (1-3 stars). Rate other members' predictions to influence the quality score. You can't vote on your own predictions, and you can change your vote at any time.
 
-4. **Track your stats** — Use `/mystats` to see your points, hit rate, and rank for the current month.
+4. **Track your stats** — Use `/mystats` to see your points, hit rate, and rank for the current month. `/upshotrank` shows your Upshot season XP and rank. `/mycontests` lists your active contest lineups and card IDs.
 
 ### For Admins
 
@@ -33,6 +33,25 @@ Each step has a button on the admin review card. The bot runs an **automatic API
 - **Card in user's active contest lineup** — card is entered in a contest
 - **Card NOT found in user's wallet** — flag for closer review
 - **Could not verify (API error)** — API was down, check manually
+
+Admins can also **override resolved predictions** by re-clicking Mark Hit / Mark Fail or running `/resolve id:<n> outcome:<hit|fail>`. Points and the leaderboard recalculate automatically.
+
+### AI-Assisted Review
+
+Two `/setup` subcommands let admins clear the review queue in bulk instead of clicking each button:
+
+- **`/setup auto-verify-all`** — Loops every unverified prediction and hits the Upshot API to check ownership. Passing predictions are marked verified (same effect as clicking the button manually — embeds and state update identically). Failing predictions are listed back so you can handle them by hand.
+
+- **`/setup auto-rate-all`** — Uses [NVIDIA NIM](https://build.nvidia.com) (`z-ai/glm4.7`) to suggest 1-3 star ratings for every verified-but-unrated prediction. The bot feeds each prediction's title, description, category, **plus the real Upshot card/event context** (card name, event description, the specific outcome the user is betting on) to the model and returns a star rating with a one-sentence reason.
+
+  You get an ephemeral summary listing every suggestion, then two buttons: **Accept All** or **Cancel**. Accept All applies the ratings one by one, re-checking each prediction at apply time so it safely skips anything that got manually rated, deleted, or un-verified in the meantime.
+
+  **Rubric the AI uses:**
+  - 1 star — Vague, low-effort, no specific thesis or reasoning
+  - 2 stars — Clear prediction with some reasoning but limited evidence or shallow analysis
+  - 3 stars — Specific, well-researched, backed by concrete evidence, data, or a strong mechanistic thesis
+
+  Rating is based on **prediction quality**, not whether the AI thinks the prediction will hit.
 
 ### Community Weighting
 
@@ -52,7 +71,7 @@ The bot automatically resolves predictions by checking if a card's event has set
 - Checks each card's event status via the API (`outcomeId` vs `winningOutcomeId`)
 - If resolved: auto-marks as **hit** or **fail**, updates embeds, leaderboard, and notifies in admin channel
 - Admins can also click **Check Resolution** on any rated prediction to trigger an immediate check
-- Manual **Mark Hit / Mark Fail** buttons remain available as fallback
+- Manual **Mark Hit / Mark Fail** buttons remain available as fallback — and can be re-clicked to override a previous outcome
 
 ### Prediction Panels
 
@@ -92,7 +111,7 @@ Quality stars use the weighted rating (70% admin + 30% community). Example: admi
 | Hit | Prediction was correct (auto or manual) |
 | Fail | Prediction was incorrect (auto or manual) |
 
-Users can edit their predictions (title, description, deadline) within **1 hour** of submission. Edits are logged in the admin channel.
+Users can edit their predictions (title, description, deadline) within **1 hour** of submission. Edits are logged in the admin channel. Predictions are grouped into monthly leaderboards by their **deadline month**, not their submission date.
 
 ## Commands
 
@@ -103,6 +122,9 @@ Users can edit their predictions (title, description, deadline) within **1 hour*
 | `/predict` | Submit a new prediction |
 | `/link-upshot` | Link your Upshot profile URL |
 | `/mystats` | View your personal stats for this month |
+| `/upshotrank` | View your Upshot season rank and XP |
+| `/mycontests` | View your active contest lineups and card IDs |
+| `/pastleaderboard` | View a past month's leaderboard (format: `YYYY-MM`) |
 
 ### Admin Commands
 
@@ -110,13 +132,18 @@ Users can edit their predictions (title, description, deadline) within **1 hour*
 |---------|-------------|
 | `/panel` | Post a prediction panel with Predict + Help buttons |
 | `/leaderboard` | Force-refresh the leaderboard |
+| `/refresh id:<n>` | Re-sync a prediction's embeds to show the latest buttons/state |
+| `/resolve id:<n> outcome:<hit\|fail>` | Set or change the outcome of a prediction |
 | `/setup predictions-channel` | Set the public predictions feed channel |
 | `/setup admin-channel` | Set the private admin review channel |
 | `/setup leaderboard-channel` | Set the leaderboard channel |
 | `/setup admin-role` | Set the role that can review predictions |
 | `/setup max-daily` | Set max predictions per user per day (1-20) |
+| `/setup max-open` | Set max unresolved predictions per user (1-50) |
 | `/setup add-category` | Add a prediction category |
 | `/setup remove-category` | Remove a prediction category |
+| `/setup auto-verify-all` | Auto-verify ownership for every unverified prediction via the Upshot API |
+| `/setup auto-rate-all` | Use NVIDIA NIM to suggest star ratings for every unrated prediction (review before applying) |
 | `/setup reset-user @user` | Delete all of a user's predictions this month |
 | `/setup reset-all` | Delete ALL predictions this month |
 | `/setup undo-last @user` | Delete a user's most recent prediction |
@@ -129,6 +156,7 @@ Users can edit their predictions (title, description, deadline) within **1 hour*
 ## Limits
 
 - **Daily prediction limit** — Configurable per server (default: 3 per day)
+- **Open prediction limit** — Max unresolved predictions per user, configurable (default: 5)
 - **Edit window** — 1 hour from submission
 - **Description** — Up to 2,000 characters
 - **Title** — Up to 100 characters
@@ -148,8 +176,13 @@ The bot uses the [Upshot public API](https://api-mainnet.upshotcards.net/api/v1)
 - **Reject past events** — Cards with expired event dates cannot be submitted
 - **Auto-resolve predictions** — Every 12h, checks if card events have settled and auto-marks hit/fail based on `outcomeId` vs `winningOutcomeId`
 - **Extract wallet addresses** — Parsed automatically from Upshot profile URLs during linking
+- **Season rank & contest lineups** — Powers `/upshotrank` and `/mycontests`
 
 API failures are handled gracefully — if the API is down, predictions still submit normally. Admins can always verify and resolve manually. Errors are reported to the admin channel.
+
+## NVIDIA NIM Integration
+
+The `/setup auto-rate-all` command uses [NVIDIA NIM](https://build.nvidia.com) (`z-ai/glm4.7`) to suggest admin star ratings. Requires a free API key from build.nvidia.com. The request is streamed, the model's reasoning trace is discarded, and only the final JSON (`{stars, reason}`) is applied. If `NVIDIA_NIM_API_KEY` is missing, the command returns a clear error and no other features are affected.
 
 ## Setup
 
@@ -158,6 +191,7 @@ API failures are handled gracefully — if the API is down, predictions still su
 - Node.js 18+
 - A Discord bot token with the `bot` and `applications.commands` scopes
 - Bot permissions: Send Messages, Manage Messages, Embed Links, Attach Files, Use External Emojis
+- *(Optional)* NVIDIA NIM API key for AI auto-rating — [build.nvidia.com](https://build.nvidia.com)
 
 ### Installation
 
@@ -177,6 +211,9 @@ Edit `.env`:
 DISCORD_TOKEN=your_bot_token
 CLIENT_ID=your_application_client_id
 GUILD_ID=your_guild_id
+
+# Optional — enables /setup auto-rate-all
+NVIDIA_NIM_API_KEY=your_nvidia_nim_api_key
 ```
 
 Then start the bot:
@@ -193,6 +230,7 @@ On first startup, use `/setup` commands to configure channels and roles:
 /setup leaderboard-channel #leaderboard
 /setup admin-role @Moderator
 /setup max-daily 1
+/setup max-open 5
 ```
 
 ### Running with PM2
@@ -206,5 +244,6 @@ pm2 start ecosystem.config.cjs
 - **Runtime** — Node.js (ESM)
 - **Discord** — discord.js v14 with Components v2
 - **Database** — SQLite via better-sqlite3 (WAL mode)
-- **API** — Upshot public API (card details, ownership, resolution)
+- **API** — Upshot public API (card details, ownership, resolution, season rank, contests)
+- **AI** — NVIDIA NIM (`z-ai/glm4.7`) for optional bulk star rating
 - **Auto-resolve** — 12h interval, checks card event outcomes via API
