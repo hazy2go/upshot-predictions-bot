@@ -222,5 +222,13 @@ export const commands = [
             .setDescription('The user to look up')
             .setRequired(true)
         )
+    )
+    .addSubcommand(sub =>
+      sub.setName('auto-verify-all')
+        .setDescription('Auto-verify ownership for every unverified prediction via the Upshot API')
+    )
+    .addSubcommand(sub =>
+      sub.setName('auto-rate-all')
+        .setDescription('Use AI to suggest star ratings for every unrated prediction (review before applying)')
     ),
 ];

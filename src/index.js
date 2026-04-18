@@ -17,7 +17,10 @@ import {
   getUnresolvedRatedPredictions, getResolvedCount, getUnresolvedCount,
   getProfileByWallet, getProfileByUrl, getAllUsers, getDbPath,
   upsertCommunityVote, getCommunityVoteSummary,
+  getPendingVerificationPredictions, getUnratedVerifiedPredictions,
 } from './database.js';
+
+import { rateWithAI } from './nim.js';
 
 import {
   buildPredictionCard, buildAdminCard,
@@ -773,6 +776,12 @@ async function handleSetup(interaction) {
       const dbFile = new AttachmentBuilder(getDbPath(), { name: 'predictions.db' });
       return interaction.editReply({ content: '📦 Database export:', files: [dbFile] });
     }
+    case 'auto-verify-all': {
+      return handleAutoVerifyAll(interaction, guildId);
+    }
+    case 'auto-rate-all': {
+      return handleAutoRateAll(interaction, guildId);
+    }
     case 'user-info': {
       const user = interaction.options.getUser('user', true);
       const profile = getUpshotProfile(user.id);
@@ -846,6 +855,181 @@ async function handleSetup(interaction) {
       return interaction.reply({ content: lines.join('\n'), flags: ['Ephemeral'] });
     }
   }
+}
+
+// ── Bulk admin actions ──────────────────────────────────────
+
+/**
+ * In-memory store for AI rating batches pending admin approval.
+ * Keyed by batchId, cleared on Accept/Cancel or bot restart.
+ */
+const pendingRatingBatches = new Map();
+
+function formatId(id) {
+  return `#${String(id).padStart(4, '0')}`;
+}
+
+async function handleAutoVerifyAll(interaction, guildId) {
+  const preds = getPendingVerificationPredictions();
+  if (preds.length === 0) {
+    return interaction.reply({ content: '✅ No predictions pending verification.', flags: ['Ephemeral'] });
+  }
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  let verified = 0;
+  const flagged = [];
+  const errored = [];
+
+  for (const p of preds) {
+    const profile = getUpshotProfile(p.author_id);
+    if (!profile?.wallet_address) {
+      flagged.push(`${formatId(p.id)} (no wallet linked)`);
+      continue;
+    }
+    const res = await checkCardOwnership(profile.wallet_address, p.card_id);
+    if (res.error) {
+      errored.push(`${formatId(p.id)} (${res.error})`);
+      continue;
+    }
+    if (res.owned) {
+      await applyVerification(p.id, interaction.user.id, guildId);
+      verified++;
+    } else {
+      flagged.push(formatId(p.id));
+    }
+  }
+
+  const lines = [
+    `**Auto-verify complete** — ${preds.length} checked`,
+    `✅ Verified: **${verified}**`,
+    `⚠️ Flagged (not owned): **${flagged.length}**${flagged.length ? `\n   ${flagged.join(', ')}` : ''}`,
+    `❌ API errors: **${errored.length}**${errored.length ? `\n   ${errored.join(', ')}` : ''}`,
+  ];
+  return interaction.editReply({ content: lines.join('\n') });
+}
+
+async function gatherRatingContext(prediction) {
+  const ctx = {
+    title: prediction.title,
+    description: prediction.description,
+    category: prediction.category,
+    deadline: prediction.deadline,
+  };
+  if (prediction.card_id) {
+    const card = await getCardDetails(prediction.card_id);
+    if (card) {
+      ctx.cardName = card.name || null;
+      ctx.eventName = card.event?.name || null;
+      ctx.eventDescription = card.event?.description || null;
+      // The card's outcomeId is the outcome the user is betting on.
+      const outcomes = card.event?.outcomes || [];
+      const match = outcomes.find(o => o?.id === card.outcomeId);
+      ctx.outcomeName = match?.name || null;
+    }
+  }
+  return ctx;
+}
+
+async function handleAutoRateAll(interaction, guildId) {
+  const preds = getUnratedVerifiedPredictions();
+  if (preds.length === 0) {
+    return interaction.reply({ content: '✅ No verified predictions waiting for a star rating.', flags: ['Ephemeral'] });
+  }
+
+  if (!process.env.NVIDIA_NIM_API_KEY) {
+    return interaction.reply({ content: '❌ `NVIDIA_NIM_API_KEY` is not set in .env.', flags: ['Ephemeral'] });
+  }
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  const suggestions = [];
+  const failures = [];
+
+  for (const p of preds) {
+    try {
+      const ctx = await gatherRatingContext(p);
+      const result = await rateWithAI(ctx);
+      suggestions.push({ id: p.id, stars: result.stars, reason: result.reason, title: p.title });
+      // Light throttle to be kind to free-tier rate limits
+      await new Promise(r => setTimeout(r, 800));
+    } catch (err) {
+      failures.push(`${formatId(p.id)} — ${err.message.slice(0, 120)}`);
+    }
+  }
+
+  if (suggestions.length === 0) {
+    return interaction.editReply({
+      content: `❌ All ${preds.length} AI calls failed.\n${failures.join('\n')}`,
+    });
+  }
+
+  const batchId = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  pendingRatingBatches.set(batchId, { suggestions, guildId, adminId: interaction.user.id, createdAt: Date.now() });
+
+  const header = `**AI rating suggestions** (${suggestions.length} predictions, model: \`z-ai/glm4.7\`)`;
+  const body = suggestions.map(s => {
+    const stars = '⭐'.repeat(s.stars) + '☆'.repeat(3 - s.stars);
+    const title = s.title.length > 60 ? s.title.slice(0, 57) + '...' : s.title;
+    return `${formatId(s.id)} ${stars} — *${title}*\n   └ ${s.reason}`;
+  }).join('\n\n');
+
+  const footer = failures.length
+    ? `\n\n⚠️ **${failures.length} failed:**\n${failures.join('\n')}`
+    : '';
+
+  let content = `${header}\n\n${body}${footer}`;
+  // Discord message limit is 2000 chars in a reply
+  if (content.length > 1900) {
+    content = content.slice(0, 1870) + '\n... *(truncated — batch still has all items)*';
+  }
+
+  return interaction.editReply({
+    content,
+    components: [{
+      type: 1, // ActionRow
+      components: [
+        { type: 2, style: 3, label: `✅ Accept All (${suggestions.length})`, custom_id: `accept_ratings:${batchId}` },
+        { type: 2, style: 4, label: 'Cancel', custom_id: `cancel_ratings:${batchId}` },
+      ],
+    }],
+  });
+}
+
+async function handleAcceptRatings(interaction, batchId) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+
+  const batch = pendingRatingBatches.get(batchId);
+  if (!batch) {
+    return interaction.update({ content: '❌ Batch expired or already applied.', components: [] });
+  }
+  pendingRatingBatches.delete(batchId);
+
+  await interaction.update({ content: `⏳ Applying ${batch.suggestions.length} ratings...`, components: [] });
+
+  let applied = 0;
+  const skipped = [];
+  for (const s of batch.suggestions) {
+    const current = getPrediction(s.id);
+    if (!current) { skipped.push(`${formatId(s.id)} (deleted)`); continue; }
+    if (current.star_rating) { skipped.push(`${formatId(s.id)} (already rated)`); continue; }
+    if (!current.ownership_verified) { skipped.push(`${formatId(s.id)} (no longer verified)`); continue; }
+    await applyStarRating(s.id, s.stars, batch.adminId, batch.guildId);
+    applied++;
+  }
+
+  const lines = [
+    `✅ Applied **${applied}** AI star rating${applied === 1 ? '' : 's'}`,
+  ];
+  if (skipped.length) lines.push(`⏭️ Skipped **${skipped.length}**: ${skipped.join(', ')}`);
+  return interaction.editReply({ content: lines.join('\n'), components: [] });
+}
+
+async function handleCancelRatings(interaction, batchId) {
+  pendingRatingBatches.delete(batchId);
+  return interaction.update({ content: '❌ AI rating suggestions discarded.', components: [] });
 }
 
 // ── Modal submits ───────────────────────────────────────────
@@ -1137,15 +1321,8 @@ async function handleStarsModalSubmit(interaction) {
 
   await interaction.deferReply({ flags: ['Ephemeral'] });
 
-  updatePrediction(predictionId, {
-    star_rating: stars,
-    status: prediction.outcome ? prediction.status : Status.Rated,
-    rated_by: interaction.user.id,
-  });
-  const updated = recalculatePoints(predictionId);
+  const updated = await applyStarRating(predictionId, stars, interaction.user.id, interaction.guildId);
 
-  await syncPredictionEmbeds(predictionId, interaction.guildId);
-  await refreshLeaderboard(interaction.guildId).catch(() => {});
   await interaction.editReply({
     content: `⭐ Rated **#${String(predictionId).padStart(4, '0')}** — ${stars} star${stars > 1 ? 's' : ''} (${updated.total_points} pts)`,
     flags: ['Ephemeral'],
@@ -1184,6 +1361,14 @@ async function handleButton(interaction) {
     const lineupIdx = parseInt(lineupIdxStr, 10);
     if (contestIdx >= contests.length) return interaction.reply({ content: '❌ Contest not found.', flags: ['Ephemeral'] });
     return interaction.update(buildContestLineupPage(contests[contestIdx], lineupIdx, contestIdx));
+  }
+
+  // AI rating batch buttons (carry a batchId, not a predictionId)
+  if (interaction.customId.startsWith('accept_ratings:')) {
+    return handleAcceptRatings(interaction, interaction.customId.slice('accept_ratings:'.length));
+  }
+  if (interaction.customId.startsWith('cancel_ratings:')) {
+    return handleCancelRatings(interaction, interaction.customId.slice('cancel_ratings:'.length));
   }
 
   const parts = interaction.customId.split(':');
@@ -1301,6 +1486,40 @@ async function handleEditButton(interaction, predictionId) {
   await interaction.showModal(modal);
 }
 
+/**
+ * Shared effect: mark ownership verified and resync embeds.
+ * Used by both the manual button and /setup auto-verify-all.
+ */
+async function applyVerification(predictionId, verifierId, guildId) {
+  updatePrediction(predictionId, {
+    ownership_verified: 1,
+    verified_by: verifierId,
+    verified_at: new Date().toISOString(),
+    status: Status.PendingReview,
+  });
+  await syncPredictionEmbeds(predictionId, guildId);
+}
+
+/**
+ * Shared effect: assign stars, recalculate points, resync embeds + leaderboard.
+ * Used by both the manual stars modal and /setup auto-rate-all accept-all.
+ * Returns the updated prediction (with total_points).
+ */
+async function applyStarRating(predictionId, stars, raterId, guildId) {
+  const prediction = getPrediction(predictionId);
+  if (!prediction) return null;
+
+  updatePrediction(predictionId, {
+    star_rating: stars,
+    status: prediction.outcome ? prediction.status : Status.Rated,
+    rated_by: raterId,
+  });
+  const updated = recalculatePoints(predictionId);
+  await syncPredictionEmbeds(predictionId, guildId);
+  await refreshLeaderboard(guildId).catch(() => {});
+  return updated;
+}
+
 async function handleVerifyOwnership(interaction, predictionId) {
   if (!isAdmin(interaction.member)) {
     return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
@@ -1315,14 +1534,8 @@ async function handleVerifyOwnership(interaction, predictionId) {
 
   await interaction.deferReply({ flags: ['Ephemeral'] });
 
-  updatePrediction(predictionId, {
-    ownership_verified: 1,
-    verified_by: interaction.user.id,
-    verified_at: new Date().toISOString(),
-    status: Status.PendingReview,
-  });
+  await applyVerification(predictionId, interaction.user.id, interaction.guildId);
 
-  await syncPredictionEmbeds(predictionId, interaction.guildId);
   await interaction.editReply({
     content: `✅ Ownership verified for **#${String(predictionId).padStart(4, '0')}**. Ready for star rating.`,
   });

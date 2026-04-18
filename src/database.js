@@ -234,6 +234,20 @@ export function getPendingPredictions() {
   return rows.map(r => ({ ...r, images: JSON.parse(r.images) }));
 }
 
+export function getPendingVerificationPredictions() {
+  const rows = db.prepare(
+    "SELECT * FROM predictions WHERE status = 'pending_verification' AND ownership_verified = 0 AND card_id IS NOT NULL ORDER BY created_at ASC"
+  ).all();
+  return rows.map(r => ({ ...r, images: JSON.parse(r.images) }));
+}
+
+export function getUnratedVerifiedPredictions() {
+  const rows = db.prepare(
+    "SELECT * FROM predictions WHERE status = 'pending_review' AND ownership_verified = 1 AND star_rating IS NULL ORDER BY created_at ASC"
+  ).all();
+  return rows.map(r => ({ ...r, images: JSON.parse(r.images) }));
+}
+
 export function countUserUnresolved(authorId) {
   return db.prepare(
     "SELECT COUNT(*) as count FROM predictions WHERE author_id = ? AND status = 'rated' AND outcome IS NULL"
