@@ -865,6 +865,32 @@ async function handleSetup(interaction) {
  */
 const pendingRatingBatches = new Map();
 
+/**
+ * Auto-pipeline triggered when a submission passes the Upshot API ownership pre-check.
+ * Runs verification immediately, then (best-effort, non-blocking) asks the AI for a
+ * star rating. Admins can always override the AI rating by clicking Assign Stars.
+ */
+async function autoVerifyAndRate(predictionId, guildId) {
+  try {
+    await applyVerification(predictionId, 'auto-api', guildId);
+  } catch (err) {
+    console.error(`auto-verify failed for #${predictionId}:`, err.message);
+    return;
+  }
+
+  if (!process.env.NVIDIA_NIM_API_KEY) return;
+
+  try {
+    const p = getPrediction(predictionId);
+    if (!p || p.star_rating) return;
+    const ctx = await gatherRatingContext(p);
+    const result = await rateWithAI(ctx);
+    await applyStarRating(predictionId, result.stars, 'auto-ai', guildId);
+  } catch (err) {
+    console.error(`auto-rate failed for #${predictionId}:`, err.message);
+  }
+}
+
 function formatId(id) {
   return `#${String(id).padStart(4, '0')}`;
 }
@@ -1237,9 +1263,15 @@ async function handlePredictModalSubmit(interaction) {
   await postToAdminReview(prediction, guildId).catch(e => console.error('Admin post failed:', e.message));
   await refreshLeaderboard(guildId).catch(() => {});
 
+  // Auto-verify + auto-rate when the API pre-check confirms ownership.
+  // AI rating runs in the background; embeds update themselves when it lands.
+  if (ownershipCheck === 'verified' || ownershipCheck === 'verified_contest') {
+    autoVerifyAndRate(prediction.id, guildId).catch(() => {});
+  }
+
   let statusNote = '';
   if (ownershipCheck === 'verified' || ownershipCheck === 'verified_contest') {
-    statusNote = ' — Card ownership confirmed via API!';
+    statusNote = ' — ✅ Auto-verified via Upshot API.';
   } else if (ownershipCheck === 'not_found') {
     statusNote = ' — ⚠️ Card not found in your wallet (admin will review)';
   }

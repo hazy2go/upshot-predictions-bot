@@ -425,8 +425,10 @@ export function buildAdminCard(prediction, upshotUrl) {
     buttons.push(button(`verify_ownership:${prediction.id}`, '✅ Verify Ownership', ButtonStyle.Success));
   }
 
-  if (prediction.ownership_verified && !prediction.star_rating) {
-    buttons.push(button(`assign_stars:${prediction.id}`, '⭐ Assign Stars', ButtonStyle.Primary));
+  if (prediction.ownership_verified) {
+    const label = prediction.star_rating ? '⭐ Change Rating' : '⭐ Assign Stars';
+    const style = prediction.star_rating ? ButtonStyle.Secondary : ButtonStyle.Primary;
+    buttons.push(button(`assign_stars:${prediction.id}`, label, style));
   }
 
   if (prediction.star_rating) {
