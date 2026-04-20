@@ -65,11 +65,13 @@ export async function rateWithAI(ctx) {
       { role: 'system', content: RUBRIC },
       { role: 'user', content: buildUserPrompt(ctx) },
     ],
-    temperature: 0.3,
+    temperature: 0.2,
     top_p: 1,
-    max_tokens: 4096,
+    max_tokens: 256,
     stream: true,
-    chat_template_kwargs: { enable_thinking: true, clear_thinking: false },
+    // Thinking is intentionally OFF — a 1-3 rating doesn't need a reasoning
+    // trace and with thinking on the call often takes 30-60s and hits timeouts.
+    chat_template_kwargs: { enable_thinking: false },
   };
 
   const res = await fetch(`${BASE}/chat/completions`, {
@@ -80,7 +82,7 @@ export async function rateWithAI(ctx) {
       'Accept': 'text/event-stream',
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(120_000),
+    signal: AbortSignal.timeout(45_000),
   });
 
   if (!res.ok) {

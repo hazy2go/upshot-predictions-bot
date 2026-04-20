@@ -985,9 +985,9 @@ async function handleAutoRateAll(interaction, guildId) {
   }
 
   if (suggestions.length === 0) {
-    return interaction.editReply({
-      content: `❌ All ${preds.length} AI calls failed.\n${failures.join('\n')}`,
-    });
+    let content = `❌ All ${preds.length} AI calls failed.\n${failures.join('\n')}`;
+    if (content.length > 1900) content = content.slice(0, 1870) + '\n... *(truncated)*';
+    return interaction.editReply({ content });
   }
 
   const batchId = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
