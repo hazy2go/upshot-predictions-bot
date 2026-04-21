@@ -55,25 +55,7 @@ function parseRating(text) {
   }
 }
 
-export async function rateWithAI(ctx) {
-  const apiKey = process.env.NVIDIA_NIM_API_KEY;
-  if (!apiKey) throw new Error('NVIDIA_NIM_API_KEY not set in .env');
-
-  const body = {
-    model: MODEL,
-    messages: [
-      { role: 'system', content: RUBRIC },
-      { role: 'user', content: buildUserPrompt(ctx) },
-    ],
-    temperature: 0.2,
-    top_p: 1,
-    max_tokens: 256,
-    stream: true,
-    // Thinking is intentionally OFF — a 1-3 rating doesn't need a reasoning
-    // trace and with thinking on the call often takes 30-60s and hits timeouts.
-    chat_template_kwargs: { enable_thinking: false },
-  };
-
+async function callNim(apiKey, body, timeoutMs) {
   const res = await fetch(`${BASE}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -82,7 +64,7 @@ export async function rateWithAI(ctx) {
       'Accept': 'text/event-stream',
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(45_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   if (!res.ok) {
@@ -112,7 +94,43 @@ export async function rateWithAI(ctx) {
     }
   }
 
-  const parsed = parseRating(content);
-  if (!parsed) throw new Error(`AI returned unparseable response: ${content.slice(0, 200)}`);
-  return parsed;
+  return content;
+}
+
+export async function rateWithAI(ctx) {
+  const apiKey = process.env.NVIDIA_NIM_API_KEY;
+  if (!apiKey) throw new Error('NVIDIA_NIM_API_KEY not set in .env');
+
+  const body = {
+    model: MODEL,
+    messages: [
+      { role: 'system', content: RUBRIC },
+      { role: 'user', content: buildUserPrompt(ctx) },
+    ],
+    temperature: 0.2,
+    top_p: 1,
+    max_tokens: 256,
+    stream: true,
+    // Thinking off — a 1-3 rating doesn't need a reasoning trace.
+    chat_template_kwargs: { enable_thinking: false },
+  };
+
+  // One retry on transient failure (timeout / terminated / 5xx).
+  // NIM free tier latency is variable, a quick retry usually succeeds.
+  let lastErr;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const content = await callNim(apiKey, body, 60_000);
+      const parsed = parseRating(content);
+      if (!parsed) throw new Error(`AI returned unparseable response: ${content.slice(0, 200)}`);
+      return parsed;
+    } catch (err) {
+      lastErr = err;
+      const transient = /timeout|terminated|fetch failed|NVIDIA NIM 5\d\d/i.test(err.message);
+      if (attempt === 2 || !transient) throw err;
+      console.warn(`rateWithAI attempt ${attempt} failed (${err.message}) — retrying`);
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  }
+  throw lastErr;
 }

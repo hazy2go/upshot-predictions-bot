@@ -1,6 +1,7 @@
 import {
   Client, GatewayIntentBits, Events, Routes, AttachmentBuilder,
   ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder,
+  MessageFlags,
 } from 'discord.js';
 import 'dotenv/config';
 
@@ -304,9 +305,13 @@ async function syncPredictionEmbeds(predictionId, guildId) {
           } catch (err) {
             console.error(`Failed to edit admin embed #${predictionId}:`, err.message);
           }
+        } else {
+          console.warn(`syncPredictionEmbeds: admin message ${prediction.admin_message_id} for #${predictionId} not found in channel`);
         }
       }
     }
+  } else {
+    console.warn(`syncPredictionEmbeds: no admin_message_id on #${predictionId} — admin embed was never posted`);
   }
 }
 
@@ -524,7 +529,7 @@ async function handleLinkUpshot(interaction) {
 async function handleMyStats(interaction) {
   const stats = getUserStats(interaction.user.id, currentMonthKey());
   const payload = buildStatsCard(stats, interaction.user.id, currentMonthLabel());
-  await interaction.reply({ ...payload, flags: (1 << 15) | (1 << 6) });
+  await interaction.reply({ ...payload, flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral });
 }
 
 async function handleUpshotRank(interaction) {
@@ -572,7 +577,7 @@ async function handlePastLeaderboard(interaction) {
   const [yyyy, mm] = monthInput.split('-');
   const label = new Date(parseInt(yyyy), parseInt(mm) - 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
   const payload = buildLeaderboard(entries, label);
-  await interaction.reply({ ...payload, flags: (1 << 15) | (1 << 6) });
+  await interaction.reply({ ...payload, flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral });
 }
 
 // Cache contest data per user for navigation (cleared after 10 min)
