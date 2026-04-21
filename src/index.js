@@ -787,6 +787,9 @@ async function handleSetup(interaction) {
     case 'auto-rate-all': {
       return handleAutoRateAll(interaction, guildId);
     }
+    case 'check-all-resolutions': {
+      return handleCheckAllResolutions(interaction);
+    }
     case 'user-info': {
       const user = interaction.options.getUser('user', true);
       const profile = getUpshotProfile(user.id);
@@ -1056,6 +1059,25 @@ async function handleAcceptRatings(interaction, batchId) {
   ];
   if (skipped.length) lines.push(`⏭️ Skipped **${skipped.length}**: ${skipped.join(', ')}`);
   return interaction.editReply({ content: lines.join('\n'), components: [] });
+}
+
+async function handleCheckAllResolutions(interaction) {
+  const count = getUnresolvedCount();
+  if (count === 0) {
+    return interaction.reply({ content: '✅ No unresolved rated predictions to check.', flags: ['Ephemeral'] });
+  }
+
+  await interaction.reply({
+    content: `🔍 Checking **${count}** unresolved prediction(s) — ~3s between each call. Final summary will post to the admin channel.`,
+    flags: ['Ephemeral'],
+  });
+
+  // Fire-and-forget — runAutoResolve already posts its summary via notifyAdmin
+  // and takes ~3s × count, which would exceed the 3s interaction window.
+  // Call runAutoResolve directly so we don't reset the 12h auto-resolve timer.
+  runAutoResolve().catch(err => {
+    console.error('Manual check-all-resolutions failed:', err);
+  });
 }
 
 async function handleCancelRatings(interaction, batchId) {

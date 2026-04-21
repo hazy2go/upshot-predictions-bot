@@ -230,5 +230,9 @@ export const commands = [
     .addSubcommand(sub =>
       sub.setName('auto-rate-all')
         .setDescription('Use AI to suggest star ratings for every unrated prediction (review before applying)')
+    )
+    .addSubcommand(sub =>
+      sub.setName('check-all-resolutions')
+        .setDescription('Manually run the auto-resolve sweep for every unresolved rated prediction')
     ),
 ];
