@@ -26,6 +26,36 @@ export const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName('edit-panel')
+    .setDescription('Edit a previously posted prediction panel (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption(opt =>
+      opt.setName('message_id')
+        .setDescription('ID of the panel message to edit (right-click → Copy Message ID)')
+        .setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('title')
+        .setDescription('New panel title (leave blank to keep current)')
+        .setRequired(false)
+    )
+    .addStringOption(opt =>
+      opt.setName('description')
+        .setDescription('New panel description (leave blank to keep current)')
+        .setRequired(false)
+    )
+    .addAttachmentOption(opt =>
+      opt.setName('image')
+        .setDescription('New banner image (leave blank to keep current)')
+        .setRequired(false)
+    )
+    .addBooleanOption(opt =>
+      opt.setName('remove_image')
+        .setDescription('Remove the banner image entirely')
+        .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
     .setName('link-upshot')
     .setDescription('Link your Upshot profile to your Discord account')
     .addStringOption(opt =>

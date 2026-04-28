@@ -607,15 +607,118 @@ async function handleMyContests(interaction) {
   await interaction.editReply(payload);
 }
 
+// Download a Discord CDN attachment into a buffer so we can re-upload it as a
+// real message attachment. Discord's signed CDN URLs from option attachments
+// expire — referencing them directly in MediaGallery items breaks the image
+// once the signature rotates. Re-uploading via attachment:// keeps it durable.
+async function downloadAttachment(att) {
+  if (!att?.url) return null;
+  if (att.contentType && !att.contentType.startsWith('image/')) return null;
+  const res = await fetch(att.url);
+  if (!res.ok) return null;
+  const buf = Buffer.from(await res.arrayBuffer());
+  // Sanitize filename — fall back to extension from contentType.
+  let name = (att.name || 'panel').replace(/[^a-zA-Z0-9._-]/g, '_');
+  if (!/\.[a-zA-Z0-9]+$/.test(name)) {
+    const ext = att.contentType?.split('/')[1] || 'png';
+    name = `${name}.${ext}`;
+  }
+  return { buffer: buf, name };
+}
+
 async function handlePanel(interaction) {
   const title = interaction.options.getString('title', true);
   const description = interaction.options.getString('description', true);
   const imageAtt = interaction.options.getAttachment('image');
-  const imageUrl = imageAtt?.contentType?.startsWith('image/') ? imageAtt.url : null;
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  const files = [];
+  let imageUrl = null;
+  if (imageAtt) {
+    const dl = await downloadAttachment(imageAtt);
+    if (dl) {
+      files.push(new AttachmentBuilder(dl.buffer, { name: dl.name }));
+      imageUrl = `attachment://${dl.name}`;
+    }
+  }
 
   const payload = buildPredictionPanel(title, description, imageUrl);
-  await interaction.channel.send(payload);
-  await interaction.reply({ content: '✅ Panel posted!', flags: ['Ephemeral'] });
+  await interaction.channel.send({ ...payload, files });
+  await interaction.editReply({ content: '✅ Panel posted!' });
+}
+
+// Parse title / description from an existing panel message so /edit-panel can
+// keep fields the admin didn't override. Mirrors buildPredictionPanel layout:
+// container -> [text("## title"), separator, text(description), maybe gallery, separator, actionRow].
+function parsePanelMessage(message) {
+  const container = message.components?.[0];
+  const kids = container?.components;
+  if (!kids || kids.length < 3) return null;
+  const titleNode = kids[0];
+  const descNode = kids[2];
+  const titleRaw = titleNode?.content ?? '';
+  const title = titleRaw.replace(/^##\s*/, '');
+  const description = descNode?.content ?? '';
+  return { title, description };
+}
+
+async function handleEditPanel(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+
+  const messageId = interaction.options.getString('message_id', true);
+  const newTitle = interaction.options.getString('title');
+  const newDesc = interaction.options.getString('description');
+  const newImageAtt = interaction.options.getAttachment('image');
+  const removeImage = interaction.options.getBoolean('remove_image') ?? false;
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  const message = await safeGetMessage(interaction.channel, messageId);
+  if (!message) {
+    return interaction.editReply({ content: '❌ Could not find that message in this channel. Run /edit-panel in the same channel as the panel.' });
+  }
+  if (message.author?.id !== client.user.id) {
+    return interaction.editReply({ content: '❌ That message wasn\'t posted by this bot.' });
+  }
+
+  const current = parsePanelMessage(message);
+  if (!current) {
+    return interaction.editReply({ content: '❌ That message doesn\'t look like a prediction panel.' });
+  }
+
+  const title = newTitle ?? current.title;
+  const description = newDesc ?? current.description;
+
+  const files = [];
+  let imageUrl = null;
+  if (removeImage) {
+    // leave imageUrl null and files empty
+  } else if (newImageAtt) {
+    const dl = await downloadAttachment(newImageAtt);
+    if (dl) {
+      files.push(new AttachmentBuilder(dl.buffer, { name: dl.name }));
+      imageUrl = `attachment://${dl.name}`;
+    }
+  } else {
+    // Preserve existing image by re-downloading and re-attaching it. We can't
+    // just keep the old URL — Discord rotates signatures, and on edit, files
+    // not re-supplied are dropped from the message.
+    const existing = message.attachments?.first?.();
+    if (existing) {
+      const dl = await downloadAttachment(existing);
+      if (dl) {
+        files.push(new AttachmentBuilder(dl.buffer, { name: dl.name }));
+        imageUrl = `attachment://${dl.name}`;
+      }
+    }
+  }
+
+  const payload = buildPredictionPanel(title, description, imageUrl);
+  await message.edit({ ...payload, files, attachments: [] });
+  await interaction.editReply({ content: '✅ Panel updated.' });
 }
 
 async function handleLeaderboardCommand(interaction) {
@@ -1895,6 +1998,7 @@ client.on(Events.InteractionCreate, async interaction => {
       switch (interaction.commandName) {
         case 'predict': return await showPredictModal(interaction);
         case 'panel': return await handlePanel(interaction);
+        case 'edit-panel': return await handleEditPanel(interaction);
         case 'link-upshot': return await handleLinkUpshot(interaction);
         case 'mystats': return await handleMyStats(interaction);
         case 'upshotrank': return await handleUpshotRank(interaction);
