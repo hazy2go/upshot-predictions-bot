@@ -496,7 +496,8 @@ export function buildLeaderboard(entries, monthLabel, options = {}) {
 
   if (exportMonthKey) {
     children.push(actionRow(
-      button(`leaderboard_export:${exportMonthKey}`, '📥 Export CSV', ButtonStyle.Secondary)
+      button(`leaderboard_export:${exportMonthKey}`, '📥 Export CSV', ButtonStyle.Secondary),
+      button(`leaderboard_grant:${exportMonthKey}`, '🎖️ Grant Role to Top 10', ButtonStyle.Secondary),
     ));
   }
 

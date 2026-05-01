@@ -585,6 +585,55 @@ async function handlePastLeaderboard(interaction) {
   await interaction.reply({ ...payload, flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral });
 }
 
+async function handleLeaderboardGrantRole(interaction, monthKey) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+  if (!/^\d{4}-\d{2}$/.test(monthKey)) {
+    return interaction.reply({ content: '❌ Invalid month.', flags: ['Ephemeral'] });
+  }
+  const roleId = interaction.values?.[0];
+  if (!roleId) {
+    return interaction.reply({ content: '❌ No role selected.', flags: ['Ephemeral'] });
+  }
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  const role = await interaction.guild.roles.fetch(roleId).catch(() => null);
+  if (!role) {
+    return interaction.editReply({ content: '❌ Role not found.' });
+  }
+  const me = interaction.guild.members.me;
+  if (me && role.position >= me.roles.highest.position) {
+    return interaction.editReply({ content: `❌ My highest role is below <@&${roleId}>. Move my role above it.` });
+  }
+
+  const top = getLeaderboard(monthKey, 10);
+  if (top.length === 0) {
+    return interaction.editReply({ content: `❌ No entries for \`${monthKey}\`.` });
+  }
+
+  const granted = [];
+  const failed = [];
+  for (const e of top) {
+    try {
+      const member = await interaction.guild.members.fetch(e.author_id);
+      await member.roles.add(role, `Top 10 of ${monthKey} leaderboard`);
+      granted.push(e.author_id);
+    } catch (err) {
+      failed.push({ id: e.author_id, reason: err.message });
+    }
+  }
+
+  const lines = [
+    `🎖️ Granted <@&${roleId}> to **${granted.length}** of top 10 for \`${monthKey}\``,
+    granted.length > 0 ? granted.map((id, i) => `${i + 1}. <@${id}>`).join('\n') : '',
+    failed.length > 0 ? `\n**Failed (${failed.length}):**\n${failed.map(f => `• <@${f.id}> — ${f.reason}`).join('\n')}` : '',
+  ].filter(Boolean);
+
+  await interaction.editReply({ content: lines.join('\n'), allowedMentions: { parse: [] } });
+}
+
 async function handleLeaderboardExport(interaction, monthKey) {
   if (!/^\d{4}-\d{2}$/.test(monthKey)) {
     return interaction.reply({ content: '❌ Invalid month.', flags: ['Ephemeral'] });
@@ -1592,6 +1641,28 @@ async function handleButton(interaction) {
     return handleLeaderboardExport(interaction, interaction.customId.slice('leaderboard_export:'.length));
   }
 
+  // Leaderboard grant role (admin) — show a role picker
+  if (interaction.customId.startsWith('leaderboard_grant:')) {
+    if (!isAdmin(interaction.member)) {
+      return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+    }
+    const monthKey = interaction.customId.slice('leaderboard_grant:'.length);
+    return interaction.reply({
+      content: `Pick a role to assign to the **top 10** of \`${monthKey}\`:`,
+      components: [{
+        type: 1,
+        components: [{
+          type: 6, // RoleSelect
+          custom_id: `leaderboard_role_select:${monthKey}`,
+          placeholder: 'Select a role',
+          min_values: 1,
+          max_values: 1,
+        }],
+      }],
+      flags: ['Ephemeral'],
+    });
+  }
+
   // AI rating batch buttons (carry a batchId, not a predictionId)
   if (interaction.customId.startsWith('accept_ratings:')) {
     return handleAcceptRatings(interaction, interaction.customId.slice('accept_ratings:'.length));
@@ -2095,6 +2166,13 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.isButton()) {
       return await handleButton(interaction);
+    }
+
+    if (interaction.isRoleSelectMenu?.()) {
+      if (interaction.customId.startsWith('leaderboard_role_select:')) {
+        const monthKey = interaction.customId.slice('leaderboard_role_select:'.length);
+        return await handleLeaderboardGrantRole(interaction, monthKey);
+      }
     }
   } catch (error) {
     console.error('Interaction error:', error);
