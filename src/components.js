@@ -451,7 +451,13 @@ export function buildAdminCard(prediction, upshotUrl) {
 
 // ── Leaderboard ──────────────────────────────────────────────
 
-export function buildLeaderboard(entries, monthLabel) {
+export function buildLeaderboard(entries, monthLabel, options = {}) {
+  const { showProfiles = false, exportMonthKey = null } = options;
+  const profileSuffix = (e) => {
+    if (!showProfiles) return '';
+    return e.upshot_url ? ` · [Upshot](${e.upshot_url})` : ' · *no Upshot*';
+  };
+
   const children = [];
 
   children.push(text(`## 🏆 ${monthLabel} Leaderboard`));
@@ -468,7 +474,7 @@ export function buildLeaderboard(entries, monthLabel) {
       const e = top3[i];
       const hitRate = e.resolved > 0 ? Math.round((e.hits / e.resolved) * 100) : 0;
       children.push(text(
-        `${medals[i]} **<@${e.author_id}>** — **${e.total_points}** pts · ${e.prediction_count} pred · ${hitRate}% hit`
+        `${medals[i]} **<@${e.author_id}>** — **${e.total_points}** pts · ${e.prediction_count} pred · ${hitRate}% hit${profileSuffix(e)}`
       ));
     }
 
@@ -479,7 +485,7 @@ export function buildLeaderboard(entries, monthLabel) {
         const e = entries[i];
         const hitRate = e.resolved > 0 ? Math.round((e.hits / e.resolved) * 100) : 0;
         children.push(text(
-          `\`#${i + 1}\` <@${e.author_id}> · ${e.prediction_count} pred · ${hitRate}% hit · **${e.total_points}** pts`
+          `\`#${i + 1}\` <@${e.author_id}> · ${e.prediction_count} pred · ${hitRate}% hit · **${e.total_points}** pts${profileSuffix(e)}`
         ));
       }
     }
@@ -487,6 +493,12 @@ export function buildLeaderboard(entries, monthLabel) {
 
   children.push(separator());
   children.push(text('-# Updated in real-time · `/predict` to submit · `/mystats` for your stats'));
+
+  if (exportMonthKey) {
+    children.push(actionRow(
+      button(`leaderboard_export:${exportMonthKey}`, '📥 Export CSV', ButtonStyle.Secondary)
+    ));
+  }
 
   return {
     components: [container(Colors.Leaderboard, children)],

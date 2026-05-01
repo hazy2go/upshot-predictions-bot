@@ -575,11 +575,56 @@ async function handlePastLeaderboard(interaction) {
     return interaction.reply({ content: '❌ Invalid format. Use `YYYY-MM` (e.g. `2026-03`).', flags: ['Ephemeral'] });
   }
 
-  const entries = getLeaderboard(monthInput, 10);
+  const entries = getLeaderboard(monthInput, 10).map(e => ({
+    ...e,
+    upshot_url: getUpshotProfile(e.author_id)?.upshot_url || null,
+  }));
   const [yyyy, mm] = monthInput.split('-');
   const label = new Date(parseInt(yyyy), parseInt(mm) - 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-  const payload = buildLeaderboard(entries, label);
+  const payload = buildLeaderboard(entries, label, { showProfiles: true, exportMonthKey: monthInput });
   await interaction.reply({ ...payload, flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral });
+}
+
+async function handleLeaderboardExport(interaction, monthKey) {
+  if (!/^\d{4}-\d{2}$/.test(monthKey)) {
+    return interaction.reply({ content: '❌ Invalid month.', flags: ['Ephemeral'] });
+  }
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  const entries = getLeaderboard(monthKey, 1000);
+  const rows = [['rank', 'discord_id', 'discord_username', 'upshot_url', 'wallet_address', 'total_points', 'predictions', 'hits', 'fails', 'resolved', 'hit_rate_pct']];
+
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    const profile = getUpshotProfile(e.author_id);
+    let username = '';
+    try {
+      const u = await client.users.fetch(e.author_id);
+      username = u?.username || '';
+    } catch { /* ignore */ }
+    const hitRate = e.resolved > 0 ? Math.round((e.hits / e.resolved) * 100) : 0;
+    rows.push([
+      i + 1,
+      e.author_id,
+      username,
+      profile?.upshot_url || '',
+      profile?.wallet_address || '',
+      e.total_points || 0,
+      e.prediction_count || 0,
+      e.hits || 0,
+      e.fails || 0,
+      e.resolved || 0,
+      hitRate,
+    ]);
+  }
+
+  const escape = (v) => {
+    const s = String(v ?? '');
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const csv = rows.map(r => r.map(escape).join(',')).join('\n');
+  const file = new AttachmentBuilder(Buffer.from(csv, 'utf8'), { name: `leaderboard-${monthKey}.csv` });
+  await interaction.editReply({ content: `📥 Leaderboard export for **${monthKey}** (${entries.length} entries)`, files: [file] });
 }
 
 // Cache contest data per user for navigation (cleared after 10 min)
@@ -1540,6 +1585,11 @@ async function handleButton(interaction) {
     const lineupIdx = parseInt(lineupIdxStr, 10);
     if (contestIdx >= contests.length) return interaction.reply({ content: '❌ Contest not found.', flags: ['Ephemeral'] });
     return interaction.update(buildContestLineupPage(contests[contestIdx], lineupIdx, contestIdx));
+  }
+
+  // Leaderboard CSV export
+  if (interaction.customId.startsWith('leaderboard_export:')) {
+    return handleLeaderboardExport(interaction, interaction.customId.slice('leaderboard_export:'.length));
   }
 
   // AI rating batch buttons (carry a batchId, not a predictionId)
