@@ -187,7 +187,7 @@ export function getLeaderboard(monthKey, limit = 20) {
   return db.prepare(`
     SELECT
       author_id,
-      SUM(total_points) as total_points,
+      SUM(CASE WHEN outcome IS NOT NULL THEN total_points ELSE 0 END) as total_points,
       COUNT(*) as prediction_count,
       SUM(CASE WHEN outcome = 'hit' THEN 1 ELSE 0 END) as hits,
       SUM(CASE WHEN outcome = 'fail' THEN 1 ELSE 0 END) as fails,
@@ -211,7 +211,7 @@ export function getUserStats(authorId, monthKey) {
   const stats = db.prepare(`
     SELECT
       COUNT(*) as prediction_count,
-      SUM(total_points) as total_points,
+      SUM(CASE WHEN outcome IS NOT NULL THEN total_points ELSE 0 END) as total_points,
       SUM(CASE WHEN outcome = 'hit' THEN 1 ELSE 0 END) as hits,
       SUM(CASE WHEN outcome = 'fail' THEN 1 ELSE 0 END) as fails,
       SUM(CASE WHEN outcome IS NOT NULL THEN 1 ELSE 0 END) as resolved,
