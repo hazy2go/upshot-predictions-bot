@@ -496,7 +496,7 @@ export function buildLeaderboard(entries, monthLabel) {
 
 // ── Personal stats ───────────────────────────────────────────
 
-export function buildStatsCard(stats, userId, monthLabel) {
+export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = []) {
   const children = [];
 
   children.push(text(`## 📊 Your Stats — ${monthLabel}`));
@@ -512,6 +512,22 @@ export function buildStatsCard(stats, userId, monthLabel) {
     `**Avg Quality:** ${avgRating} ⭐`,
     `**Rank:** ${stats.rank ? `#${stats.rank} of ${stats.total_entries}` : 'Unranked'}`,
   ].join('\n')));
+
+  if (scoredPredictions.length > 0) {
+    children.push(separator());
+    children.push(text(`**Scoring Predictions (${scoredPredictions.length})**`));
+    const lines = scoredPredictions.slice(0, 15).map(p => {
+      const id = String(p.id).padStart(4, '0');
+      const stars = '⭐'.repeat(p.star_rating || 0);
+      const outcomeIcon = p.outcome === 'hit' ? '🟢' : p.outcome === 'fail' ? '🔴' : '⏳';
+      const titleSnip = p.title.length > 55 ? p.title.slice(0, 55) + '…' : p.title;
+      return `${outcomeIcon} \`#${id}\` **${p.total_points}**pts ${stars} — ${titleSnip}`;
+    });
+    children.push(text(lines.join('\n')));
+    if (scoredPredictions.length > 15) {
+      children.push(text(`-# +${scoredPredictions.length - 15} more`));
+    }
+  }
 
   children.push(separator());
   children.push(text('-# Points = quality stars (1/3/5) + hit bonus (+10) + tweet bonus (+1)'));

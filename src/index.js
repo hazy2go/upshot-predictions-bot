@@ -8,7 +8,7 @@ import 'dotenv/config';
 import {
   linkUpshot, getUpshotProfile,
   createPrediction, getPrediction, updatePrediction, deletePrediction,
-  countUserDailyPredictions, getUserStats, getLeaderboard,
+  countUserDailyPredictions, getUserStats, getLeaderboard, getUserMonthScoredPredictions,
   getLeaderboardMessageId, setLeaderboardMessageId,
   getConfig, setConfig, getAllConfig,
   getCategories, addCategory, removeCategory,
@@ -527,8 +527,10 @@ async function handleLinkUpshot(interaction) {
 }
 
 async function handleMyStats(interaction) {
-  const stats = getUserStats(interaction.user.id, currentMonthKey());
-  const payload = buildStatsCard(stats, interaction.user.id, currentMonthLabel());
+  const monthKey = currentMonthKey();
+  const stats = getUserStats(interaction.user.id, monthKey);
+  const scored = getUserMonthScoredPredictions(interaction.user.id, monthKey);
+  const payload = buildStatsCard(stats, interaction.user.id, currentMonthLabel(), scored);
   await interaction.reply({ ...payload, flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral });
 }
 
@@ -573,7 +575,7 @@ async function handlePastLeaderboard(interaction) {
     return interaction.reply({ content: '❌ Invalid format. Use `YYYY-MM` (e.g. `2026-03`).', flags: ['Ephemeral'] });
   }
 
-  const entries = getLeaderboard(monthInput);
+  const entries = getLeaderboard(monthInput, 10);
   const [yyyy, mm] = monthInput.split('-');
   const label = new Date(parseInt(yyyy), parseInt(mm) - 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
   const payload = buildLeaderboard(entries, label);
@@ -896,7 +898,9 @@ async function handleSetup(interaction) {
     case 'user-info': {
       const user = interaction.options.getUser('user', true);
       const profile = getUpshotProfile(user.id);
-      const stats = getUserStats(user.id, currentMonthKey());
+      const monthKey = currentMonthKey();
+      const stats = getUserStats(user.id, monthKey);
+      const scored = getUserMonthScoredPredictions(user.id, monthKey);
       const hitRate = stats.resolved > 0 ? Math.round((stats.hits / stats.resolved) * 100) : 0;
       const maxOpen = getMaxOpen(guildId);
       const openPredictions = getUserOpenPredictions(user.id);
@@ -926,8 +930,21 @@ async function handleSetup(interaction) {
         })
         : ['• None'];
 
+      const scoredLines = scored.length > 0
+        ? scored.map(p => {
+          const id = String(p.id).padStart(4, '0');
+          const stars = '⭐'.repeat(p.star_rating || 0);
+          const outcomeIcon = p.outcome === 'hit' ? '🟢' : p.outcome === 'fail' ? '🔴' : '⏳';
+          const shortTitle = p.title.length > 70 ? `${p.title.slice(0, 67)}...` : p.title;
+          return `${outcomeIcon} #${id} **${p.total_points}**pts ${stars} — ${shortTitle}`;
+        })
+        : ['• None'];
+
       const messageChunks = chunkLines([
         ...summaryLines,
+        '',
+        `**Scoring Predictions This Month (${scored.length})**`,
+        ...scoredLines,
         '',
         '**Open Prediction List**',
         ...openLines,

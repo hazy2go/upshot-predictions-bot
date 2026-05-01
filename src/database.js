@@ -227,6 +227,15 @@ export function getUserStats(authorId, monthKey) {
   return { ...stats, rank: rank || null, total_entries: leaderboard.length };
 }
 
+export function getUserMonthScoredPredictions(authorId, monthKey) {
+  return db.prepare(`
+    SELECT id, title, star_rating, outcome, total_points, deadline, status
+    FROM predictions
+    WHERE author_id = ? AND month_key = ? AND star_rating IS NOT NULL
+    ORDER BY total_points DESC, id DESC
+  `).all(authorId, monthKey);
+}
+
 export function getPendingPredictions() {
   const rows = db.prepare(
     "SELECT * FROM predictions WHERE status IN ('pending_verification', 'pending_review', 'rated') ORDER BY created_at ASC"
