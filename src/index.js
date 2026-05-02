@@ -867,6 +867,32 @@ async function handleRefreshCommand(interaction) {
   }
 
   const id = interaction.options.getInteger('id');
+  const all = interaction.options.getBoolean('all');
+
+  if (all) {
+    const predictions = getUnresolvedRatedPredictions();
+    if (predictions.length === 0) {
+      return interaction.reply({ content: '❌ No unresolved rated predictions to refresh.', flags: ['Ephemeral'] });
+    }
+    await interaction.deferReply({ flags: ['Ephemeral'] });
+    let ok = 0;
+    let fail = 0;
+    for (const p of predictions) {
+      try {
+        await syncPredictionEmbeds(p.id, interaction.guildId);
+        ok++;
+      } catch (err) {
+        fail++;
+        console.warn(`refresh all: #${p.id} failed — ${err.message}`);
+      }
+    }
+    return interaction.editReply({ content: `✅ Refreshed **${ok}** prediction(s)${fail ? ` — ${fail} failed (see logs)` : ''}.` });
+  }
+
+  if (id == null) {
+    return interaction.reply({ content: '❌ Provide an `id` or set `all:true`.', flags: ['Ephemeral'] });
+  }
+
   const prediction = getPrediction(id);
   if (!prediction) {
     return interaction.reply({ content: `❌ Prediction #${id} not found.`, flags: ['Ephemeral'] });

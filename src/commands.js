@@ -87,12 +87,17 @@ export const commands = [
 
   new SlashCommandBuilder()
     .setName('refresh')
-    .setDescription('Re-sync a prediction embed to show updated buttons (admin only)')
+    .setDescription('Re-sync prediction embeds to show updated buttons (admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .addIntegerOption(opt =>
       opt.setName('id')
-        .setDescription('Prediction ID to refresh')
-        .setRequired(true)
+        .setDescription('Prediction ID to refresh (omit when using all=true)')
+        .setRequired(false)
+    )
+    .addBooleanOption(opt =>
+      opt.setName('all')
+        .setDescription('Refresh ALL unresolved rated predictions')
+        .setRequired(false)
     ),
 
   new SlashCommandBuilder()
