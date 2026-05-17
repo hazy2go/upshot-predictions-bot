@@ -42,7 +42,7 @@ Two `/setup` subcommands let admins clear the review queue in bulk instead of cl
 
 - **`/setup auto-verify-all`** — Loops every unverified prediction and hits the Upshot API to check ownership. Passing predictions are marked verified (same effect as clicking the button manually — embeds and state update identically). Failing predictions are listed back so you can handle them by hand.
 
-- **`/setup auto-rate-all`** — Uses [NVIDIA NIM](https://build.nvidia.com) (`z-ai/glm4.7`) to suggest 1-3 star ratings for every verified-but-unrated prediction. The bot feeds each prediction's title, description, category, **plus the real Upshot card/event context** (card name, event description, the specific outcome the user is betting on) to the model and returns a star rating with a one-sentence reason.
+- **`/setup auto-rate-all`** — Uses [NVIDIA NIM](https://build.nvidia.com) (`meta/llama-4-maverick-17b-128e-instruct`) to suggest 1-3 star ratings for every verified-but-unrated prediction. The bot feeds each prediction's title, description, category, **plus the real Upshot card/event context** (card name, event description, the specific outcome the user is betting on) to the model and returns a star rating with a one-sentence reason.
 
   You get an ephemeral summary listing every suggestion, then two buttons: **Accept All** or **Cancel**. Accept All applies the ratings one by one, re-checking each prediction at apply time so it safely skips anything that got manually rated, deleted, or un-verified in the meantime.
 
@@ -182,7 +182,7 @@ API failures are handled gracefully — if the API is down, predictions still su
 
 ## NVIDIA NIM Integration
 
-The `/setup auto-rate-all` command uses [NVIDIA NIM](https://build.nvidia.com) (`z-ai/glm4.7`) to suggest admin star ratings. Requires a free API key from build.nvidia.com. The request is streamed, the model's reasoning trace is discarded, and only the final JSON (`{stars, reason}`) is applied. If `NVIDIA_NIM_API_KEY` is missing, the command returns a clear error and no other features are affected.
+The `/setup auto-rate-all` command uses [NVIDIA NIM](https://build.nvidia.com) (`meta/llama-4-maverick-17b-128e-instruct`) to suggest admin star ratings. Requires a free API key from build.nvidia.com. The request is streamed and only the final JSON (`{stars, reason}`) is applied. If `NVIDIA_NIM_API_KEY` is missing, the command returns a clear error and no other features are affected.
 
 ## Setup
 
@@ -245,5 +245,5 @@ pm2 start ecosystem.config.cjs
 - **Discord** — discord.js v14 with Components v2
 - **Database** — SQLite via better-sqlite3 (WAL mode)
 - **API** — Upshot public API (card details, ownership, resolution, season rank, contests)
-- **AI** — NVIDIA NIM (`z-ai/glm4.7`) for optional bulk star rating
+- **AI** — NVIDIA NIM (`meta/llama-4-maverick-17b-128e-instruct`) for optional bulk star rating
 - **Auto-resolve** — 12h interval, checks card event outcomes via API

@@ -1241,7 +1241,7 @@ async function handleAutoRateAll(interaction, guildId) {
   const batchId = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   pendingRatingBatches.set(batchId, { suggestions, guildId, adminId: interaction.user.id, createdAt: Date.now() });
 
-  const header = `**AI rating suggestions** (${suggestions.length} predictions, model: \`z-ai/glm4.7\`)`;
+  const header = `**AI rating suggestions** (${suggestions.length} predictions, model: \`meta/llama-4-maverick-17b-128e-instruct\`)`;
   const body = suggestions.map(s => {
     const stars = '⭐'.repeat(s.stars) + '☆'.repeat(3 - s.stars);
     const title = s.title.length > 60 ? s.title.slice(0, 57) + '...' : s.title;

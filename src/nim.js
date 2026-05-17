@@ -1,14 +1,12 @@
 // ── NVIDIA NIM AI rater ─────────────────────────────────────
 //
 // OpenAI-compatible endpoint at https://integrate.api.nvidia.com/v1
-// Uses z-ai/glm4.7 with thinking mode. The reasoning_content stream is
-// discarded; only the final JSON in `content` is parsed.
+// Uses meta/llama-4-maverick. SSE streaming; only `content` deltas are kept.
 //
 // Requires NVIDIA_NIM_API_KEY in .env.
 
 const BASE = 'https://integrate.api.nvidia.com/v1';
-const MODEL = 'z-ai/glm4.7';
-const FALLBACK_MODEL = 'meta/llama-4-maverick-17b-128e-instruct';
+const MODEL = 'meta/llama-4-maverick-17b-128e-instruct';
 
 const RUBRIC = `You are an expert prediction-market analyst rating the quality of a user-submitted prediction on a 1-3 star scale.
 
@@ -102,8 +100,8 @@ export async function rateWithAI(ctx) {
   const apiKey = process.env.NVIDIA_NIM_API_KEY;
   if (!apiKey) throw new Error('NVIDIA_NIM_API_KEY not set in .env');
 
-  const buildBody = (model) => ({
-    model,
+  const body = {
+    model: MODEL,
     messages: [
       { role: 'system', content: RUBRIC },
       { role: 'user', content: buildUserPrompt(ctx) },
@@ -112,36 +110,22 @@ export async function rateWithAI(ctx) {
     top_p: 1,
     max_tokens: 256,
     stream: true,
-    // Thinking off — a 1-3 rating doesn't need a reasoning trace.
-    chat_template_kwargs: { enable_thinking: false },
-  });
+  };
 
-  // Try primary model with one retry, then fall back to a second model with one retry.
-  // NIM free tier latency is variable, a quick retry usually succeeds; if the primary
-  // model is degraded outright (persistent 5xx/timeout), the fallback covers it.
-  const models = [MODEL, FALLBACK_MODEL];
+  // NIM free tier latency is variable; a quick retry usually clears transient errors.
   let lastErr;
-  for (let m = 0; m < models.length; m++) {
-    const model = models[m];
-    const body = buildBody(model);
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        const content = await callNim(apiKey, body, 60_000);
-        const parsed = parseRating(content);
-        if (!parsed) throw new Error(`AI returned unparseable response: ${content.slice(0, 200)}`);
-        return parsed;
-      } catch (err) {
-        lastErr = err;
-        const transient = /timeout|terminated|fetch failed|NVIDIA NIM 5\d\d/i.test(err.message);
-        const lastTry = m === models.length - 1 && attempt === 2;
-        if (lastTry || !transient) {
-          if (!transient) throw err;
-          if (lastTry) throw err;
-        }
-        const next = attempt === 2 ? `falling back to ${models[m + 1]}` : 'retrying';
-        console.warn(`rateWithAI [${model}] attempt ${attempt} failed (${err.message}) — ${next}`);
-        await new Promise(r => setTimeout(r, 1500));
-      }
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const content = await callNim(apiKey, body, 60_000);
+      const parsed = parseRating(content);
+      if (!parsed) throw new Error(`AI returned unparseable response: ${content.slice(0, 200)}`);
+      return parsed;
+    } catch (err) {
+      lastErr = err;
+      const transient = /timeout|terminated|fetch failed|NVIDIA NIM 5\d\d/i.test(err.message);
+      if (!transient || attempt === 3) throw err;
+      console.warn(`rateWithAI [${MODEL}] attempt ${attempt} failed (${err.message}) — retrying`);
+      await new Promise(r => setTimeout(r, 1500));
     }
   }
   throw lastErr;
