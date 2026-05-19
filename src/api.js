@@ -133,13 +133,16 @@ export async function checkCardOwnership(walletAddress, cardId) {
  */
 async function checkCardInContests(walletAddress, cardId) {
   try {
-    const res = await fetch(`${BASE}/contests?status=LIVE`, {
+    // NOTE: ?status=LIVE upstream filter is unreliable — returns only a subset
+    // of LIVE contests. Fetch all and filter client-side.
+    const res = await fetch(`${BASE}/contests`, {
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) return false;
     const json = await res.json();
-    const contests = json.data || json;
-    if (!Array.isArray(contests)) return false;
+    const all = json.data || json;
+    if (!Array.isArray(all)) return false;
+    const contests = all.filter(c => c.status === 'LIVE');
 
     const lowerWallet = walletAddress.toLowerCase();
 
@@ -178,11 +181,12 @@ async function checkCardInContests(walletAddress, cardId) {
  */
 export async function getUserContestLineups(walletAddress) {
   try {
-    const res = await fetch(`${BASE}/contests?status=LIVE`, { signal: AbortSignal.timeout(10_000) });
+    const res = await fetch(`${BASE}/contests`, { signal: AbortSignal.timeout(10_000) });
     if (!res.ok) return [];
     const json = await res.json();
-    const contests = json.data || json;
-    if (!Array.isArray(contests)) return [];
+    const all = json.data || json;
+    if (!Array.isArray(all)) return [];
+    const contests = all.filter(c => c.status === 'LIVE');
 
     const lowerWallet = walletAddress.toLowerCase();
 
