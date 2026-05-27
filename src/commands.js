@@ -291,8 +291,9 @@ export const commands = [
     )
     .addStringOption(opt =>
       opt.setName('pack')
-        .setDescription('Pack name (from your unopened packs)')
+        .setDescription('Pick a pack from your unopened packs')
         .setRequired(true)
+        .setAutocomplete(true)
     )
     .addIntegerOption(opt =>
       opt.setName('quantity')
