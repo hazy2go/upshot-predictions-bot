@@ -400,3 +400,37 @@ export async function getUserProfile(walletAddress) {
     return null;
   }
 }
+
+/**
+ * Unopened packs held by a wallet.
+ *   GET /packs/balances/{wallet}
+ *   → { data: { [packId]: { quantity, pack: { id, name, status, cardQuantity } } } }
+ * Returns [{ packId, name, quantity, status, cardQuantity }] for packs with qty > 0.
+ * Read-only. Best-effort: returns [] on any failure.
+ */
+export async function getUserPacks(walletAddress) {
+  try {
+    const res = await fetch(`${BASE}/packs/balances/${walletAddress}`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return [];
+    const json = await res.json();
+    const data = json.data ?? {};
+    const out = [];
+    for (const [packId, entry] of Object.entries(data)) {
+      const quantity = parseInt(entry?.quantity ?? '0', 10);
+      if (!quantity || quantity <= 0) continue;
+      out.push({
+        packId: entry?.pack?.id || packId,
+        name: entry?.pack?.name || packId,
+        quantity,
+        status: entry?.pack?.status || null,
+        cardQuantity: entry?.pack?.cardQuantity ?? null,
+      });
+    }
+    return out;
+  } catch (err) {
+    console.error(`Upshot API: getUserPacks(${walletAddress}) failed:`, err.message);
+    return [];
+  }
+}
