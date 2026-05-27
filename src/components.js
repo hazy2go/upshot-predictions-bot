@@ -66,8 +66,6 @@ export function buildPredictionPanel(title, description, imageUrl) {
   ));
   children.push(actionRow(
     button('hub_mystats', '📊 My Stats', ButtonStyle.Secondary),
-    button('hub_leaderboard', '🏆 Leaderboard', ButtonStyle.Secondary),
-    button('hub_mycontests', '🏅 My Contests', ButtonStyle.Secondary),
     button('panel_help:0', '❓ How It Works', ButtonStyle.Secondary),
   ));
 
@@ -93,7 +91,7 @@ export function buildCardPicker(cards, { truncated = false } = {}) {
   const options = cards.slice(0, 25).map(c => ({
     label: c.name.length > 100 ? c.name.slice(0, 97) + '...' : c.name,
     value: c.id,
-    description: c.inContest ? '🏅 In a contest lineup' : 'In your wallet',
+    description: c.inContest ? '🏅 From a contest you entered' : 'In your wallet',
   }));
 
   children.push({
@@ -129,10 +127,11 @@ export function buildCardPickerEmpty() {
       container(Colors.Stats, [
         text('## 📇 No Predictable Cards Found'),
         text('We couldn\'t find any Upshot cards in your wallet or active contest lineups.'),
-        text('-# Your wallet may be empty, or the Upshot API may be temporarily down. You can still submit by pasting a card URL.'),
+        text('-# Your wallet may be empty, or the Upshot API may be temporarily down. Get cards at [upshot.cards](https://upshot.cards), then tap Try Again — or submit by pasting a card URL.'),
         separator(),
         actionRow(
-          button('panel_predict', '✏️ Paste a card URL instead', ButtonStyle.Primary),
+          button('mycards_retry', '🔄 Try Again', ButtonStyle.Success),
+          button('panel_predict', '✏️ Paste a card URL instead', ButtonStyle.Secondary),
         ),
       ]),
     ],
@@ -148,7 +147,7 @@ const helpPages = [
     '## Getting Started',
     '',
     '**The panel has everything — no commands needed:**',
-    '📇 **My Cards** · 🔮 **Make a Prediction** · 📊 **My Stats** · 🏆 **Leaderboard** · 🏅 **My Contests**',
+    '📇 **My Cards** · 🔮 **Make a Prediction** · 📊 **My Stats** · ❓ **How It Works**',
     '',
     '**1. Link your Upshot profile**',
     'The first time you tap **My Cards** or **Make a Prediction**, you\'ll be asked to paste your Upshot profile URL.',
@@ -171,7 +170,8 @@ const helpPages = [
     'Prefer to paste a link? On [upshot.cards](https://upshot.cards), open any card you own and copy the URL (or click **Share**), then paste it into the form.',
     '',
     '**What happens after you submit:**',
-    '- The bot fetches the card image and deadline automatically',
+    '- The bot fetches the card image, name, and deadline automatically',
+    '- Your prediction is titled after the card — you just write the thesis',
     '- It checks your wallet (and contest lineups) actually hold the card',
     '- Your prediction is posted to the feed and sent for admin review',
     '',
@@ -205,13 +205,14 @@ const helpPages = [
     '',
     '- **1 prediction per day** — make it count',
     '- **Edit window** — you can edit within 1 hour of submitting',
-    '- **Leaderboard** — resets monthly, top predictors earn rewards',
+    '- **Leaderboard** — auto-posted in its own channel, resets monthly; top predictors earn rewards',
     '- **Card required** — every prediction must be backed by an Upshot card you own',
     '- **Auto-resolve** — outcomes are checked automatically via the Upshot API every 12h',
     '',
-    '**Quick links**',
-    '`/predict` — Submit via command',
-    '`/mystats` — Check your stats and rank',
+    '**Prefer typing? Optional slash-command shortcuts:**',
+    '`/mycontests` — Your active contest lineups',
+    '`/pastleaderboard` — View a past month\'s leaderboard',
+    '`/upshotrank` — Your Upshot season rank',
     '`/link-upshot` — Update your profile link',
   ].join('\n'),
 ];
@@ -298,6 +299,26 @@ export function buildContestLineupPage(contest, lineupIdx, contestIdx) {
   }
 
   children.push(separator());
+
+  // Predict directly from this lineup — no backtracking to the card picker.
+  const predictOptions = lineup.cards.slice(0, 25).map(c => ({
+    label: c.name.length > 100 ? c.name.slice(0, 97) + '...' : c.name,
+    value: c.id,
+    description: '🏅 From this contest lineup',
+  }));
+  if (predictOptions.length > 0) {
+    children.push({
+      type: CT.ActionRow,
+      components: [{
+        type: CT.StringSelect,
+        custom_id: 'contest_predict_select',
+        placeholder: '🔮 Predict on a card from this lineup…',
+        min_values: 1,
+        max_values: 1,
+        options: predictOptions,
+      }],
+    });
+  }
 
   // Navigation
   const btns = [];
@@ -578,7 +599,7 @@ export function buildLeaderboard(entries, monthLabel, options = {}) {
     color: Colors.Leaderboard,
     title: `🏆 ${monthLabel} Leaderboard`,
     description,
-    footer: { text: 'Updated in real-time · /predict to submit · /mystats for your stats' },
+    footer: { text: 'Updated in real-time · Tap 🔮 Make a Prediction to play · 📊 My Stats for your standings' },
     timestamp: new Date().toISOString(),
   };
 
@@ -610,6 +631,10 @@ export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = []
     `**Avg Quality:** ${avgRating} ⭐`,
     `**Rank:** ${stats.rank ? `#${stats.rank} of ${stats.total_entries}` : 'Unranked'}`,
   ].join('\n')));
+
+  if (!stats.rank) {
+    children.push(text('-# Make a rated prediction to join the leaderboard.'));
+  }
 
   if (scoredPredictions.length > 0) {
     children.push(separator());
@@ -643,7 +668,7 @@ export function buildDeleteConfirm(predictionId) {
     components: [
       container(Colors.Fail, [
         text('**⚠️ Confirm Deletion**'),
-        text('This will permanently remove this prediction from the database and delete the public embed.'),
+        text('This will permanently remove this prediction and delete the public prediction post.'),
         actionRow(
           button(`confirm_delete:${predictionId}`, 'Yes, Delete', ButtonStyle.Danger),
           button(`cancel_delete:${predictionId}`, 'Cancel', ButtonStyle.Secondary),

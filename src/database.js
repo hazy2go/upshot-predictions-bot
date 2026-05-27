@@ -202,7 +202,7 @@ export function getLeaderboard(monthKey, limit = 20) {
 
 export function hasUnresolvedPredictionForCard(cardId) {
   const row = db.prepare(
-    "SELECT id, author_id FROM predictions WHERE card_id = ? AND outcome IS NULL LIMIT 1"
+    "SELECT id, author_id, title, embed_message_id FROM predictions WHERE card_id = ? AND outcome IS NULL LIMIT 1"
   ).get(cardId);
   return row || null;
 }
@@ -296,6 +296,24 @@ export function getLeaderboardMessageId(guildId) {
 
 export function setLeaderboardMessageId(guildId, messageId) {
   db.prepare("INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)").run(`leaderboard_msg_${guildId}`, messageId);
+}
+
+// ── Prediction panels (tracked so layout changes can be re-rendered) ──
+
+export function getPanels(guildId) {
+  const row = db.prepare("SELECT value FROM bot_state WHERE key = ?").get(`panels_${guildId}`);
+  return row?.value ? JSON.parse(row.value) : [];
+}
+
+export function addPanel(guildId, channelId, messageId) {
+  const panels = getPanels(guildId).filter(p => p.messageId !== messageId);
+  panels.push({ channelId, messageId });
+  db.prepare("INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)").run(`panels_${guildId}`, JSON.stringify(panels));
+}
+
+export function removePanel(guildId, messageId) {
+  const panels = getPanels(guildId).filter(p => p.messageId !== messageId);
+  db.prepare("INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)").run(`panels_${guildId}`, JSON.stringify(panels));
 }
 
 /**
