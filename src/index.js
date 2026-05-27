@@ -10,6 +10,7 @@ import {
   createPrediction, getPrediction, updatePrediction, deletePrediction,
   countUserDailyPredictions, getUserStats, getLeaderboard, getUserMonthScoredPredictions,
   getLeaderboardMessageId, setLeaderboardMessageId,
+  getPanels, addPanel, removePanel,
   getConfig, setConfig, getAllConfig,
   getCategories, addCategory, removeCategory,
   resetUser, resetAllUsers, deleteLastPrediction,
@@ -62,6 +63,22 @@ function cfg(guildId, key, fallbackEnv) {
 
 function getPredictionsChannelId(guildId) {
   return cfg(guildId, 'predictions_channel', 'PREDICTIONS_CHANNEL_ID');
+}
+
+// Friendly "this card is already taken" message that links to the blocking
+// prediction, so the user can see what's there instead of guessing and
+// backtracking. `existing` comes from hasUnresolvedPredictionForCard.
+function cardTakenMessage(existing, guildId, userId) {
+  const channelId = getPredictionsChannelId(guildId);
+  const jump = channelId && existing.embed_message_id
+    ? `https://discord.com/channels/${guildId}/${channelId}/${existing.embed_message_id}`
+    : null;
+  const titlePart = existing.title ? `: **${existing.title}**` : '';
+  const linkPart = jump ? ` → [view it](${jump})` : '';
+  if (existing.author_id === userId) {
+    return `⏳ You already have an open prediction on this card${titlePart}${linkPart}. Wait for it to resolve, or pick another card.`;
+  }
+  return `⏳ <@${existing.author_id}> already has an open prediction on this card${titlePart}${linkPart}. Pick another card.`;
 }
 
 function getAdminChannelId(guildId) {
@@ -432,10 +449,11 @@ async function showPredictModal(interaction, { presetCardId = null, presetCardNa
   }
 
   // Store guild context for modal submit. When a card was pre-selected from the
-  // picker, carry its id so the submit handler skips the URL field entirely.
+  // picker, carry its id (and name, used as the title fallback) so the submit
+  // handler skips the URL field entirely.
   setPendingSubmission(interaction.user.id, {
     guildId: interaction.guildId,
-    ...(presetCardId ? { cardId: presetCardId } : {}),
+    ...(presetCardId ? { cardId: presetCardId, cardName: presetCardName } : {}),
   });
 
   const modalTitle = presetCardName
@@ -446,16 +464,8 @@ async function showPredictModal(interaction, { presetCardId = null, presetCardNa
     .setCustomId('predict_modal')
     .setTitle(modalTitle);
 
+  // Title is auto-derived from the card name — we don't ask the user for it.
   const rows = [
-    new ActionRowBuilder().addComponents(
-      new TextInputBuilder()
-        .setCustomId('title')
-        .setLabel('Title')
-        .setPlaceholder('e.g. BTC breaks $100K before April 2026')
-        .setStyle(TextInputStyle.Short)
-        .setMaxLength(100)
-        .setRequired(true)
-    ),
     new ActionRowBuilder().addComponents(
       new TextInputBuilder()
         .setCustomId('description')
@@ -779,9 +789,10 @@ async function handleCardSelect(interaction) {
     return interaction.reply({ content: '❌ No card selected.', flags: ['Ephemeral'] });
   }
   // Re-check — someone may have grabbed this card while the picker was open.
-  if (hasUnresolvedPredictionForCard(cardId)) {
+  const existing = hasUnresolvedPredictionForCard(cardId);
+  if (existing) {
     return interaction.reply({
-      content: '⏳ Someone just submitted a prediction for that card. Tap **📇 My Cards** again to pick another.',
+      content: cardTakenMessage(existing, interaction.guildId, interaction.user.id),
       flags: ['Ephemeral'],
     });
   }
@@ -832,7 +843,9 @@ async function handlePanel(interaction) {
   }
 
   const payload = buildPredictionPanel(title, description, imageUrl);
-  await interaction.channel.send({ ...payload, files });
+  const sent = await interaction.channel.send({ ...payload, files });
+  // Track the panel so layout changes can be re-rendered on restart.
+  addPanel(interaction.guildId, interaction.channel.id, sent.id);
   await interaction.editReply({ content: '✅ Panel posted!' });
 }
 
@@ -906,7 +919,43 @@ async function handleEditPanel(interaction) {
 
   const payload = buildPredictionPanel(title, description, imageUrl);
   await message.edit({ ...payload, files, attachments: [] });
+  // Register (or re-register) this panel so future layout changes propagate.
+  addPanel(interaction.guildId, interaction.channel.id, message.id);
   await interaction.editReply({ content: '✅ Panel updated.' });
+}
+
+// Re-render every tracked prediction panel so a changed layout (buttons, copy)
+// propagates to already-posted panels. Runs on startup; preserves each panel's
+// title/description/image by parsing + re-attaching from the live message.
+async function refreshPanels(guildId) {
+  const panels = getPanels(guildId);
+  if (!panels.length) return;
+  for (const { channelId, messageId } of panels) {
+    const channel = await safeGetChannel(channelId);
+    if (!channel) { removePanel(guildId, messageId); continue; }
+    const message = await safeGetMessage(channel, messageId);
+    if (!message) { removePanel(guildId, messageId); continue; }
+    const current = parsePanelMessage(message);
+    if (!current) continue;
+
+    const files = [];
+    let imageUrl = null;
+    const existing = message.attachments?.first?.();
+    if (existing) {
+      const dl = await downloadAttachment(existing);
+      if (dl) {
+        files.push(new AttachmentBuilder(dl.buffer, { name: dl.name }));
+        imageUrl = `attachment://${dl.name}`;
+      }
+    }
+
+    try {
+      const payload = buildPredictionPanel(current.title, current.description, imageUrl);
+      await message.edit({ ...payload, files, attachments: [] });
+    } catch (err) {
+      console.error(`Failed to refresh panel ${messageId}:`, err.message);
+    }
+  }
 }
 
 async function handleLeaderboardCommand(interaction) {
@@ -1456,7 +1505,7 @@ async function handleLinkProfileModalSubmit(interaction) {
   linkUpshot(interaction.user.id, url, wallet);
 
   await interaction.reply({
-    content: `✅ Profile linked! Wallet: \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\`\n\nNow use \`/predict\` or click the Predict button to submit your first prediction.`,
+    content: `✅ **You're linked!** Wallet \`${wallet.slice(0, 6)}…${wallet.slice(-4)}\`.\n\nNext: tap **📇 My Cards** on the panel to pick a card and make your first prediction — no URL to copy, no title to write.`,
     flags: ['Ephemeral'],
   });
 }
@@ -1476,7 +1525,6 @@ async function handlePredictModalSubmit(interaction) {
   // and the modal has no card_url field — reading it would throw.
   const presetCardId = pending.cardId || null;
 
-  const title = interaction.fields.getTextInputValue('title');
   const description = interaction.fields.getTextInputValue('description');
   const rawCardUrl = presetCardId ? null : (interaction.fields.getTextInputValue('card_url')?.trim() || null);
   const rawTweetUrl = interaction.fields.getTextInputValue('tweet_url')?.trim() || null;
@@ -1516,6 +1564,7 @@ async function handlePredictModalSubmit(interaction) {
   let cardImage = null;
   let ownershipCheck = null;
   let deadlineFormatted = null;
+  let cardName = null;
 
   if (cardId) {
     let cardDetails = null;
@@ -1523,6 +1572,9 @@ async function handlePredictModalSubmit(interaction) {
       cardDetails = await getCardDetails(cardId);
       if (cardDetails?.arweaveUrl) {
         cardImage = cardDetails.arweaveUrl;
+      }
+      if (cardDetails?.name) {
+        cardName = cardDetails.name;
       }
       // Auto-fill deadline from card's event date
       if (cardDetails?.eventDate) {
@@ -1586,11 +1638,7 @@ async function handlePredictModalSubmit(interaction) {
   if (cardId) {
     const existing = hasUnresolvedPredictionForCard(cardId);
     if (existing) {
-      const isSelf = existing.author_id === interaction.user.id;
-      const msg = isSelf
-        ? '❌ You already have an open prediction for this card. Wait for it to resolve first.'
-        : '❌ Someone else already has an open prediction for this card.';
-      return interaction.editReply({ content: msg });
+      return interaction.editReply({ content: cardTakenMessage(existing, guildId, interaction.user.id) });
     }
   }
 
@@ -1600,6 +1648,10 @@ async function handlePredictModalSubmit(interaction) {
   }
 
   const proofType = tweetUrl ? 'tweet' : 'none';
+
+  // Title is auto-derived from the card — fetched name first, then the picker's
+  // label, then a generic fallback (covers API-down submissions).
+  const title = (cardName || pending.cardName || 'Upshot prediction').slice(0, 100);
 
   let prediction;
   try {
@@ -1733,7 +1785,7 @@ async function handleButton(interaction) {
   }
 
   // Hub buttons (self-serve panel) — reuse existing handlers
-  if (interaction.customId === 'hub_mycards') {
+  if (interaction.customId === 'hub_mycards' || interaction.customId === 'mycards_retry') {
     return handleCardPicker(interaction);
   }
   if (interaction.customId === 'hub_mystats') {
@@ -2305,7 +2357,10 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.isStringSelectMenu?.()) {
-      if (interaction.customId === 'predict_card_select') {
+      // Both the card picker and the contest-lineup picker carry a card id in
+      // interaction.values[0] and the name in the option label — handleCardSelect
+      // is generic over both.
+      if (interaction.customId === 'predict_card_select' || interaction.customId === 'contest_predict_select') {
         return await handleCardSelect(interaction);
       }
     }
@@ -2360,6 +2415,12 @@ client.once(Events.ClientReady, async () => {
   }
 
   console.log(`   Use /setup to configure channels, admin role, and limits`);
+
+  // Re-render tracked prediction panels so layout/copy changes propagate to
+  // already-posted panels without an admin having to re-post them.
+  for (const [guildId] of client.guilds.cache) {
+    await refreshPanels(guildId).catch(e => console.error('Panel refresh failed:', e.message));
+  }
 
   // Start auto-resolve timer (first run after 1 minute to let bot settle)
   setTimeout(safeRunAutoResolve, 60_000);
