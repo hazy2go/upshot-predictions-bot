@@ -1,7 +1,7 @@
 import {
   Client, GatewayIntentBits, Events, Routes, AttachmentBuilder,
   ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder,
-  MessageFlags,
+  MessageFlags, ComponentType, ButtonStyle,
 } from 'discord.js';
 import 'dotenv/config';
 
@@ -42,6 +42,7 @@ import {
   extractWallet, extractCardId,
   getCardDetails, checkCardOwnership, checkCardResolution,
   getSeasonRank, getUserContestLineups, getPredictableCards,
+  getUserProfile, getUserPacks, transferPack,
 } from './api.js';
 
 // ── Client ──────────────────────────────────────────────────
@@ -83,6 +84,12 @@ function cardTakenMessage(existing, guildId, userId) {
 
 function getAdminChannelId(guildId) {
   return cfg(guildId, 'admin_channel', 'ADMIN_REVIEW_CHANNEL_ID');
+}
+
+// Upshot Bearer token used to send packs (set via /setup upshot-token, or the
+// UPSHOT_JWT env var). Sensitive — never log its value.
+function getUpshotToken(guildId) {
+  return cfg(guildId, 'upshot_token', 'UPSHOT_JWT');
 }
 
 function getLeaderboardChannelId(guildId) {
@@ -744,6 +751,131 @@ async function handleMyContests(interaction) {
   await interaction.editReply(payload);
 }
 
+// ── Send packs (admin) ───────────────────────────────────────
+//
+// Sends unopened Upshot packs FROM the admin's account (whose Bearer token is
+// configured via /setup upshot-token) TO a member who has linked their Upshot
+// profile. Two-step: /sendpack validates + shows a confirm button; the actual
+// POST /packs/transfer only fires on confirm (it's irreversible).
+
+const pendingPackSends = new Map(); // adminId -> { ...transfer params }
+
+async function handleSendPack(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+
+  const recipient = interaction.options.getUser('user', true);
+  const packQuery = interaction.options.getString('pack', true).trim();
+  const quantity = interaction.options.getInteger('quantity', true);
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  const token = getUpshotToken(interaction.guildId);
+  if (!token) {
+    return interaction.editReply({ content: '❌ No Upshot token set. Run `/setup upshot-token` first (your Bearer accessToken).' });
+  }
+
+  // Sender = the admin's own linked account (the token should belong to it).
+  const sender = getUpshotProfile(interaction.user.id);
+  if (!sender?.wallet_address) {
+    return interaction.editReply({ content: '❌ Link your own Upshot profile first (so I can read your packs) — use `/link-upshot`.' });
+  }
+
+  // Recipient must have linked their profile, and we need their internal id.
+  const recipientProfile = getUpshotProfile(recipient.id);
+  if (!recipientProfile?.wallet_address) {
+    return interaction.editReply({ content: `❌ <@${recipient.id}> hasn't linked an Upshot profile yet, so I can't send to them.` });
+  }
+
+  // Validate the pack against the sender's unopened inventory.
+  const packs = await getUserPacks(sender.wallet_address);
+  if (packs.length === 0) {
+    return interaction.editReply({ content: 'You have no unopened packs to send (or the Upshot API is unreachable).' });
+  }
+  const match = packs.find(p => p.name.toLowerCase() === packQuery.toLowerCase())
+    || packs.find(p => p.packId === packQuery);
+  if (!match) {
+    const list = packs.map(p => `• ${p.name} ×${p.quantity}`).join('\n');
+    return interaction.editReply({ content: `❌ You don't have a pack named **${packQuery}**. Your packs:\n${list}` });
+  }
+  if (quantity > match.quantity) {
+    return interaction.editReply({ content: `❌ You only have **${match.quantity}× ${match.name}** — can't send ${quantity}.` });
+  }
+
+  // Resolve the recipient's internal Upshot user id (required by the transfer).
+  const recipientUpshot = await getUserProfile(recipientProfile.wallet_address);
+  const recipientId = recipientUpshot?.id;
+  if (!recipientId) {
+    return interaction.editReply({ content: '❌ Couldn\'t resolve the recipient\'s Upshot account from their wallet. They may need to log into Upshot once.' });
+  }
+
+  pendingPackSends.set(interaction.user.id, {
+    recipientId,
+    recipientDiscordId: recipient.id,
+    recipientWallet: recipientProfile.wallet_address,
+    packId: match.packId,
+    packName: match.name,
+    quantity,
+    guildId: interaction.guildId,
+  });
+  setTimeout(() => pendingPackSends.delete(interaction.user.id), 5 * 60 * 1000);
+
+  return interaction.editReply({
+    content: `⚠️ **Confirm pack transfer** — this is irreversible.\n\n`
+      + `Send **${quantity}× ${match.name}** to <@${recipient.id}> (\`${recipientProfile.wallet_address.slice(0, 6)}…${recipientProfile.wallet_address.slice(-4)}\`)?`,
+    components: [{
+      type: ComponentType.ActionRow,
+      components: [
+        { type: ComponentType.Button, custom_id: 'confirm_sendpack', label: '✅ Send', style: ButtonStyle.Success },
+        { type: ComponentType.Button, custom_id: 'cancel_sendpack', label: 'Cancel', style: ButtonStyle.Secondary },
+      ],
+    }],
+  });
+}
+
+async function handleConfirmSendPack(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+  const pending = pendingPackSends.get(interaction.user.id);
+  if (!pending) {
+    return interaction.update({ content: '⌛ This confirmation expired. Run `/sendpack` again.', components: [] });
+  }
+  pendingPackSends.delete(interaction.user.id);
+
+  await interaction.update({ content: `⏳ Sending **${pending.quantity}× ${pending.packName}**…`, components: [] });
+
+  const token = getUpshotToken(pending.guildId);
+  const result = await transferPack(
+    { recipientId: pending.recipientId, packId: pending.packId, quantity: pending.quantity },
+    token,
+  );
+
+  if (result.ok) {
+    await interaction.editReply({
+      content: `✅ Sent **${pending.quantity}× ${pending.packName}** to <@${pending.recipientDiscordId}>.`,
+    });
+    notifyAdmin(pending.guildId,
+      `📦 **Pack sent** — <@${interaction.user.id}> sent **${pending.quantity}× ${pending.packName}** to `
+      + `<@${pending.recipientDiscordId}> (\`${pending.recipientWallet}\`).`
+    ).catch(() => {});
+    return;
+  }
+
+  const msg = result.code === 401 || result.code === 403
+    ? '❌ Your Upshot token expired or was rejected. Set a fresh one with `/setup upshot-token` and try again.'
+    : result.code === 'shield'
+      ? '❌ Upshot\'s anti-bot shield blocked the request. Try again shortly; if it persists the transfer must be done from a browser session.'
+      : `❌ Transfer failed: ${result.error}`;
+  await interaction.editReply({ content: msg });
+}
+
+async function handleCancelSendPack(interaction) {
+  pendingPackSends.delete(interaction.user.id);
+  return interaction.update({ content: 'Cancelled — no packs were sent.', components: [] });
+}
+
 // ── Card picker (pick a card to predict — no URL needed) ─────
 
 async function handleCardPicker(interaction) {
@@ -1102,6 +1234,12 @@ async function handleSetup(interaction) {
       const role = interaction.options.getRole('role', true);
       setConfig(guildId, 'admin_role', role.id);
       return interaction.reply({ content: `✅ Admin role set to <@&${role.id}>`, flags: ['Ephemeral'] });
+    }
+    case 'upshot-token': {
+      const token = interaction.options.getString('token', true).trim();
+      setConfig(guildId, 'upshot_token', token);
+      // Never echo the token back.
+      return interaction.reply({ content: '✅ Upshot token saved. `/sendpack` can now send packs from your account.\n-# Tokens expire — re-run this when sends start failing with an auth error.', flags: ['Ephemeral'] });
     }
     case 'max-daily': {
       const limit = interaction.options.getInteger('limit', true);
@@ -1837,6 +1975,14 @@ async function handleButton(interaction) {
     return interaction.reply(payload);
   }
 
+  // Pack send confirmation
+  if (interaction.customId === 'confirm_sendpack') {
+    return handleConfirmSendPack(interaction);
+  }
+  if (interaction.customId === 'cancel_sendpack') {
+    return handleCancelSendPack(interaction);
+  }
+
   // Contest navigation
   if (interaction.customId === 'contest_back') {
     const contests = contestCache.get(interaction.user.id);
@@ -2363,6 +2509,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'resolve': return await handleResolveCommand(interaction);
         case 'leaderboard': return await handleLeaderboardCommand(interaction);
         case 'setup': return await handleSetup(interaction);
+        case 'sendpack': return await handleSendPack(interaction);
       }
     }
 
