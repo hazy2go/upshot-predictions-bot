@@ -864,6 +864,21 @@ function parsePanelMessage(message) {
   return { title, description };
 }
 
+// Find the panel's current image URL on a fetched message. Prefer a real
+// uploaded attachment, but fall back to the MediaGallery item inside the
+// container — Components v2 messages don't always surface the file in
+// message.attachments, which previously caused refresh to drop the image.
+function panelImageUrl(message) {
+  const att = message.attachments?.first?.();
+  if (att?.url) return att.url;
+  const kids = message.components?.[0]?.components ?? [];
+  for (const node of kids) {
+    const url = node?.items?.[0]?.media?.url;
+    if (typeof url === 'string' && /^https?:\/\//.test(url)) return url;
+  }
+  return null;
+}
+
 async function handleEditPanel(interaction) {
   if (!isAdmin(interaction.member)) {
     return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
@@ -940,12 +955,17 @@ async function refreshPanels(guildId) {
 
     const files = [];
     let imageUrl = null;
-    const existing = message.attachments?.first?.();
-    if (existing) {
-      const dl = await downloadAttachment(existing);
+    const srcUrl = panelImageUrl(message);
+    if (srcUrl) {
+      const dl = await downloadAttachment({ url: srcUrl, name: 'panel' });
       if (dl) {
         files.push(new AttachmentBuilder(dl.buffer, { name: dl.name }));
         imageUrl = `attachment://${dl.name}`;
+      } else {
+        // The panel has an image but we couldn't re-fetch it — skip this panel
+        // rather than editing it and stripping the image. We'll retry next boot.
+        console.warn(`Panel ${messageId}: image could not be re-fetched; skipping refresh to preserve it.`);
+        continue;
       }
     }
 
