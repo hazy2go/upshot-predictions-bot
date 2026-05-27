@@ -272,10 +272,10 @@ export const commands = [
     )
     .addSubcommand(sub =>
       sub.setName('upshot-token')
-        .setDescription('Set the Upshot API token used to send packs (your Bearer accessToken)')
+        .setDescription('Manually set the Upshot API Bearer token used to send packs (fallback)')
         .addStringOption(opt =>
           opt.setName('token')
-            .setDescription('localStorage global-store → state.authState.accessToken')
+            .setDescription('Your Upshot API access token (Bearer)')
             .setRequired(true)
         )
     ),
