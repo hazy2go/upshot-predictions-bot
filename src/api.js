@@ -402,6 +402,44 @@ export async function getUserProfile(walletAddress) {
 }
 
 /**
+ * Transfer unopened packs to another Upshot user. MUTATING + IRREVERSIBLE.
+ *   POST /packs/transfer  { recipientId, packId, quantity }
+ *   Authorization: Bearer <accessToken>   (the app JWT from the sender's session)
+ * `recipientId` is the recipient's internal Upshot user id (getUserProfile().id),
+ * NOT a wallet address. Returns { ok, data? } or { ok:false, code, error }.
+ */
+export async function transferPack({ recipientId, packId, quantity }, token) {
+  if (!token) return { ok: false, code: 'no_token', error: 'No Upshot token configured.' };
+  try {
+    const res = await fetch(`${BASE}/packs/transfer`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ recipientId, packId, quantity }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const body = await res.text();
+    // Bunny Shield serves an HTML challenge instead of JSON when it blocks us.
+    if (body.trimStart().startsWith('<')) {
+      return { ok: false, code: 'shield', error: 'Blocked by Upshot anti-bot shield (server-side request was challenged).' };
+    }
+    let json = null;
+    try { json = body ? JSON.parse(body) : null; } catch { /* non-JSON response */ }
+    if (res.status === 401 || res.status === 403) {
+      return { ok: false, code: res.status, error: 'Upshot token expired or invalid — set a fresh one.' };
+    }
+    if (!res.ok) {
+      return { ok: false, code: res.status, error: json?.message || json?.error || `HTTP ${res.status}` };
+    }
+    return { ok: true, data: json?.data ?? json ?? null };
+  } catch (err) {
+    return { ok: false, code: 'network', error: err.message };
+  }
+}
+
+/**
  * Unopened packs held by a wallet.
  *   GET /packs/balances/{wallet}
  *   → { data: { [packId]: { quantity, pack: { id, name, status, cardQuantity } } } }

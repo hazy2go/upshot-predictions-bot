@@ -269,5 +269,35 @@ export const commands = [
     .addSubcommand(sub =>
       sub.setName('check-all-resolutions')
         .setDescription('Manually run the auto-resolve sweep for every unresolved rated prediction')
+    )
+    .addSubcommand(sub =>
+      sub.setName('upshot-token')
+        .setDescription('Set the Upshot API token used to send packs (your Bearer accessToken)')
+        .addStringOption(opt =>
+          opt.setName('token')
+            .setDescription('localStorage global-store → state.authState.accessToken')
+            .setRequired(true)
+        )
+    ),
+
+  new SlashCommandBuilder()
+    .setName('sendpack')
+    .setDescription('Send Upshot pack(s) from your account to a member (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addUserOption(opt =>
+      opt.setName('user')
+        .setDescription('Recipient — must have a linked Upshot profile')
+        .setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('pack')
+        .setDescription('Pack name (from your unopened packs)')
+        .setRequired(true)
+    )
+    .addIntegerOption(opt =>
+      opt.setName('quantity')
+        .setDescription('How many to send')
+        .setRequired(true)
+        .setMinValue(1)
     ),
 ];
