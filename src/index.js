@@ -885,17 +885,11 @@ async function handleConfirmSendPack(interaction) {
       content: `✅ Sent **${pending.quantity}× ${pending.packName}** to <@${pending.recipientDiscordId}>.`,
     });
 
-    // Public announcement in the predictions channel.
+    // Public announcement in the channel where /sendpack was used.
     const packLabel = pending.quantity > 1 ? `**${pending.quantity}× ${pending.packName}** packs` : `a **${pending.packName}** pack`;
-    const channelId = getPredictionsChannelId(pending.guildId);
-    if (channelId) {
-      const channel = await safeGetChannel(channelId);
-      if (channel) {
-        await channel.send({
-          content: `🎁 <@${interaction.user.id}> sent ${packLabel} to <@${pending.recipientDiscordId}>! 🎉`,
-        }).catch(e => console.error('Pack announce failed:', e.message));
-      }
-    }
+    await interaction.channel?.send({
+      content: `🎁 <@${interaction.user.id}> sent ${packLabel} to <@${pending.recipientDiscordId}>! 🎉`,
+    }).catch(e => console.error('Pack announce failed:', e.message));
 
     notifyAdmin(pending.guildId,
       `📦 **Pack sent** — <@${interaction.user.id}> sent **${pending.quantity}× ${pending.packName}** to `
