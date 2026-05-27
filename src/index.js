@@ -332,9 +332,14 @@ async function refreshLeaderboard(guildId) {
         await msg.edit(payload);
         return msg;
       } catch (err) {
-        console.error('Failed to edit leaderboard:', err.message);
-        // Clear stale reference so we create a fresh one below
+        // A leaderboard posted before the embed migration still carries the
+        // Components v2 flag, which Discord won't let coexist with `embeds` on
+        // edit (MESSAGE_CANNOT_USE_LEGACY_FIELDS_WITH_COMPONENTS_V2). This is a
+        // one-time migration, not a real failure — drop the old message and
+        // post a fresh embed below.
+        console.warn('Recreating leaderboard message (could not edit existing one):', err.message);
         setLeaderboardMessageId(guildId, '');
+        try { await msg.delete(); } catch { /* no perms or already gone */ }
       }
     }
   }
