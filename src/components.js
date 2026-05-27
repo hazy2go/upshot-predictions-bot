@@ -31,6 +31,11 @@ function button(customId, label, style = ButtonStyle.Secondary, options = {}) {
   };
 }
 
+// Link-style button: opens a URL instead of firing an interaction (no custom_id).
+function linkButton(url, label) {
+  return { type: CT.Button, style: ButtonStyle.Link, url, label };
+}
+
 /**
  * MediaGallery that references local attachments via attachment:// protocol.
  * Filenames must match the AttachmentBuilder `name` used when sending the message.
@@ -418,6 +423,9 @@ export function buildPredictionCard(prediction, upshotUrl) {
 
   // Action buttons
   const btns = [];
+  if (prediction.card_id) {
+    btns.push(linkButton(`https://upshot.cards/card-detail/${prediction.card_id}`, '🛒 Buy this card'));
+  }
   if (prediction.description.length > 280) {
     btns.push(button(`read_more:${prediction.id}`, '📖 Read More', ButtonStyle.Secondary));
   }
