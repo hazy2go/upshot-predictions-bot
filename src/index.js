@@ -1007,15 +1007,25 @@ async function handleRefreshCommand(interaction) {
     return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
   }
 
+  // Acknowledge immediately. Refreshing embeds hits the Discord API and the
+  // "all" sweep can run for a while; deferring first keeps us inside the 3s
+  // interaction window. If the token already expired (bot was momentarily
+  // busy / reconnecting), bail quietly instead of throwing 10062.
+  try {
+    await interaction.deferReply({ flags: ['Ephemeral'] });
+  } catch (err) {
+    console.warn('refresh: could not defer (interaction expired):', err.message);
+    return;
+  }
+
   const id = interaction.options.getInteger('id');
   const all = interaction.options.getBoolean('all');
 
   if (all) {
     const predictions = getUnresolvedRatedPredictions();
     if (predictions.length === 0) {
-      return interaction.reply({ content: '❌ No unresolved rated predictions to refresh.', flags: ['Ephemeral'] });
+      return interaction.editReply({ content: '❌ No unresolved rated predictions to refresh.' });
     }
-    await interaction.deferReply({ flags: ['Ephemeral'] });
     let ok = 0;
     let fail = 0;
     for (const p of predictions) {
@@ -1031,15 +1041,14 @@ async function handleRefreshCommand(interaction) {
   }
 
   if (id == null) {
-    return interaction.reply({ content: '❌ Provide an `id` or set `all:true`.', flags: ['Ephemeral'] });
+    return interaction.editReply({ content: '❌ Provide an `id` or set `all:true`.' });
   }
 
   const prediction = getPrediction(id);
   if (!prediction) {
-    return interaction.reply({ content: `❌ Prediction #${id} not found.`, flags: ['Ephemeral'] });
+    return interaction.editReply({ content: `❌ Prediction #${id} not found.` });
   }
 
-  await interaction.deferReply({ flags: ['Ephemeral'] });
   await syncPredictionEmbeds(id, interaction.guildId);
   await interaction.editReply({ content: `✅ Refreshed embeds for prediction **#${String(id).padStart(4, '0')}**.` });
 }
