@@ -260,6 +260,61 @@ export async function getUserContestLineups(walletAddress) {
 }
 
 /**
+ * Get every card a wallet could back a prediction with — owned cards (wallet
+ * balances) plus cards entered in active contest lineups.
+ * Returns array of { id, name, inContest }. Best-effort: returns whatever it
+ * could gather, [] on total failure. Wallet-owned cards win over contest cards
+ * when a card appears in both.
+ */
+export async function getPredictableCards(walletAddress) {
+  const byId = new Map();
+
+  // 1. Wallet balances (all cards, no cardId filter).
+  try {
+    const res = await fetch(`${BASE}/cards/balances/${walletAddress}`, {
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (res.ok) {
+      const json = await res.json();
+      const data = json.data ?? json;
+
+      // Normalize into [cardId, entry] pairs. The filtered endpoint returns an
+      // object keyed by cardId; defend against an array shape too.
+      const pairs = Array.isArray(data)
+        ? data.map(e => [e?.cardId || e?.card?.id, e])
+        : Object.entries(data || {});
+
+      for (const [cardId, entry] of pairs) {
+        if (!cardId || !entry) continue;
+        const claimed = parseInt(entry.claimedQuantity || '0', 10);
+        const unclaimed = parseInt(entry.unclaimedQuantity || '0', 10);
+        if (claimed + unclaimed <= 0) continue;
+        byId.set(cardId, { id: cardId, name: entry.card?.name || cardId, inContest: false });
+      }
+    }
+  } catch (err) {
+    console.error(`Upshot API: getPredictableCards balances(${walletAddress}) failed:`, err.message);
+  }
+
+  // 2. Contest lineup cards (reuse the existing lineup fetcher).
+  try {
+    const contests = await getUserContestLineups(walletAddress);
+    for (const contest of contests) {
+      for (const lineup of contest.lineups) {
+        for (const card of lineup.cards) {
+          if (!card?.id || byId.has(card.id)) continue;
+          byId.set(card.id, { id: card.id, name: card.name || card.id, inContest: true });
+        }
+      }
+    }
+  } catch (err) {
+    console.error(`Upshot API: getPredictableCards contests(${walletAddress}) failed:`, err.message);
+  }
+
+  return [...byId.values()];
+}
+
+/**
  * Check if a card's event has been resolved and whether the card won.
  * Returns { resolved: boolean, won: boolean | null, error?: string }
  *   - resolved=false: event still active
