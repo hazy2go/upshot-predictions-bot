@@ -4,6 +4,13 @@ import {
   MessageFlags, ComponentType, ButtonStyle,
 } from 'discord.js';
 import 'dotenv/config';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 import {
   linkUpshot, getUpshotProfile,
@@ -86,10 +93,48 @@ function getAdminChannelId(guildId) {
   return cfg(guildId, 'admin_channel', 'ADMIN_REVIEW_CHANNEL_ID');
 }
 
-// Upshot Bearer token used to send packs (set via /setup upshot-token, or the
-// UPSHOT_JWT env var). Sensitive — never log its value.
+// Read a token from the auto-refreshed cache file (UPSHOT_TOKEN_FILE), if set
+// and not expired. Lets an external extractor own the short-lived token without
+// piping it through Discord. Returns the token string or null.
+function readUpshotTokenFile() {
+  const raw = process.env.UPSHOT_TOKEN_FILE;
+  if (!raw) return null;
+  const file = raw.startsWith('~') ? path.join(os.homedir(), raw.slice(1)) : raw;
+  try {
+    const json = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const token = json.accessToken || json.token || json.access_token;
+    if (!token) return null;
+    const exp = json.expires_at ?? json.expiresAt ?? json.exp;
+    if (exp != null) {
+      const expMs = typeof exp === 'number'
+        ? (exp < 1e12 ? exp * 1000 : exp)   // epoch seconds vs ms
+        : Date.parse(exp);                  // ISO string
+      if (Number.isFinite(expMs) && expMs <= Date.now() + 30_000) return null; // expired (30s skew)
+    }
+    return token;
+  } catch {
+    return null;
+  }
+}
+
+// Upshot Bearer token used to send packs. Resolution order: cache file → DB
+// (/setup upshot-token) → UPSHOT_JWT env. Sensitive — never log its value.
 function getUpshotToken(guildId) {
-  return cfg(guildId, 'upshot_token', 'UPSHOT_JWT');
+  return readUpshotTokenFile() || cfg(guildId, 'upshot_token', 'UPSHOT_JWT');
+}
+
+// Optionally re-run an external token extractor (UPSHOT_TOKEN_REFRESH_CMD) when
+// a request comes back 401/403. No-op (returns false) if not configured.
+async function refreshUpshotToken() {
+  const cmd = process.env.UPSHOT_TOKEN_REFRESH_CMD;
+  if (!cmd) return false;
+  try {
+    await execFileAsync('/bin/sh', ['-c', cmd], { timeout: 60_000 });
+    return true;
+  } catch (err) {
+    console.error('Upshot token refresh failed:', err.message);
+    return false;
+  }
 }
 
 function getLeaderboardChannelId(guildId) {
@@ -874,11 +919,14 @@ async function handleConfirmSendPack(interaction) {
 
   await interaction.update({ content: `⏳ Sending **${pending.quantity}× ${pending.packName}**…`, components: [] });
 
-  const token = getUpshotToken(pending.guildId);
-  const result = await transferPack(
-    { recipientId: pending.recipientId, packId: pending.packId, quantity: pending.quantity },
-    token,
-  );
+  const params = { recipientId: pending.recipientId, packId: pending.packId, quantity: pending.quantity };
+  let result = await transferPack(params, getUpshotToken(pending.guildId));
+
+  // On an auth failure, try a one-shot token refresh (if configured) and retry.
+  if ((result.code === 401 || result.code === 403) && await refreshUpshotToken()) {
+    const fresh = getUpshotToken(pending.guildId);
+    if (fresh) result = await transferPack(params, fresh);
+  }
 
   if (result.ok) {
     await interaction.editReply({
@@ -1274,7 +1322,7 @@ async function handleSetup(interaction) {
       const token = interaction.options.getString('token', true).trim();
       setConfig(guildId, 'upshot_token', token);
       // Never echo the token back.
-      return interaction.reply({ content: '✅ Upshot token saved. `/sendpack` can now send packs from your account.\n-# Tokens expire — re-run this when sends start failing with an auth error.', flags: ['Ephemeral'] });
+      return interaction.reply({ content: '✅ Upshot token saved. `/sendpack` can now send packs from your account.\n-# Manual fallback — tokens expire fast. Prefer the auto-refresh file setup (`UPSHOT_TOKEN_FILE`); otherwise re-run this when sends fail with an auth error.', flags: ['Ephemeral'] });
     }
     case 'max-daily': {
       const limit = interaction.options.getInteger('limit', true);
