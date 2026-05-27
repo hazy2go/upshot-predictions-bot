@@ -760,6 +760,34 @@ async function handleMyContests(interaction) {
 
 const pendingPackSends = new Map(); // adminId -> { ...transfer params }
 
+// Short cache so per-keystroke autocomplete doesn't hammer the Upshot API.
+const packCache = new Map(); // wallet -> { at, packs }
+async function getPacksCached(wallet) {
+  const hit = packCache.get(wallet);
+  if (hit && Date.now() - hit.at < 30_000) return hit.packs;
+  const packs = await getUserPacks(wallet);
+  packCache.set(wallet, { at: Date.now(), packs });
+  return packs;
+}
+
+// Autocomplete for /sendpack's `pack` option — suggests the admin's own
+// unopened packs. Must respond within ~3s, so it's best-effort and cached.
+async function handleSendPackAutocomplete(interaction) {
+  try {
+    const sender = getUpshotProfile(interaction.user.id);
+    if (!sender?.wallet_address) return await interaction.respond([]);
+    const focused = (interaction.options.getFocused() || '').toLowerCase();
+    const packs = await getPacksCached(sender.wallet_address);
+    const choices = packs
+      .filter(p => !focused || p.name.toLowerCase().includes(focused))
+      .slice(0, 25)
+      .map(p => ({ name: `${p.name} (×${p.quantity})`.slice(0, 100), value: p.packId.slice(0, 100) }));
+    return await interaction.respond(choices);
+  } catch {
+    try { return await interaction.respond([]); } catch { /* interaction expired */ }
+  }
+}
+
 async function handleSendPack(interaction) {
   if (!isAdmin(interaction.member)) {
     return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
@@ -2508,6 +2536,11 @@ function scheduleNextResolve() {
 
 client.on(Events.InteractionCreate, async interaction => {
   try {
+    if (interaction.isAutocomplete?.()) {
+      if (interaction.commandName === 'sendpack') return await handleSendPackAutocomplete(interaction);
+      return;
+    }
+
     if (interaction.isChatInputCommand()) {
       switch (interaction.commandName) {
         case 'predict': return await showPredictModal(interaction);
