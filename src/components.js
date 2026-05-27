@@ -532,14 +532,10 @@ export function buildLeaderboard(entries, monthLabel, options = {}) {
     return e.upshot_url ? ` · [Upshot](${e.upshot_url})` : ' · *no Upshot*';
   };
 
-  const children = [];
-
-  children.push(text(`## 🏆 ${monthLabel} Leaderboard`));
-  children.push(text('-# Monthly standings · Rewards distributed at month end'));
-  children.push(separator());
+  const lines = ['*Monthly standings · Rewards distributed at month end*', ''];
 
   if (entries.length === 0) {
-    children.push(text('*No rated predictions this month yet.*'));
+    lines.push('*No rated predictions this month yet.*');
   } else {
     const medals = ['🥇', '🥈', '🥉'];
     const top3 = entries.slice(0, 3);
@@ -547,38 +543,53 @@ export function buildLeaderboard(entries, monthLabel, options = {}) {
     for (let i = 0; i < top3.length; i++) {
       const e = top3[i];
       const hitRate = e.resolved > 0 ? Math.round((e.hits / e.resolved) * 100) : 0;
-      children.push(text(
+      lines.push(
         `${medals[i]} **<@${e.author_id}>** — **${e.total_points}** pts · ${e.prediction_count} pred · ${hitRate}% hit${profileSuffix(e)}`
-      ));
+      );
     }
 
     if (entries.length > 3) {
-      children.push(separator(0));
-
+      lines.push('');
       for (let i = 3; i < entries.length; i++) {
         const e = entries[i];
         const hitRate = e.resolved > 0 ? Math.round((e.hits / e.resolved) * 100) : 0;
-        children.push(text(
+        lines.push(
           `\`#${i + 1}\` <@${e.author_id}> · ${e.prediction_count} pred · ${hitRate}% hit · **${e.total_points}** pts${profileSuffix(e)}`
-        ));
+        );
       }
     }
   }
 
-  children.push(separator());
-  children.push(text('-# Updated in real-time · `/predict` to submit · `/mystats` for your stats'));
-
-  if (exportMonthKey) {
-    children.push(actionRow(
-      button(`leaderboard_export:${exportMonthKey}`, '📥 Export CSV', ButtonStyle.Secondary),
-      button(`leaderboard_grant:${exportMonthKey}`, '🎖️ Grant Role to Top 10', ButtonStyle.Secondary),
-    ));
+  // Embed descriptions cap at 4096 chars — trim trailing standings to fit.
+  let description = lines.join('\n');
+  if (description.length > 4096) {
+    const note = '\n-# …more standings hidden (list too long to display).';
+    const kept = [];
+    let len = 0;
+    for (const line of lines) {
+      if (len + line.length + 1 + note.length > 4096) break;
+      kept.push(line);
+      len += line.length + 1;
+    }
+    description = kept.join('\n') + note;
   }
 
-  return {
-    components: [container(Colors.Leaderboard, children)],
-    flags: 1 << 15,
+  const embed = {
+    color: Colors.Leaderboard,
+    title: `🏆 ${monthLabel} Leaderboard`,
+    description,
+    footer: { text: 'Updated in real-time · /predict to submit · /mystats for your stats' },
+    timestamp: new Date().toISOString(),
   };
+
+  const payload = { embeds: [embed] };
+  if (exportMonthKey) {
+    payload.components = [actionRow(
+      button(`leaderboard_export:${exportMonthKey}`, '📥 Export CSV', ButtonStyle.Secondary),
+      button(`leaderboard_grant:${exportMonthKey}`, '🎖️ Grant Role to Top 10', ButtonStyle.Secondary),
+    )];
+  }
+  return payload;
 }
 
 // ── Personal stats ───────────────────────────────────────────

@@ -608,7 +608,7 @@ async function handlePastLeaderboard(interaction) {
   const [yyyy, mm] = monthInput.split('-');
   const label = new Date(parseInt(yyyy), parseInt(mm) - 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
   const payload = buildLeaderboard(entries, label, { showProfiles: true, exportMonthKey: monthInput });
-  await interaction.reply({ ...payload, flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral });
+  await interaction.reply({ ...payload, flags: MessageFlags.Ephemeral });
 }
 
 async function handleLeaderboardGrantRole(interaction, monthKey) {
@@ -787,7 +787,7 @@ async function handleCardSelect(interaction) {
 async function handleCurrentLeaderboard(interaction) {
   const entries = getLeaderboard(currentMonthKey());
   const payload = buildLeaderboard(entries, currentMonthLabel());
-  await interaction.reply({ ...payload, flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral });
+  await interaction.reply({ ...payload, flags: MessageFlags.Ephemeral });
 }
 
 // Download a Discord CDN attachment into a buffer so we can re-upload it as a
