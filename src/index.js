@@ -28,6 +28,7 @@ import {
   buildLeaderboard, buildStatsCard, buildDeleteConfirm,
   buildPredictionPanel, buildHelpPage,
   buildContestOverview, buildContestLineupPage,
+  buildCardPicker, buildCardPickerEmpty,
 } from './components.js';
 
 import { commands } from './commands.js';
@@ -39,7 +40,7 @@ import {
 import {
   extractWallet, extractCardId,
   getCardDetails, checkCardOwnership, checkCardResolution,
-  getSeasonRank, getUserContestLineups,
+  getSeasonRank, getUserContestLineups, getPredictableCards,
 } from './api.js';
 
 // ── Client ──────────────────────────────────────────────────
@@ -371,32 +372,40 @@ function setPendingSubmission(userId, data) {
  * Show the prediction modal. Works from both /predict command and panel button.
  * If user hasn't linked their profile yet, show the link-profile modal first.
  */
-async function showPredictModal(interaction) {
+/**
+ * Show the first-time profile-link modal. Used wherever a member tries to act
+ * before linking (predict modal, card picker).
+ */
+async function showLinkProfileModal(interaction) {
+  setPendingSubmission(interaction.user.id, {
+    guildId: interaction.guildId,
+    awaitingLink: true,
+  });
+
+  const modal = new ModalBuilder()
+    .setCustomId('link_profile_modal')
+    .setTitle('Link Your Upshot Profile');
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('profile_url')
+        .setLabel('Your Upshot profile URL')
+        .setPlaceholder('https://upshot.cards/profile/0x89A8f58daF80b0B7...')
+        .setStyle(TextInputStyle.Short)
+        .setMaxLength(200)
+        .setRequired(true)
+    ),
+  );
+
+  return interaction.showModal(modal);
+}
+
+async function showPredictModal(interaction, { presetCardId = null, presetCardName = null } = {}) {
   const profile = getUpshotProfile(interaction.user.id);
   if (!profile) {
     // Show profile-link modal first — prediction modal follows after submit
-    setPendingSubmission(interaction.user.id, {
-      guildId: interaction.guildId,
-      awaitingLink: true,
-    });
-
-    const modal = new ModalBuilder()
-      .setCustomId('link_profile_modal')
-      .setTitle('Link Your Upshot Profile');
-
-    modal.addComponents(
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId('profile_url')
-          .setLabel('Your Upshot profile URL')
-          .setPlaceholder('https://upshot.cards/profile/0x89A8f58daF80b0B7...')
-          .setStyle(TextInputStyle.Short)
-          .setMaxLength(200)
-          .setRequired(true)
-      ),
-    );
-
-    return interaction.showModal(modal);
+    return showLinkProfileModal(interaction);
   }
 
   const maxDaily = getMaxDaily(interaction.guildId);
@@ -417,16 +426,22 @@ async function showPredictModal(interaction) {
     });
   }
 
-  // Store guild context for modal submit
+  // Store guild context for modal submit. When a card was pre-selected from the
+  // picker, carry its id so the submit handler skips the URL field entirely.
   setPendingSubmission(interaction.user.id, {
     guildId: interaction.guildId,
+    ...(presetCardId ? { cardId: presetCardId } : {}),
   });
+
+  const modalTitle = presetCardName
+    ? `Predict: ${presetCardName}`.slice(0, 45)
+    : 'Submit a Prediction';
 
   const modal = new ModalBuilder()
     .setCustomId('predict_modal')
-    .setTitle('Submit a Prediction');
+    .setTitle(modalTitle);
 
-  modal.addComponents(
+  const rows = [
     new ActionRowBuilder().addComponents(
       new TextInputBuilder()
         .setCustomId('title')
@@ -445,15 +460,24 @@ async function showPredictModal(interaction) {
         .setMaxLength(2000)
         .setRequired(true)
     ),
-    new ActionRowBuilder().addComponents(
-      new TextInputBuilder()
-        .setCustomId('card_url')
-        .setLabel('Card URL or ID')
-        .setPlaceholder('https://upshot.cards/card-detail/cm... or cm...')
-        .setStyle(TextInputStyle.Short)
-        .setMaxLength(280)
-        .setRequired(true)
-    ),
+  ];
+
+  // Only ask for a card URL when one wasn't already chosen from the picker.
+  if (!presetCardId) {
+    rows.push(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('card_url')
+          .setLabel('Card URL or ID')
+          .setPlaceholder('https://upshot.cards/card-detail/cm... or cm...')
+          .setStyle(TextInputStyle.Short)
+          .setMaxLength(280)
+          .setRequired(true)
+      ),
+    );
+  }
+
+  rows.push(
     new ActionRowBuilder().addComponents(
       new TextInputBuilder()
         .setCustomId('tweet_url')
@@ -464,6 +488,8 @@ async function showPredictModal(interaction) {
         .setRequired(false)
     ),
   );
+
+  modal.addComponents(...rows);
 
   await interaction.showModal(modal);
 }
@@ -701,6 +727,67 @@ async function handleMyContests(interaction) {
 
   const payload = buildContestOverview(contests);
   await interaction.editReply(payload);
+}
+
+// ── Card picker (pick a card to predict — no URL needed) ─────
+
+async function handleCardPicker(interaction) {
+  const profile = getUpshotProfile(interaction.user.id);
+  if (!profile?.wallet_address) {
+    // Not linked (or no wallet detected) — link first, then re-tap My Cards.
+    return showLinkProfileModal(interaction);
+  }
+
+  // Fail fast on the same limits the submit flow enforces.
+  const maxDaily = getMaxDaily(interaction.guildId);
+  if (countUserDailyPredictions(interaction.user.id) >= maxDaily) {
+    return interaction.reply({
+      content: `❌ You've reached the daily limit of **${maxDaily}** predictions. Try again tomorrow.`,
+      flags: ['Ephemeral'],
+    });
+  }
+  const maxOpen = getMaxOpen(interaction.guildId);
+  if (countUserUnresolved(interaction.user.id) >= maxOpen) {
+    return interaction.reply({
+      content: `❌ You have the max of **${maxOpen}** open predictions. Wait for some to resolve before submitting more.`,
+      flags: ['Ephemeral'],
+    });
+  }
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  const cards = await getPredictableCards(profile.wallet_address);
+  // Hide cards that already have an open prediction (one per card, globally) —
+  // this is the "no backtracking" win: you only see cards you can actually post.
+  const available = cards.filter(c => !hasUnresolvedPredictionForCard(c.id));
+
+  if (available.length === 0) {
+    return interaction.editReply(buildCardPickerEmpty());
+  }
+
+  return interaction.editReply(buildCardPicker(available, { truncated: available.length > 25 }));
+}
+
+async function handleCardSelect(interaction) {
+  const cardId = interaction.values?.[0];
+  if (!cardId) {
+    return interaction.reply({ content: '❌ No card selected.', flags: ['Ephemeral'] });
+  }
+  // Re-check — someone may have grabbed this card while the picker was open.
+  if (hasUnresolvedPredictionForCard(cardId)) {
+    return interaction.reply({
+      content: '⏳ Someone just submitted a prediction for that card. Tap **📇 My Cards** again to pick another.',
+      flags: ['Ephemeral'],
+    });
+  }
+  const presetCardName = interaction.component?.options?.find(o => o.value === cardId)?.label || null;
+  return showPredictModal(interaction, { presetCardId: cardId, presetCardName });
+}
+
+async function handleCurrentLeaderboard(interaction) {
+  const entries = getLeaderboard(currentMonthKey());
+  const payload = buildLeaderboard(entries, currentMonthLabel());
+  await interaction.reply({ ...payload, flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral });
 }
 
 // Download a Discord CDN attachment into a buffer so we can re-upload it as a
@@ -1380,9 +1467,13 @@ async function handlePredictModalSubmit(interaction) {
   }
   pendingSubmissions.delete(interaction.user.id);
 
+  // When the card was chosen from the picker, its id is on the pending context
+  // and the modal has no card_url field — reading it would throw.
+  const presetCardId = pending.cardId || null;
+
   const title = interaction.fields.getTextInputValue('title');
   const description = interaction.fields.getTextInputValue('description');
-  const rawCardUrl = interaction.fields.getTextInputValue('card_url')?.trim() || null;
+  const rawCardUrl = presetCardId ? null : (interaction.fields.getTextInputValue('card_url')?.trim() || null);
   const rawTweetUrl = interaction.fields.getTextInputValue('tweet_url')?.trim() || null;
 
   // Validate tweet URL if provided
@@ -1397,7 +1488,7 @@ async function handlePredictModalSubmit(interaction) {
     });
   }
 
-  // Validate card URL/ID format before hitting API
+  // Validate card URL/ID format before hitting API (skipped for picker cards)
   if (rawCardUrl) {
     const isUrl = rawCardUrl.startsWith('https://') && rawCardUrl.includes('upshot');
     const isRawId = /^cm[a-z0-9]{10,}$/i.test(rawCardUrl);
@@ -1416,7 +1507,7 @@ async function handlePredictModalSubmit(interaction) {
 
   // Extract card ID and fetch card details + ownership check
   // API failures are non-blocking — prediction still submits without card data
-  const cardId = rawCardUrl ? extractCardId(rawCardUrl) : null;
+  const cardId = presetCardId || (rawCardUrl ? extractCardId(rawCardUrl) : null);
   let cardImage = null;
   let ownershipCheck = null;
   let deadlineFormatted = null;
@@ -1634,6 +1725,20 @@ async function handleButton(interaction) {
   // Panel predict button
   if (interaction.customId === 'panel_predict') {
     return showPredictModal(interaction);
+  }
+
+  // Hub buttons (self-serve panel) — reuse existing handlers
+  if (interaction.customId === 'hub_mycards') {
+    return handleCardPicker(interaction);
+  }
+  if (interaction.customId === 'hub_mystats') {
+    return handleMyStats(interaction);
+  }
+  if (interaction.customId === 'hub_leaderboard') {
+    return handleCurrentLeaderboard(interaction);
+  }
+  if (interaction.customId === 'hub_mycontests') {
+    return handleMyContests(interaction);
   }
 
   // Help page buttons (panel_help:0, panel_help:1, etc.)
@@ -2192,6 +2297,12 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.isButton()) {
       return await handleButton(interaction);
+    }
+
+    if (interaction.isStringSelectMenu?.()) {
+      if (interaction.customId === 'predict_card_select') {
+        return await handleCardSelect(interaction);
+      }
     }
 
     if (interaction.isRoleSelectMenu?.()) {

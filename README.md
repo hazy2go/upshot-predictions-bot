@@ -6,19 +6,22 @@ A Discord bot that lets community members submit predictions backed by their [Up
 
 ### For Users
 
-1. **Link your Upshot profile** — Use `/predict` or click "Make a Prediction" on a panel. If it's your first time, you'll be prompted to paste your profile URL. Go to [upshot.cards](https://upshot.cards), click **View Profile**, then copy the URL or click **Share Profile**.
+Everything lives on the **prediction panel** an admin posts — no commands to memorize. The panel has buttons for **📇 My Cards**, **🔮 Make a Prediction**, **📊 My Stats**, **🏆 Leaderboard**, **🏅 My Contests**, and **❓ How It Works**.
 
-2. **Submit a prediction** — Fill out the modal:
+1. **Link your Upshot profile** — The first time you tap **My Cards** or **Make a Prediction**, you'll be prompted to paste your profile URL. Go to [upshot.cards](https://upshot.cards), click **View Profile**, then copy the URL or click **Share Profile**.
+
+2. **Predict by picking a card (easiest)** — Tap **📇 My Cards** to get a dropdown of every card you can predict on right now — cards in your **wallet** *and* cards in your active **contest lineups**. Cards that already have an open prediction are hidden, so you never pick a dead end. Choose one and a short form opens (no URL needed):
    - **Title** — A short, clear prediction
    - **Description** — Your thesis, evidence, reasoning
-   - **Card URL/ID** *(required)* — The Upshot card backing your prediction. Click any card you own on [upshot.cards](https://upshot.cards), copy the URL or click **Share**
    - **Tweet URL** *(optional)* — Link a tweet for +1 bonus point if your prediction hits
 
-   The bot automatically pulls the card image, deadline, and verifies you own the card. Invalid card URLs and cards with past deadlines are rejected.
+   The card, image, and deadline are filled in for you, and ownership is auto-verified.
 
-3. **Vote on predictions** — Every prediction has star vote buttons (1-3 stars). Rate other members' predictions to influence the quality score. You can't vote on your own predictions, and you can change your vote at any time.
+3. **Or submit manually** — Tap **🔮 Make a Prediction** to paste a card URL/ID yourself. Click any card you own on [upshot.cards](https://upshot.cards), copy the URL or click **Share**. Invalid card URLs and cards with past deadlines are rejected.
 
-4. **Track your stats** — Use `/mystats` to see your points, hit rate, and rank for the current month. `/upshotrank` shows your Upshot season XP and rank. `/mycontests` lists your active contest lineups and card IDs.
+4. **Vote on predictions** — Every prediction has star vote buttons (1-3 stars). Rate other members' predictions to influence the quality score. You can't vote on your own predictions, and you can change your vote at any time.
+
+5. **Track your stats** — Tap **📊 My Stats** on the panel (or use `/mystats`) to see your points, hit rate, and rank for the current month. **🏆 Leaderboard** shows the current standings, **🏅 My Contests** lists your active lineups, and `/upshotrank` shows your Upshot season XP.
 
 ### For Admins
 
@@ -75,9 +78,13 @@ The bot automatically resolves predictions by checking if a card's event has set
 
 ### Prediction Panels
 
-Admins can post prediction panels to any channel using `/panel`. These are styled Components v2 cards with a title, description, optional banner image, and two buttons:
-- **Make a Prediction** — opens the submission modal
-- **How It Works** — opens a paginated guide explaining the system (profile linking, card URLs, scoring, community voting, rules)
+Admins can post prediction panels to any channel using `/panel`. These are styled Components v2 cards with a title, description, optional banner image, and a full self-serve button hub so members never need to type a command:
+- **📇 My Cards** — opens a dropdown of every card you can predict on (wallet + contest lineups), with already-predicted cards hidden. Pick one to submit with no URL.
+- **🔮 Make a Prediction** — opens the submission modal where you paste a card URL/ID manually (fallback for power users or >25 cards)
+- **📊 My Stats** — your points, hit rate, and rank this month
+- **🏆 Leaderboard** — current month standings
+- **🏅 My Contests** — your active contest lineups and card IDs
+- **❓ How It Works** — a paginated guide explaining the system (profile linking, picking cards, scoring, community voting, rules)
 
 ### Error Notifications
 

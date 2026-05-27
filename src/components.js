@@ -59,14 +59,84 @@ export function buildPredictionPanel(title, description, imageUrl) {
   }
 
   children.push(separator());
+  children.push(text('-# Everything you need is one tap away — no commands to memorize.'));
   children.push(actionRow(
+    button('hub_mycards', '📇 My Cards', ButtonStyle.Success),
     button('panel_predict', '🔮 Make a Prediction', ButtonStyle.Primary),
+  ));
+  children.push(actionRow(
+    button('hub_mystats', '📊 My Stats', ButtonStyle.Secondary),
+    button('hub_leaderboard', '🏆 Leaderboard', ButtonStyle.Secondary),
+    button('hub_mycontests', '🏅 My Contests', ButtonStyle.Secondary),
     button('panel_help:0', '❓ How It Works', ButtonStyle.Secondary),
   ));
 
   return {
     components: [container(Colors.Leaderboard, children)],
     flags: 1 << 15,
+  };
+}
+
+// ── Card picker (ephemeral — pick a card to predict, no URL needed) ──
+
+/**
+ * StringSelect listing the cards a member can predict on right now.
+ * cards: [{ id, name, inContest }] — already filtered (no taken cards).
+ */
+export function buildCardPicker(cards, { truncated = false } = {}) {
+  const children = [];
+
+  children.push(text('## 📇 Your Predictable Cards'));
+  children.push(text('-# Pick a card to predict on — no URL needed. Cards already in an open prediction are hidden.'));
+  children.push(separator());
+
+  const options = cards.slice(0, 25).map(c => ({
+    label: c.name.length > 100 ? c.name.slice(0, 97) + '...' : c.name,
+    value: c.id,
+    description: c.inContest ? '🏅 In a contest lineup' : 'In your wallet',
+  }));
+
+  children.push({
+    type: CT.ActionRow,
+    components: [{
+      type: CT.StringSelect,
+      custom_id: 'predict_card_select',
+      placeholder: 'Select a card to predict on…',
+      min_values: 1,
+      max_values: 1,
+      options,
+    }],
+  });
+
+  if (truncated) {
+    children.push(text('-# Showing the first 25 cards. Use “Paste a card URL instead” for any others.'));
+  }
+
+  children.push(separator());
+  children.push(actionRow(
+    button('panel_predict', '✏️ Paste a card URL instead', ButtonStyle.Secondary),
+  ));
+
+  return {
+    components: [container(Colors.Leaderboard, children)],
+    flags: (1 << 15) | (1 << 6),
+  };
+}
+
+export function buildCardPickerEmpty() {
+  return {
+    components: [
+      container(Colors.Stats, [
+        text('## 📇 No Predictable Cards Found'),
+        text('We couldn\'t find any Upshot cards in your wallet or active contest lineups.'),
+        text('-# Your wallet may be empty, or the Upshot API may be temporarily down. You can still submit by pasting a card URL.'),
+        separator(),
+        actionRow(
+          button('panel_predict', '✏️ Paste a card URL instead', ButtonStyle.Primary),
+        ),
+      ]),
+    ],
+    flags: (1 << 15) | (1 << 6),
   };
 }
 
@@ -77,28 +147,32 @@ const helpPages = [
   [
     '## Getting Started',
     '',
+    '**The panel has everything — no commands needed:**',
+    '📇 **My Cards** · 🔮 **Make a Prediction** · 📊 **My Stats** · 🏆 **Leaderboard** · 🏅 **My Contests**',
+    '',
     '**1. Link your Upshot profile**',
-    'Click "Make a Prediction" — if it\'s your first time, you\'ll be asked to paste your Upshot profile URL.',
+    'The first time you tap **My Cards** or **Make a Prediction**, you\'ll be asked to paste your Upshot profile URL.',
     '',
     '**How to get your profile URL:**',
-    'Go to [upshot.cards](https://upshot.cards), click **View Profile** (top-right), then copy the URL from your browser or click **Share Profile**.',
+    'Go to [upshot.cards](https://upshot.cards), click **View Profile** (top-right), then copy the URL or click **Share Profile**.',
     '',
-    '**2. Submit a prediction**',
-    'Fill out the form with your title, description, card URL, and optionally a tweet link.',
-    '',
-    'The bot automatically pulls the card image and deadline from Upshot, and verifies you own the card.',
+    '**2. Pick a card and predict**',
+    'Tap **📇 My Cards** to see every card you can predict on — including cards in your contest lineups. Pick one, write your thesis, done. No URLs to copy.',
   ].join('\n'),
 
-  // Page 2 — Card URL & Tweet
+  // Page 2 — Picking your card
   [
-    '## Submitting Your Card',
+    '## Picking Your Card',
     '',
-    '**How to get your card URL:**',
-    'On [upshot.cards](https://upshot.cards), click any card you own to open it, then copy the URL from your browser or click the **Share** button.',
+    '**The easy way — 📇 My Cards**',
+    'Tap **My Cards** to get a dropdown of every card you own or have entered in a contest. Cards someone has already predicted on are hidden, so you never pick a dead end. Choose one and the form fills the rest in for you.',
+    '',
+    '**The manual way — 🔮 Make a Prediction**',
+    'Prefer to paste a link? On [upshot.cards](https://upshot.cards), open any card you own and copy the URL (or click **Share**), then paste it into the form.',
     '',
     '**What happens after you submit:**',
     '- The bot fetches the card image and deadline automatically',
-    '- It checks if your wallet actually owns the card',
+    '- It checks your wallet (and contest lineups) actually hold the card',
     '- Your prediction is posted to the feed and sent for admin review',
     '',
     '**Tweet URL (optional)**',
