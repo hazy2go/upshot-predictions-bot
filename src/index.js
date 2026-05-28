@@ -40,6 +40,7 @@ import {
 } from './components.js';
 
 import { commands } from './commands.js';
+import { registerReferralHandlers, tryHandleReferralInteraction } from './referral.js';
 
 import {
   Status, DefaultCategories, starPoints, totalPoints, weightedStarRating,
@@ -57,11 +58,15 @@ import {
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,   // referral: GUILD_MEMBER_ADD
+    GatewayIntentBits.GuildInvites,   // referral: invite create/delete
   ],
   rest: {
     timeout: 30_000, // 30s REST timeout (default is 15s, too short for Pi with large attachments)
   },
 });
+
+registerReferralHandlers(client);
 
 // ── Config resolver (DB first, .env fallback) ───────────────
 
@@ -2578,6 +2583,8 @@ function scheduleNextResolve() {
 
 client.on(Events.InteractionCreate, async interaction => {
   try {
+    if (await tryHandleReferralInteraction(interaction)) return;
+
     if (interaction.isAutocomplete?.()) {
       if (interaction.commandName === 'sendpack') return await handleSendPackAutocomplete(interaction);
       return;
