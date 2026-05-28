@@ -263,7 +263,7 @@ async function handleVerifyButton(interaction) {
     const profile = getUpshotProfile(userId);
     if (!profile || !profile.upshot_url) {
       await interaction.editReply({
-        content: '❌ **Your Upshot profile isn\'t linked yet.**\n\nOpen the **Upshot Predictions** panel in this server, tap **📇 My Cards**, and follow the prompt to paste your profile URL from [upshot.cards](https://upshot.cards). Then come back and press Verify again.',
+        content: '❌ **Your Upshot profile isn\'t linked yet.**\n\nHead to <#1486279374599618671>, tap **📇 My Cards** on the prediction bot panel, and paste your profile URL from [upshot.cards](https://upshot.cards). Then come back here and press Verify again.',
       });
       return true;
     }
