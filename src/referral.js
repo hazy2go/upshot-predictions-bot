@@ -17,7 +17,37 @@ import {
 } from 'discord.js';
 
 import { getUpshotProfile } from './database.js';
-import { extractWallet, getUserPacks } from './api.js';
+import { extractWallet } from './api.js';
+
+const UPSHOT_API_BASE = 'https://api-mainnet.upshotcards.net/api/v1';
+
+// Returns { current, history, error } for a wallet's pack balances.
+//   current  — sum of currently-owned (quantity > 0) packs
+//   history  — total distinct pack rows ever recorded (qty > 0 OR qty = 0).
+//              A non-zero history with current=0 means the wallet HAS held
+//              packs before — they bought one and opened/transferred it.
+//   error    — true if the API call failed (treat as unknown, ask user to retry)
+async function getPackSignal(walletAddress) {
+  try {
+    const res = await fetch(`${UPSHOT_API_BASE}/packs/balances/${walletAddress}`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return { current: 0, history: 0, error: true };
+    const json = await res.json();
+    const data = json?.data || {};
+    let current = 0;
+    let history = 0;
+    for (const entry of Object.values(data)) {
+      history++;
+      const q = parseInt(entry?.quantity ?? 0, 10);
+      if (q > 0) current += q;
+    }
+    return { current, history, error: false };
+  } catch (err) {
+    console.error(`[referral] getPackSignal(${walletAddress}) failed:`, err.message);
+    return { current: 0, history: 0, error: true };
+  }
+}
 
 const VERIFY_BUTTON_ID = 'upshot_verify_account';
 const VERIFY_COOLDOWN_MS = 10_000;
@@ -232,21 +262,26 @@ async function handleVerifyButton(interaction) {
       return true;
     }
 
-    // 3. Pack ownership check (Upshot API)
-    const packs = await getUserPacks(wallet);
-    if (!Array.isArray(packs)) {
+    // 3. Pack ownership / history check (Upshot API).
+    //    A wallet passes if it currently holds >=1 pack OR has ever held one
+    //    (a qty=0 row in /packs/balances still proves prior ownership).
+    const { current, history, error } = await getPackSignal(wallet);
+    if (error) {
       await interaction.editReply({
         content: '⚠️ **Couldn\'t reach the Upshot API right now.** Give it a minute and press Verify again.',
       });
       return true;
     }
-    const packCount = packs.reduce((sum, p) => sum + (parseInt(p.quantity, 10) || 0), 0);
-    if (packCount === 0) {
+    if (history === 0) {
       await interaction.editReply({
-        content: '❌ **You don\'t own any Packs yet.**\n\nGrab at least one Pack at [upshot.cards](https://upshot.cards) — you don\'t have to open it, you just need to own it. Then press Verify again.',
+        content: '❌ **No Packs found on this wallet.**\n\nGrab at least one Pack at [upshot.cards](https://upshot.cards) — you don\'t have to open it, you just need to own it once. Then press Verify again.',
       });
       return true;
     }
+    const packCount = current; // for the success message
+    const packStatusNote = current > 0
+      ? `${current} pack${current === 1 ? '' : 's'} owned`
+      : 'pack history confirmed';
 
     // 4. Credit referral
     const verifyRes = await apiFetch('/api/verify-account', {
@@ -270,7 +305,7 @@ async function handleVerifyButton(interaction) {
     const shortWallet = `${wallet.slice(0, 6)}…${wallet.slice(-4)}`;
     await interaction.editReply({
       content:
-        `✅ **Verified!** Your referral has been credited (linked wallet \`${shortWallet}\`, ${packCount} pack${packCount === 1 ? '' : 's'} owned).\n\n` +
+        `✅ **Verified!** Your referral has been credited (linked wallet \`${shortWallet}\`, ${packStatusNote}).\n\n` +
         `Want to earn rewards yourself? Head to **${baseUrl}** to grab your own invite link and start referring.`,
     });
   } catch (err) {
