@@ -71,6 +71,9 @@ function isEnabled() {
   return !!(getReferralApiUrl() && getReferralApiSecret());
 }
 
+// Returns the Response on success or a sentinel { networkError: true, path }
+// when the call couldn't reach the referral server at all. Callers can
+// distinguish "server down" from "server returned 4xx/5xx".
 async function apiFetch(path, init = {}) {
   const base = getReferralApiUrl();
   const secret = getReferralApiSecret();
@@ -80,7 +83,12 @@ async function apiFetch(path, init = {}) {
     'X-Bot-Secret': secret,
   };
   if (init.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
-  return fetch(`${base}${path}`, { ...init, headers });
+  try {
+    return await fetch(`${base}${path}`, { ...init, headers });
+  } catch (err) {
+    console.error(`[referral] fetch ${path} failed (${base} unreachable):`, err.message);
+    return { networkError: true, path, message: err.message };
+  }
 }
 
 // ── Verify panel ────────────────────────────────────────────
@@ -183,7 +191,9 @@ async function onGuildMemberAdd(member) {
         inviterTag: usedInvite.inviter?.tag,
       }),
     });
-    if (res && !res.ok) {
+    if (res?.networkError) {
+      console.warn(`[referral] referral server unreachable — invite from ${member.user.tag} via ${usedInvite.code} not recorded`);
+    } else if (res && !res.ok) {
       console.error(`[referral] /api/referral-used returned ${res.status}`);
     }
   } catch (err) {
@@ -232,6 +242,10 @@ async function handleVerifyButton(interaction) {
   try {
     // 1. Pending-referral check
     const pendingRes = await apiFetch(`/api/check-pending/${userId}`);
+    if (pendingRes?.networkError) {
+      await interaction.editReply({ content: '⚠️ The referral service is offline right now. An admin needs to start it — try again in a minute.' });
+      return true;
+    }
     if (!pendingRes || !pendingRes.ok) {
       console.error('[referral] check-pending failed:', pendingRes?.status);
       await interaction.editReply({ content: '⚠️ Something went wrong. Please try again later.' });
@@ -288,6 +302,10 @@ async function handleVerifyButton(interaction) {
       method: 'POST',
       body: JSON.stringify({ newMemberId: userId, upshotWallet: wallet }),
     });
+    if (verifyRes?.networkError) {
+      await interaction.editReply({ content: '⚠️ The referral service went offline mid-verify. Try again in a minute.' });
+      return true;
+    }
     if (!verifyRes || !verifyRes.ok) {
       console.error('[referral] verify-account failed:', verifyRes?.status);
       await interaction.editReply({ content: '⚠️ Something went wrong. Please try again later.' });
