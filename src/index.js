@@ -635,7 +635,8 @@ async function handleMyStats(interaction) {
   const monthKey = currentMonthKey();
   const stats = getUserStats(interaction.user.id, monthKey);
   const scored = getUserMonthScoredPredictions(interaction.user.id, monthKey);
-  const payload = buildStatsCard(stats, interaction.user.id, currentMonthLabel(), scored);
+  const tier = getUserTier(interaction.user.id);
+  const payload = buildStatsCard(stats, interaction.user.id, currentMonthLabel(), scored, tier);
   await interaction.reply({ ...payload, flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral });
 }
 
