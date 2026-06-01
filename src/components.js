@@ -642,7 +642,7 @@ export function buildLeaderboard(entries, monthLabel, options = {}) {
 
 // ── Personal stats ───────────────────────────────────────────
 
-export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = []) {
+export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = [], tier = 0) {
   const children = [];
 
   children.push(text(`## 📊 Your Stats — ${monthLabel}`));
@@ -657,7 +657,8 @@ export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = []
     `**Hit Rate:** ${hitRate}% (${stats.hits || 0}/${stats.resolved || 0} resolved)`,
     `**Avg Quality:** ${avgRating} ⭐`,
     `**Rank:** ${stats.rank ? `#${stats.rank} of ${stats.total_entries}` : 'Unranked'}`,
-  ].join('\n')));
+    tier > 0 ? `**Tier:** ${tier} 🏅 (${tier} top-10 ${tier === 1 ? 'month' : 'months'})` : null,
+  ].filter(Boolean).join('\n')));
 
   if (!stats.rank) {
     children.push(text('-# Make a rated prediction to join the leaderboard.'));
