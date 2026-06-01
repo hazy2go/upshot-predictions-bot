@@ -70,6 +70,19 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_votes_prediction ON community_votes(prediction_id);
+
+  -- Each row = one month a user finished in the leaderboard top 10.
+  -- A user's tier is COUNT(*) of their rows here (cumulative, stacking).
+  -- PK on (discord_id, month_key) makes re-processing a month idempotent.
+  CREATE TABLE IF NOT EXISTS tier_awards (
+    discord_id  TEXT NOT NULL,
+    month_key   TEXT NOT NULL,
+    rank        INTEGER NOT NULL,
+    awarded_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (discord_id, month_key)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_tier_awards_user ON tier_awards(discord_id);
 `);
 
 // ── Migrations (add columns to existing tables) ─────────────
@@ -198,6 +211,30 @@ export function getLeaderboard(monthKey, limit = 20) {
     ORDER BY total_points DESC
     LIMIT ?
   `).all(monthKey, limit);
+}
+
+// ── Tier awards (top-10 leaderboard tiers) ──────────────────
+
+// Record that `discordId` placed top 10 in `monthKey`. Idempotent: a month is
+// only ever counted once per user. Returns true if this was a NEW award.
+export function recordTierAward(discordId, monthKey, rank) {
+  const res = db.prepare(
+    'INSERT OR IGNORE INTO tier_awards (discord_id, month_key, rank) VALUES (?, ?, ?)'
+  ).run(discordId, monthKey, rank);
+  return res.changes > 0;
+}
+
+// A user's tier = how many distinct months they've placed top 10.
+export function getUserTier(discordId) {
+  const row = db.prepare('SELECT COUNT(*) AS n FROM tier_awards WHERE discord_id = ?').get(discordId);
+  return row?.n ?? 0;
+}
+
+// The months a user has been awarded (most recent first) — for /mystats etc.
+export function getTierAwardMonths(discordId) {
+  return db.prepare(
+    'SELECT month_key, rank FROM tier_awards WHERE discord_id = ? ORDER BY month_key DESC'
+  ).all(discordId);
 }
 
 export function hasUnresolvedPredictionForCard(cardId) {

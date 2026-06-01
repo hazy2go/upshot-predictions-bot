@@ -16,6 +16,7 @@ import {
   linkUpshot, getUpshotProfile,
   createPrediction, getPrediction, updatePrediction, deletePrediction,
   countUserDailyPredictions, getUserStats, getLeaderboard, getUserMonthScoredPredictions,
+  recordTierAward, getUserTier,
   getLeaderboardMessageId, setLeaderboardMessageId,
   getPanels, addPanel, removePanel,
   getConfig, setConfig, getAllConfig,
@@ -251,6 +252,12 @@ function currentMonthKey() {
 
 function currentMonthLabel() {
   return new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+}
+
+// Month key (YYYY-MM) for the calendar month before `ref` (default: now).
+function previousMonthKey(ref = new Date()) {
+  const d = new Date(ref.getFullYear(), ref.getMonth() - 1, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
 /**
@@ -729,6 +736,34 @@ async function handleLeaderboardGrantRole(interaction, monthKey) {
     failed.length > 0 ? `\n**Failed (${failed.length}):**\n${failed.map(f => `• <@${f.id}> — ${f.reason}`).join('\n')}` : '',
   ].filter(Boolean);
 
+  await interaction.editReply({ content: lines.join('\n'), allowedMentions: { parse: [] } });
+}
+
+async function handleProcessTiers(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+  const monthKey = (interaction.options.getString('month') || previousMonthKey()).trim();
+  if (!/^\d{4}-\d{2}$/.test(monthKey)) {
+    return interaction.reply({ content: '❌ Invalid month — use `YYYY-MM` (e.g. `2026-05`).', flags: ['Ephemeral'] });
+  }
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  const { promoted, failed, skipped } = await processTiers(interaction.guildId, monthKey);
+  // Keep the rollover baseline in sync so the auto-run doesn't re-process this
+  // month (or anything before it) again.
+  const last = getConfig(interaction.guildId, 'tiers_last_processed');
+  if (last == null || last < monthKey) setConfig(interaction.guildId, 'tiers_last_processed', monthKey);
+
+  if (promoted.length === 0 && failed.length === 0 && skipped === 0) {
+    return interaction.editReply({ content: `No leaderboard entries found for \`${monthKey}\`.` });
+  }
+  const lines = [
+    `🏅 Processed tiers for \`${monthKey}\` — **${promoted.length}** promoted${skipped ? `, ${skipped} already counted` : ''}`,
+    promoted.length ? promoted.map(p => `• <@${p.id}> → **${tierRoleName(p.tier)}**`).join('\n') : '',
+    failed.length ? `\n**Failed (${failed.length}):**\n${failed.map(f => `• <@${f.id}> — ${f.reason}`).join('\n')}` : '',
+  ].filter(Boolean);
   await interaction.editReply({ content: lines.join('\n'), allowedMentions: { parse: [] } });
 }
 
@@ -2579,6 +2614,130 @@ function scheduleNextResolve() {
   console.log(`Auto-resolve: Next check at ${nextResolveCheck.toISOString()}`);
 }
 
+// ── Tier roles (cumulative top-10 leaderboard tiers) ─────────
+//
+// Each month a user finishes top 10 they earn one tier. Tiers are cumulative
+// and STACK: reaching tier 3 means you hold "Tier 1" + "Tier 2" + "Tier 3".
+// The "Tier N" roles are auto-created by name as users first reach them.
+
+const TIER_CHECK_INTERVAL = 6 * 60 * 60 * 1000; // re-check for month rollover every 6h
+let tierTimer = null;
+
+function tierRoleName(n) {
+  return `Tier ${n}`;
+}
+
+// Find the "Tier N" role, creating it if it doesn't exist yet. Returns the role
+// or null if creation failed (e.g. missing Manage Roles permission).
+async function ensureTierRole(guild, n) {
+  const name = tierRoleName(n);
+  const existing = guild.roles.cache.find(r => r.name === name);
+  if (existing) return existing;
+  try {
+    return await guild.roles.create({ name, reason: `Auto-created leaderboard tier ${n}`, hoist: false, mentionable: false });
+  } catch (err) {
+    console.error(`Tiers: failed to create role "${name}":`, err.message);
+    return null;
+  }
+}
+
+// Process one finished month: award a tier to each top-10 finisher and sync
+// their stacked tier roles. Idempotent — safe to re-run on the same month.
+async function processTiers(guildId, monthKey) {
+  const guild = await client.guilds.fetch(guildId).catch(() => null);
+  if (!guild) {
+    console.error(`Tiers: guild ${guildId} not found`);
+    return { promoted: [], failed: [], skipped: 0 };
+  }
+  await guild.roles.fetch().catch(() => {});
+
+  const top = getLeaderboard(monthKey, 10);
+  const promoted = [];
+  const failed = [];
+  let skipped = 0;
+
+  for (let i = 0; i < top.length; i++) {
+    const entry = top[i];
+    const rank = i + 1;
+
+    // Idempotency: only the FIRST time we see this user+month counts toward
+    // their tier. Re-running won't inflate anyone's tier.
+    const isNew = recordTierAward(entry.author_id, monthKey, rank);
+    if (!isNew) { skipped++; continue; }
+
+    const tier = getUserTier(entry.author_id);
+
+    const member = await guild.members.fetch(entry.author_id).catch(() => null);
+    if (!member) {
+      failed.push({ id: entry.author_id, tier, reason: 'not in server' });
+      continue;
+    }
+
+    // Stack: ensure the member holds every tier role from 1..tier.
+    const toAdd = [];
+    let roleError = null;
+    for (let t = 1; t <= tier; t++) {
+      const role = await ensureTierRole(guild, t);
+      if (!role) { roleError = `couldn't create "${tierRoleName(t)}"`; break; }
+      if (!member.roles.cache.has(role.id)) toAdd.push(role);
+    }
+    if (roleError) {
+      failed.push({ id: entry.author_id, tier, reason: roleError });
+      continue;
+    }
+
+    try {
+      if (toAdd.length > 0) {
+        await member.roles.add(toAdd, `Reached tier ${tier} (top 10 of ${monthKey})`);
+      }
+      promoted.push({ id: entry.author_id, tier });
+    } catch (err) {
+      failed.push({ id: entry.author_id, tier, reason: err.message });
+    }
+  }
+
+  return { promoted, failed, skipped };
+}
+
+// Run the rollover for the previous month if it hasn't been processed yet.
+// `tiers_last_processed` config holds the last month we acted on. On first ever
+// run we set the baseline WITHOUT processing, so the feature never retroactively
+// mass-grants months that predate it — the first real run is the next rollover.
+async function runTierRollover() {
+  const guildId = process.env.GUILD_ID;
+  if (!guildId) return;
+
+  const target = previousMonthKey();
+  const last = getConfig(guildId, 'tiers_last_processed');
+
+  if (last == null) {
+    setConfig(guildId, 'tiers_last_processed', target);
+    console.log(`Tiers: baseline set to ${target} (no retroactive processing). Awards begin next month rollover.`);
+    return;
+  }
+  if (last === target || last > target) return; // already processed (or clock skew)
+
+  console.log(`Tiers: processing rollover for ${target}...`);
+  const { promoted, failed, skipped } = await processTiers(guildId, target);
+  setConfig(guildId, 'tiers_last_processed', target);
+
+  const lines = [`🏅 **Tier rollover for \`${target}\`** — ${promoted.length} promoted${skipped ? `, ${skipped} already counted` : ''}`];
+  if (promoted.length) lines.push(promoted.map(p => `• <@${p.id}> → **${tierRoleName(p.tier)}**`).join('\n'));
+  if (failed.length) lines.push(`\n**Failed (${failed.length}):**\n${failed.map(f => `• <@${f.id}> — ${f.reason}`).join('\n')}`);
+  await notifyAdmin(guildId, lines.join('\n'));
+}
+
+async function safeRunTierRollover() {
+  try {
+    await runTierRollover();
+  } catch (err) {
+    console.error('Tiers: rollover failed:', err);
+    const guildId = process.env.GUILD_ID;
+    if (guildId) await notifyAdmin(guildId, `❌ **Tier rollover crashed:** ${err.message}`).catch(() => {});
+  }
+  tierTimer = setTimeout(safeRunTierRollover, TIER_CHECK_INTERVAL);
+}
+
 // ── Event routing ────────────────────────────────────────────
 
 client.on(Events.InteractionCreate, async interaction => {
@@ -2605,6 +2764,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'leaderboard': return await handleLeaderboardCommand(interaction);
         case 'setup': return await handleSetup(interaction);
         case 'sendpack': return await handleSendPack(interaction);
+        case 'process-tiers': return await handleProcessTiers(interaction);
       }
     }
 
@@ -2697,6 +2857,10 @@ client.once(Events.ClientReady, async () => {
   setTimeout(safeRunAutoResolve, 60_000);
   nextResolveCheck = new Date(Date.now() + 60_000);
   console.log(`   Auto-resolve: first check in 1 minute, then every 12h`);
+
+  // Start tier rollover timer (first run after 2 minutes, then every 6h).
+  tierTimer = setTimeout(safeRunTierRollover, 120_000);
+  console.log(`   Tier rollover: first check in 2 minutes, then every 6h`);
 });
 
 // ── Global error handling → admin channel ────────────────────
@@ -2712,12 +2876,14 @@ process.on('unhandledRejection', async (err) => {
 // Clean shutdown
 process.on('SIGTERM', () => {
   if (resolveTimer) clearTimeout(resolveTimer);
+  if (tierTimer) clearTimeout(tierTimer);
   client.destroy();
   process.exit(0);
 });
 
 process.on('SIGINT', () => {
   if (resolveTimer) clearTimeout(resolveTimer);
+  if (tierTimer) clearTimeout(tierTimer);
   client.destroy();
   process.exit(0);
 });

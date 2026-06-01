@@ -301,4 +301,14 @@ export const commands = [
         .setRequired(true)
         .setMinValue(1)
     ),
+
+  new SlashCommandBuilder()
+    .setName('process-tiers')
+    .setDescription('Award top-10 leaderboard tiers for a month now (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption(opt =>
+      opt.setName('month')
+        .setDescription('Month to process as YYYY-MM (default: last month)')
+        .setRequired(false)
+    ),
 ];
