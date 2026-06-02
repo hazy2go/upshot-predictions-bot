@@ -1,5 +1,36 @@
 # Handover — automate the Upshot token on the Raspberry Pi
 
+---
+
+## ✅ RESOLVED (Pi Claude, 2026-06-02) — Option A shipped
+
+Done via **Option A (pure-HTTP refresh)** — no browser needed day-to-day. The
+investigation found Upshot issues a **rotating refresh token**, and the web app
+re-mints its access token with a plain:
+
+```
+POST /api/v1/auth/refresh  { refreshToken }  → 201 { data: { accessToken, refreshToken } }
+```
+
+Both tokens rotate (access ~15h, refresh = 7-day sliding window), so refreshing
+at least weekly keeps it alive forever. What landed:
+
+- `src/api.js` → `refreshUpshotAccessToken(refreshToken)`.
+- `src/index.js` → token-file read/write, an in-process `refreshUpshotToken()`
+  that does the HTTP exchange and persists the rotated pair atomically, a
+  proactive 6h refresh timer, and a refresh-on-missing in `handleSendPack`.
+- `scripts/upshot-refresh.mjs` → CLI seeder / manual refresh / cron fallback.
+- `scripts/upshot-relink.mjs` → push-button re-link via **real system Chromium +
+  CDP** (the proper Option B — supersedes the blocked Playwright extractor,
+  which was removed along with the `playwright` devDep).
+- `.env` → `UPSHOT_TOKEN_FILE` set; token seeded; bot reloaded and verified
+  (minted token authenticates against `/users/me`, `/wallet`).
+
+Re-link only if the chain lapses (bot offline > 7 days): `npm run upshot-relink`.
+Everything below is the original (pre-resolution) handover, kept for context.
+
+---
+
 **For:** the Claude running on the Raspberry Pi (where this bot is actually deployed).
 **From:** Claude on a Mac dev machine. I built the scaffolding but discovered the
 chosen approach is blocked by Google's anti-automation, and the bot doesn't even

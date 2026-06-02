@@ -51,7 +51,7 @@ import {
   extractWallet, extractCardId,
   getCardDetails, checkCardOwnership, checkCardResolution,
   getSeasonRank, getUserContestLineups, getPredictableCards,
-  getUserProfile, getUserPacks, transferPack,
+  getUserProfile, getUserPacks, transferPack, refreshUpshotAccessToken,
 } from './api.js';
 
 // ── Client ──────────────────────────────────────────────────
@@ -99,28 +99,71 @@ function getAdminChannelId(guildId) {
   return cfg(guildId, 'admin_channel', 'ADMIN_REVIEW_CHANNEL_ID');
 }
 
-// Read a token from the auto-refreshed cache file (UPSHOT_TOKEN_FILE), if set
-// and not expired. Lets an external extractor own the short-lived token without
-// piping it through Discord. Returns the token string or null.
-function readUpshotTokenFile() {
+// Resolve the UPSHOT_TOKEN_FILE path (expanding a leading ~), or null if unset.
+function upshotTokenFilePath() {
   const raw = process.env.UPSHOT_TOKEN_FILE;
   if (!raw) return null;
-  const file = raw.startsWith('~') ? path.join(os.homedir(), raw.slice(1)) : raw;
+  return raw.startsWith('~') ? path.join(os.homedir(), raw.slice(1)) : raw;
+}
+
+// Parse the token cache file (or null on any problem). Shape written by
+// writeUpshotTokenFile / scripts/upshot-refresh.mjs.
+function readUpshotTokenJson() {
+  const file = upshotTokenFilePath();
+  if (!file) return null;
   try {
-    const json = JSON.parse(fs.readFileSync(file, 'utf8'));
-    const token = json.accessToken || json.token || json.access_token;
-    if (!token) return null;
-    const exp = json.expires_at ?? json.expiresAt ?? json.exp;
-    if (exp != null) {
-      const expMs = typeof exp === 'number'
-        ? (exp < 1e12 ? exp * 1000 : exp)   // epoch seconds vs ms
-        : Date.parse(exp);                  // ISO string
-      if (Number.isFinite(expMs) && expMs <= Date.now() + 30_000) return null; // expired (30s skew)
-    }
-    return token;
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch {
     return null;
   }
+}
+
+// Read the access token from the cache file (UPSHOT_TOKEN_FILE), if set and not
+// expired. Returns the token string or null.
+function readUpshotTokenFile() {
+  const json = readUpshotTokenJson();
+  if (!json) return null;
+  const token = json.accessToken || json.token || json.access_token;
+  if (!token) return null;
+  const exp = json.expires_at ?? json.expiresAt ?? json.exp;
+  if (exp != null) {
+    const expMs = typeof exp === 'number'
+      ? (exp < 1e12 ? exp * 1000 : exp)   // epoch seconds vs ms
+      : Date.parse(exp);                  // ISO string
+    if (Number.isFinite(expMs) && expMs <= Date.now() + 30_000) return null; // expired (30s skew)
+  }
+  return token;
+}
+
+// The (rotating) refresh token: cache file → UPSHOT_REFRESH_TOKEN env (seed).
+function readUpshotRefreshToken() {
+  const json = readUpshotTokenJson();
+  return json?.refreshToken || json?.refresh_token || process.env.UPSHOT_REFRESH_TOKEN || null;
+}
+
+// Atomically persist a freshly-minted access+refresh token pair (chmod 600).
+// Writing to a temp file + rename avoids a torn read if the bot reads mid-write.
+function writeUpshotTokenFile({ accessToken, refreshToken }) {
+  const file = upshotTokenFilePath();
+  if (!file) return false;
+  const payload = decodeJwtPayload(accessToken) || {};
+  const refreshPayload = decodeJwtPayload(refreshToken) || {};
+  const out = {
+    token: accessToken,
+    accessToken,
+    refreshToken,
+    wallet: payload.walletAddress ?? null,
+    user_id: payload.id ?? null,
+    expires_at: payload.exp ? new Date(payload.exp * 1000).toISOString() : null,
+    refresh_expires_at: refreshPayload.exp ? new Date(refreshPayload.exp * 1000).toISOString() : null,
+    extracted_at: new Date().toISOString(),
+  };
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(out, null, 2), { mode: 0o600 });
+  fs.renameSync(tmp, file);
+  try { fs.chmodSync(file, 0o600); } catch { /* best effort */ }
+  return true;
 }
 
 // Upshot Bearer token used to send packs. Resolution order: cache file → DB
@@ -129,18 +172,60 @@ function getUpshotToken(guildId) {
   return readUpshotTokenFile() || cfg(guildId, 'upshot_token', 'UPSHOT_JWT');
 }
 
-// Optionally re-run an external token extractor (UPSHOT_TOKEN_REFRESH_CMD) when
-// a request comes back 401/403. No-op (returns false) if not configured.
+// Refresh the Upshot access token, hands-off. Preferred path is a pure-HTTP
+// refresh-token exchange (POST /auth/refresh) — no browser, no OAuth — writing
+// the rotated pair back to UPSHOT_TOKEN_FILE. Falls back to an external command
+// (UPSHOT_TOKEN_REFRESH_CMD, e.g. a browser extractor) when no refresh token is
+// available. Concurrent calls are de-duped so the single-use refresh token is
+// never spent twice in parallel. Returns true on success.
+let _upshotRefreshInFlight = null;
 async function refreshUpshotToken() {
-  const cmd = process.env.UPSHOT_TOKEN_REFRESH_CMD;
-  if (!cmd) return false;
+  if (_upshotRefreshInFlight) return _upshotRefreshInFlight;
+  _upshotRefreshInFlight = (async () => {
+    const refreshToken = readUpshotRefreshToken();
+    if (refreshToken && upshotTokenFilePath()) {
+      const r = await refreshUpshotAccessToken(refreshToken);
+      if (r.ok) {
+        writeUpshotTokenFile({ accessToken: r.accessToken, refreshToken: r.refreshToken });
+        return true;
+      }
+      console.error('Upshot HTTP token refresh failed:', r.code, r.error);
+      // fall through to the command-based extractor if one is configured
+    }
+    const cmd = process.env.UPSHOT_TOKEN_REFRESH_CMD;
+    if (!cmd) return false;
+    try {
+      await execFileAsync('/bin/sh', ['-c', cmd], { timeout: 120_000 });
+      return true;
+    } catch (err) {
+      console.error('Upshot token refresh command failed:', err.message);
+      return false;
+    }
+  })();
   try {
-    await execFileAsync('/bin/sh', ['-c', cmd], { timeout: 60_000 });
-    return true;
-  } catch (err) {
-    console.error('Upshot token refresh failed:', err.message);
-    return false;
+    return await _upshotRefreshInFlight;
+  } finally {
+    _upshotRefreshInFlight = null;
   }
+}
+
+// Proactively refresh if the cached access token is missing or within
+// REFRESH_SKEW of expiry. Cheap no-op when the token is still comfortably valid.
+const UPSHOT_REFRESH_SKEW_MS = 60 * 60 * 1000; // refresh once it's <1h from expiry
+function upshotTokenExpiresSoon() {
+  const json = readUpshotTokenJson();
+  const token = json?.accessToken || json?.token || json?.access_token;
+  if (!token) return true;
+  const payload = decodeJwtPayload(token);
+  if (!payload?.exp) return false; // no exp → can't tell; leave it
+  return payload.exp * 1000 <= Date.now() + UPSHOT_REFRESH_SKEW_MS;
+}
+async function maybeRefreshUpshotToken() {
+  // Only act when we have a refresh-token path configured and the token is stale.
+  if (!upshotTokenFilePath() || !readUpshotRefreshToken()) return;
+  if (!upshotTokenExpiresSoon()) return;
+  const ok = await refreshUpshotToken();
+  console.log(ok ? 'Upshot token: proactively refreshed.' : 'Upshot token: proactive refresh failed.');
 }
 
 // Decode a JWT's payload (no signature check — just to read exp/wallet locally).
@@ -932,9 +1017,14 @@ async function handleSendPack(interaction) {
     return interaction.editReply({ content: '❌ Mention at least one member to send to (e.g. `@alice @bob`).' });
   }
 
-  const token = getUpshotToken(interaction.guildId);
+  let token = getUpshotToken(interaction.guildId);
   if (!token) {
-    return interaction.editReply({ content: '❌ No Upshot token set. Run `/setup upshot-token` first (your Bearer accessToken).' });
+    // The cached access token may simply be expired — try a hands-off refresh
+    // (rotating refresh token, no browser) before giving up.
+    if (await refreshUpshotToken()) token = getUpshotToken(interaction.guildId);
+  }
+  if (!token) {
+    return interaction.editReply({ content: '❌ No Upshot token set. Run `/setup upshot-token` first (your Bearer accessToken), or re-link the session if the refresh token expired.' });
   }
 
   // Sender = the admin's own linked account (the token should belong to it).
@@ -2970,6 +3060,15 @@ client.once(Events.ClientReady, async () => {
   // Start tier rollover timer (first run after 2 minutes, then every 6h).
   tierTimer = setTimeout(safeRunTierRollover, 120_000);
   console.log(`   Tier rollover: first check in 2 minutes, then every 6h`);
+
+  // Keep the Upshot token fresh hands-off: the access token lives ~15h and the
+  // refresh token is a rotating 7-day sliding window, so a check every 6h keeps
+  // both alive indefinitely with no browser/login (no-op unless near expiry).
+  if (upshotTokenFilePath() && readUpshotRefreshToken()) {
+    setTimeout(() => { maybeRefreshUpshotToken().catch(() => {}); }, 30_000);
+    setInterval(() => { maybeRefreshUpshotToken().catch(() => {}); }, 6 * 60 * 60 * 1000);
+    console.log(`   Upshot token: auto-refresh armed (first check in 30s, then every 6h)`);
+  }
 });
 
 // ── Global error handling → admin channel ────────────────────
