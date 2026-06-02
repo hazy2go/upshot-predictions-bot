@@ -272,12 +272,16 @@ export const commands = [
     )
     .addSubcommand(sub =>
       sub.setName('upshot-token')
-        .setDescription('Manually set the Upshot API Bearer token used to send packs (fallback)')
+        .setDescription('Set the Upshot token used to send packs — paste the token or your upshot-token.json')
         .addStringOption(opt =>
           opt.setName('token')
-            .setDescription('Your Upshot API access token (Bearer)')
+            .setDescription('Paste the raw token, OR the whole upshot-token.json contents from the extractor')
             .setRequired(true)
         )
+    )
+    .addSubcommand(sub =>
+      sub.setName('owner')
+        .setDescription('Restrict /sendpack to one person — sets you as the owner (run this yourself)')
     ),
 
   new SlashCommandBuilder()

@@ -143,12 +143,52 @@ async function refreshUpshotToken() {
   }
 }
 
+// Decode a JWT's payload (no signature check — just to read exp/wallet locally).
+// Returns the payload object, or null if it doesn't look like a JWT.
+function decodeJwtPayload(token) {
+  try {
+    const part = token.split('.')[1];
+    if (!part) return null;
+    const json = Buffer.from(part.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
+// Accept either a raw Bearer token or the JSON the browser extractor produces
+// ({ token, wallet, expires_at, ... }). Returns the token string, or null.
+function extractTokenFromInput(input) {
+  const trimmed = input.trim();
+  if (trimmed.startsWith('{')) {
+    try {
+      const json = JSON.parse(trimmed);
+      return json.token || json.accessToken || json.access_token || null;
+    } catch {
+      return null;
+    }
+  }
+  return trimmed || null;
+}
+
 function getLeaderboardChannelId(guildId) {
   return cfg(guildId, 'leaderboard_channel', 'LEADERBOARD_CHANNEL_ID');
 }
 
 function getAdminRoleId(guildId) {
   return cfg(guildId, 'admin_role', 'ADMIN_ROLE_ID');
+}
+
+// /sendpack is restricted to a single owner when one is configured (via
+// `/setup owner` or the OWNER_ID env). Until an owner is set it falls back to
+// the normal admin check, so the command isn't locked out before first setup.
+function getOwnerId(guildId) {
+  return cfg(guildId, 'owner_id', 'OWNER_ID');
+}
+
+function canSendPack(interaction) {
+  const ownerId = getOwnerId(interaction.guildId);
+  return ownerId ? interaction.user.id === ownerId : isAdmin(interaction.member);
 }
 
 function getMaxDaily(guildId) {
@@ -875,8 +915,8 @@ async function handleSendPackAutocomplete(interaction) {
 }
 
 async function handleSendPack(interaction) {
-  if (!isAdmin(interaction.member)) {
-    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  if (!canSendPack(interaction)) {
+    return interaction.reply({ content: '❌ Only the configured pack owner can use this command.', flags: ['Ephemeral'] });
   }
 
   const usersRaw = interaction.options.getString('users', true);
@@ -971,8 +1011,8 @@ async function handleSendPack(interaction) {
 }
 
 async function handleConfirmSendPack(interaction) {
-  if (!isAdmin(interaction.member)) {
-    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  if (!canSendPack(interaction)) {
+    return interaction.reply({ content: '❌ Only the configured pack owner can use this command.', flags: ['Ephemeral'] });
   }
   const pending = pendingPackSends.get(interaction.user.id);
   if (!pending) {
@@ -1403,10 +1443,35 @@ async function handleSetup(interaction) {
       return interaction.reply({ content: `✅ Admin role set to <@&${role.id}>`, flags: ['Ephemeral'] });
     }
     case 'upshot-token': {
-      const token = interaction.options.getString('token', true).trim();
+      // Accept the raw token OR the whole upshot-token.json the extractor dumps.
+      const token = extractTokenFromInput(interaction.options.getString('token', true));
+      if (!token) {
+        return interaction.reply({ content: '❌ Couldn\'t find a token in that input. Paste either the raw token or the full `upshot-token.json` contents.', flags: ['Ephemeral'] });
+      }
+
+      // Decode the JWT locally to surface wallet + expiry (and reject dead tokens).
+      const payload = decodeJwtPayload(token);
+      if (payload?.exp && payload.exp * 1000 <= Date.now()) {
+        const ago = Math.round((Date.now() - payload.exp * 1000) / 60000);
+        return interaction.reply({ content: `❌ That token already expired ${ago} min ago — grab a fresh one and paste it again.`, flags: ['Ephemeral'] });
+      }
+
       setConfig(guildId, 'upshot_token', token);
-      // Never echo the token back.
-      return interaction.reply({ content: '✅ Upshot token saved. `/sendpack` can now send packs from your account.\n-# Manual fallback — tokens expire fast. Prefer the auto-refresh file setup (`UPSHOT_TOKEN_FILE`); otherwise re-run this when sends fail with an auth error.', flags: ['Ephemeral'] });
+
+      // Never echo the token back — only the non-sensitive metadata from it.
+      const wallet = payload?.walletAddress ? `\nWallet: \`${payload.walletAddress.slice(0, 6)}…${payload.walletAddress.slice(-4)}\`` : '';
+      const expiry = payload?.exp ? `\nExpires: <t:${payload.exp}:R>` : '';
+      return interaction.reply({ content: `✅ Upshot token saved. \`/sendpack\` can now send packs from your account.${wallet}${expiry}\n-# Tokens expire fast — re-run this with a fresh extract when sends start failing with an auth error.`, flags: ['Ephemeral'] });
+    }
+    case 'owner': {
+      // Lock /sendpack to a single person. Once set, only the current owner (or
+      // an OWNER_ID env) can reassign it — stops another admin from hijacking.
+      const current = getOwnerId(guildId);
+      if (current && current !== interaction.user.id) {
+        return interaction.reply({ content: `❌ The pack owner is already set to <@${current}>. Only they can reassign it.`, flags: ['Ephemeral'] });
+      }
+      setConfig(guildId, 'owner_id', interaction.user.id);
+      return interaction.reply({ content: `✅ You (<@${interaction.user.id}>) are now the pack owner. Only you can run \`/sendpack\` from here on.`, flags: ['Ephemeral'] });
     }
     case 'max-daily': {
       const limit = interaction.options.getInteger('limit', true);
