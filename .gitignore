@@ -2,5 +2,9 @@ node_modules/
 data/
 .env
 
-# Upshot token extractor — holds the live token and your logged-in browser session
+# Upshot token cache — holds the live access/refresh tokens + browser profile
 cache/
+
+# Node crash dumps
+core
+*.core

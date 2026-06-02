@@ -440,6 +440,48 @@ export async function transferPack({ recipientId, packId, quantity }, token) {
 }
 
 /**
+ * Exchange a (rotating) Upshot refresh token for a fresh access token.
+ *   POST /auth/refresh  { refreshToken }
+ *   → 201 { data: { accessToken, refreshToken } }
+ * This is the SAME endpoint the web app uses to stay logged in — no browser,
+ * no Google/Privy OAuth round-trip needed for the Upshot JWT itself.
+ * IMPORTANT: both tokens rotate (the old refresh token is invalidated on use),
+ * so the caller MUST persist the returned refreshToken or the chain breaks.
+ * Returns { ok:true, accessToken, refreshToken } or { ok:false, code, error }.
+ */
+export async function refreshUpshotAccessToken(refreshToken) {
+  if (!refreshToken) return { ok: false, code: 'no_refresh', error: 'No Upshot refresh token available.' };
+  try {
+    const res = await fetch(`${BASE}/auth/refresh`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Origin': process.env.UPSHOT_APP_URL || 'https://upshot.cards',
+      },
+      body: JSON.stringify({ refreshToken }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const text = await res.text();
+    // Bunny Shield serves an HTML challenge instead of JSON when it blocks us.
+    if (text.trimStart().startsWith('<')) {
+      return { ok: false, code: 'shield', error: 'Blocked by Upshot anti-bot shield.' };
+    }
+    let json = null;
+    try { json = text ? JSON.parse(text) : null; } catch { /* non-JSON response */ }
+    if (!res.ok) {
+      return { ok: false, code: res.status, error: json?.message || json?.error || `HTTP ${res.status}` };
+    }
+    const data = json?.data ?? json ?? {};
+    const accessToken = data.accessToken || data.token || data.access_token;
+    const newRefresh = data.refreshToken || data.refresh_token || refreshToken;
+    if (!accessToken) return { ok: false, code: 'no_token', error: 'Refresh response had no accessToken.' };
+    return { ok: true, accessToken, refreshToken: newRefresh };
+  } catch (err) {
+    return { ok: false, code: 'network', error: err.message };
+  }
+}
+
+/**
  * Unopened packs held by a wallet.
  *   GET /packs/balances/{wallet}
  *   → { data: { [packId]: { quantity, pack: { id, name, status, cardQuantity } } } }
