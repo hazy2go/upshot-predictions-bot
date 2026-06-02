@@ -879,11 +879,18 @@ async function handleSendPack(interaction) {
     return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
   }
 
-  const recipient = interaction.options.getUser('user', true);
+  const usersRaw = interaction.options.getString('users', true);
   const packQuery = interaction.options.getString('pack', true).trim();
   const quantity = interaction.options.getInteger('quantity', true);
 
+  // Parse one or more mentions (e.g. "@alice @bob") into a deduped list of ids.
+  const recipientDiscordIds = [...new Set([...usersRaw.matchAll(/<@!?(\d+)>/g)].map(m => m[1]))];
+
   await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  if (recipientDiscordIds.length === 0) {
+    return interaction.editReply({ content: '❌ Mention at least one member to send to (e.g. `@alice @bob`).' });
+  }
 
   const token = getUpshotToken(interaction.guildId);
   if (!token) {
@@ -894,12 +901,6 @@ async function handleSendPack(interaction) {
   const sender = getUpshotProfile(interaction.user.id);
   if (!sender?.wallet_address) {
     return interaction.editReply({ content: '❌ Link your own Upshot profile first (so I can read your packs) — use `/link-upshot`.' });
-  }
-
-  // Recipient must have linked their profile, and we need their internal id.
-  const recipientProfile = getUpshotProfile(recipient.id);
-  if (!recipientProfile?.wallet_address) {
-    return interaction.editReply({ content: `❌ <@${recipient.id}> hasn't linked an Upshot profile yet, so I can't send to them.` });
   }
 
   // Validate the pack against the sender's unopened inventory.
@@ -913,21 +914,37 @@ async function handleSendPack(interaction) {
     const list = packs.map(p => `• ${p.name} ×${p.quantity}`).join('\n');
     return interaction.editReply({ content: `❌ You don't have a pack named **${packQuery}**. Your packs:\n${list}` });
   }
-  if (quantity > match.quantity) {
-    return interaction.editReply({ content: `❌ You only have **${match.quantity}× ${match.name}** — can't send ${quantity}.` });
+
+  // Resolve each recipient: they must have a linked profile and a usable Upshot id.
+  const recipients = [];
+  const skipped = [];
+  await Promise.all(recipientDiscordIds.map(async (id) => {
+    const profile = getUpshotProfile(id);
+    if (!profile?.wallet_address) {
+      skipped.push(`<@${id}> — no linked Upshot profile`);
+      return;
+    }
+    const upshot = await getUserProfile(profile.wallet_address);
+    if (!upshot?.id) {
+      skipped.push(`<@${id}> — couldn't resolve their Upshot account (they may need to log into Upshot once)`);
+      return;
+    }
+    recipients.push({ recipientId: upshot.id, recipientDiscordId: id, recipientWallet: profile.wallet_address });
+  }));
+
+  if (recipients.length === 0) {
+    return interaction.editReply({ content: `❌ No valid recipients:\n${skipped.map(s => `• ${s}`).join('\n')}` });
   }
 
-  // Resolve the recipient's internal Upshot user id (required by the transfer).
-  const recipientUpshot = await getUserProfile(recipientProfile.wallet_address);
-  const recipientId = recipientUpshot?.id;
-  if (!recipientId) {
-    return interaction.editReply({ content: '❌ Couldn\'t resolve the recipient\'s Upshot account from their wallet. They may need to log into Upshot once.' });
+  const totalNeeded = quantity * recipients.length;
+  if (totalNeeded > match.quantity) {
+    return interaction.editReply({
+      content: `❌ You only have **${match.quantity}× ${match.name}** — can't send ${quantity} to each of ${recipients.length} recipient(s) (need ${totalNeeded}).`,
+    });
   }
 
   pendingPackSends.set(interaction.user.id, {
-    recipientId,
-    recipientDiscordId: recipient.id,
-    recipientWallet: recipientProfile.wallet_address,
+    recipients,
     packId: match.packId,
     packName: match.name,
     quantity,
@@ -935,9 +952,14 @@ async function handleSendPack(interaction) {
   });
   setTimeout(() => pendingPackSends.delete(interaction.user.id), 5 * 60 * 1000);
 
+  const recipientLines = recipients
+    .map(r => `• <@${r.recipientDiscordId}> (\`${r.recipientWallet.slice(0, 6)}…${r.recipientWallet.slice(-4)}\`)`)
+    .join('\n');
+  const skipNote = skipped.length ? `\n\n⚠️ Skipping:\n${skipped.map(s => `• ${s}`).join('\n')}` : '';
+
   return interaction.editReply({
     content: `⚠️ **Confirm pack transfer** — this is irreversible.\n\n`
-      + `Send **${quantity}× ${match.name}** to <@${recipient.id}> (\`${recipientProfile.wallet_address.slice(0, 6)}…${recipientProfile.wallet_address.slice(-4)}\`)?`,
+      + `Send **${quantity}× ${match.name}** to each of ${recipients.length} recipient(s) (${totalNeeded} total):\n${recipientLines}${skipNote}`,
     components: [{
       type: ComponentType.ActionRow,
       components: [
@@ -958,41 +980,62 @@ async function handleConfirmSendPack(interaction) {
   }
   pendingPackSends.delete(interaction.user.id);
 
-  await interaction.update({ content: `⏳ Sending **${pending.quantity}× ${pending.packName}**…`, components: [] });
+  await interaction.update({
+    content: `⏳ Sending **${pending.quantity}× ${pending.packName}** to ${pending.recipients.length} recipient(s)…`,
+    components: [],
+  });
 
-  const params = { recipientId: pending.recipientId, packId: pending.packId, quantity: pending.quantity };
-  let result = await transferPack(params, getUpshotToken(pending.guildId));
+  // Send to each recipient in turn. One failure doesn't abort the rest.
+  const sent = [];
+  const failed = [];
+  let refreshed = false;
+  for (const r of pending.recipients) {
+    const params = { recipientId: r.recipientId, packId: pending.packId, quantity: pending.quantity };
+    let result = await transferPack(params, getUpshotToken(pending.guildId));
 
-  // On an auth failure, try a one-shot token refresh (if configured) and retry.
-  if ((result.code === 401 || result.code === 403) && await refreshUpshotToken()) {
-    const fresh = getUpshotToken(pending.guildId);
-    if (fresh) result = await transferPack(params, fresh);
+    // On an auth failure, try a one-shot token refresh (if configured) and retry — once per run.
+    if ((result.code === 401 || result.code === 403) && !refreshed && await refreshUpshotToken()) {
+      refreshed = true;
+      const fresh = getUpshotToken(pending.guildId);
+      if (fresh) result = await transferPack(params, fresh);
+    }
+
+    if (result.ok) {
+      sent.push(r);
+    } else {
+      const reason = result.code === 401 || result.code === 403
+        ? 'token expired/rejected'
+        : result.code === 'shield'
+          ? 'blocked by anti-bot shield'
+          : (result.error || 'unknown error');
+      failed.push({ ...r, reason });
+    }
   }
 
-  if (result.ok) {
-    await interaction.editReply({
-      content: `✅ Sent **${pending.quantity}× ${pending.packName}** to <@${pending.recipientDiscordId}>.`,
-    });
+  const lines = [];
+  if (sent.length) {
+    lines.push(`✅ Sent **${pending.quantity}× ${pending.packName}** to ${sent.length} recipient(s):`);
+    lines.push(...sent.map(r => `• <@${r.recipientDiscordId}>`));
+  }
+  if (failed.length) {
+    lines.push(`❌ Failed for ${failed.length} recipient(s):`);
+    lines.push(...failed.map(r => `• <@${r.recipientDiscordId}> — ${r.reason}`));
+  }
+  await interaction.editReply({ content: lines.join('\n') });
 
+  if (sent.length) {
     // Public announcement in the channel where /sendpack was used.
     const packLabel = pending.quantity > 1 ? `**${pending.quantity}× ${pending.packName}** packs` : `a **${pending.packName}** pack`;
+    const mentions = sent.map(r => `<@${r.recipientDiscordId}>`).join(', ');
     await interaction.channel?.send({
-      content: `🎁 <@${interaction.user.id}> sent ${packLabel} to <@${pending.recipientDiscordId}>! 🎉`,
+      content: `🎁 <@${interaction.user.id}> sent ${packLabel} to ${mentions}! 🎉`,
     }).catch(e => console.error('Pack announce failed:', e.message));
 
     notifyAdmin(pending.guildId,
       `📦 **Pack sent** — <@${interaction.user.id}> sent **${pending.quantity}× ${pending.packName}** to `
-      + `<@${pending.recipientDiscordId}> (\`${pending.recipientWallet}\`).`
+      + sent.map(r => `<@${r.recipientDiscordId}> (\`${r.recipientWallet}\`)`).join(', ') + '.'
     ).catch(() => {});
-    return;
   }
-
-  const msg = result.code === 401 || result.code === 403
-    ? '❌ Your Upshot token expired or was rejected. Set a fresh one with `/setup upshot-token` and try again.'
-    : result.code === 'shield'
-      ? '❌ Upshot\'s anti-bot shield blocked the request. Try again shortly; if it persists the transfer must be done from a browser session.'
-      : `❌ Transfer failed: ${result.error}`;
-  await interaction.editReply({ content: msg });
 }
 
 async function handleCancelSendPack(interaction) {

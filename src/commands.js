@@ -284,9 +284,9 @@ export const commands = [
     .setName('sendpack')
     .setDescription('Send Upshot pack(s) from your account to a member (admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addUserOption(opt =>
-      opt.setName('user')
-        .setDescription('Recipient — must have a linked Upshot profile')
+    .addStringOption(opt =>
+      opt.setName('users')
+        .setDescription('Recipient(s) — mention one or more members (e.g. @alice @bob)')
         .setRequired(true)
     )
     .addStringOption(opt =>
@@ -297,7 +297,7 @@ export const commands = [
     )
     .addIntegerOption(opt =>
       opt.setName('quantity')
-        .setDescription('How many to send')
+        .setDescription('How many to send to EACH recipient')
         .setRequired(true)
         .setMinValue(1)
     ),
