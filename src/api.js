@@ -77,16 +77,33 @@ export function extractCardId(input) {
 /**
  * Fetch card details including Arweave image.
  * Returns { id, name, rarity, image, arweaveUrl, ... } or null.
+ *
+ * Results are cached for CARD_DETAILS_TTL — card name/image/event date are
+ * stable, so this avoids re-fetching the same card across the deadline filter,
+ * the detail view, and repeated My Cards opens. Only successful lookups are
+ * cached (failures fall through so they're retried next time).
+ *
+ * `retries` is forwarded to fetchRetry. The bulk deadline filter passes a low
+ * value so a large wallet doesn't multiply its request volume against the API.
+ * Pass `fresh: true` to bypass the cache read (e.g. resolution checks that need
+ * live event status); the result still refreshes the cache.
  */
-export async function getCardDetails(cardId) {
+const cardDetailsCache = new Map(); // cardId -> { at, value }
+const CARD_DETAILS_TTL = 30 * 60 * 1000;
+
+export async function getCardDetails(cardId, { retries = 3, fresh = false } = {}) {
+  const cached = cardDetailsCache.get(cardId);
+  if (!fresh && cached && Date.now() - cached.at < CARD_DETAILS_TTL) {
+    return cached.value;
+  }
   try {
-    const res = await fetchRetry(`${BASE}/cards/${cardId}?include=event,supply`, { timeout: 10_000 });
+    const res = await fetchRetry(`${BASE}/cards/${cardId}?include=event,supply`, { timeout: 15_000, retries });
     if (!res.ok) return null;
     const json = await res.json();
     const card = json.data;
     if (!card) return null;
 
-    return {
+    const value = {
       id: card.id,
       name: card.name,
       rarity: card.rarity,
@@ -103,6 +120,8 @@ export async function getCardDetails(cardId) {
       winningOutcomeId: card.event?.winningOutcomeId || null,
       resolvedAt: card.event?.resolvedAt || null,
     };
+    cardDetailsCache.set(cardId, { at: Date.now(), value });
+    return value;
   } catch (err) {
     console.error(`Upshot API: getCardDetails(${cardId}) failed:`, err.message);
     return null;
@@ -299,15 +318,18 @@ function eventDeadlinePassed(details) {
 
 /**
  * Enrich cards with event details and drop any whose deadline has already
- * passed. Runs lookups in small concurrent batches to avoid hammering the API.
- * Also upgrades each card's name with the canonical one from the details call.
+ * passed. Runs lookups in small concurrent batches to stay gentle on the API —
+ * a large wallet can be dozens of cards, so we cap concurrency and use a single
+ * retry per card (cached details mean repeat opens cost nothing). Cards whose
+ * lookup fails are kept (the submit flow rejects expired stragglers as a
+ * backstop). Also upgrades each card's name with the canonical one.
  */
 async function filterOutExpiredCards(cards) {
   const out = [];
-  const CHUNK = 10;
+  const CHUNK = 4;
   for (let i = 0; i < cards.length; i += CHUNK) {
     const chunk = cards.slice(i, i + CHUNK);
-    const results = await Promise.allSettled(chunk.map(c => getCardDetails(c.id)));
+    const results = await Promise.allSettled(chunk.map(c => getCardDetails(c.id, { retries: 1 })));
     for (let j = 0; j < chunk.length; j++) {
       const details = results[j].status === 'fulfilled' ? results[j].value : null;
       if (eventDeadlinePassed(details)) continue;
@@ -325,8 +347,20 @@ async function filterOutExpiredCards(cards) {
  * Returns array of { id, name, inContest }. Best-effort: returns whatever it
  * could gather, [] on total failure. Wallet-owned cards win over contest cards
  * when a card appears in both.
+ *
+ * The assembled list is cached per wallet for PREDICTABLE_CARDS_TTL so repeated
+ * My Cards taps don't re-run the whole balances + contests + per-card deadline
+ * pipeline (and re-flood the API) every time. Only non-empty results are cached.
  */
+const predictableCardsCache = new Map(); // wallet -> { at, value }
+const PREDICTABLE_CARDS_TTL = 3 * 60 * 1000;
+
 export async function getPredictableCards(walletAddress) {
+  const cached = predictableCardsCache.get(walletAddress);
+  if (cached && Date.now() - cached.at < PREDICTABLE_CARDS_TTL) {
+    return cached.value;
+  }
+
   const byId = new Map();
 
   // 1. Wallet balances (all cards, no cardId filter).
@@ -370,12 +404,20 @@ export async function getPredictableCards(walletAddress) {
   }
 
   // Drop cards whose event deadline has already passed — they can't be predicted.
+  let result;
   try {
-    return await filterOutExpiredCards([...byId.values()]);
+    result = await filterOutExpiredCards([...byId.values()]);
   } catch (err) {
     console.error(`Upshot API: getPredictableCards deadline filter(${walletAddress}) failed:`, err.message);
-    return [...byId.values()];
+    result = [...byId.values()];
   }
+
+  // Cache only useful results — don't pin an empty list (likely a transient API
+  // failure) for the full TTL and lock the user out of their cards.
+  if (result.length > 0) {
+    predictableCardsCache.set(walletAddress, { at: Date.now(), value: result });
+  }
+  return result;
 }
 
 /**
@@ -387,7 +429,8 @@ export async function getPredictableCards(walletAddress) {
  */
 export async function checkCardResolution(cardId) {
   try {
-    const card = await getCardDetails(cardId);
+    // Resolution detection must use live event status, not a cached snapshot.
+    const card = await getCardDetails(cardId, { fresh: true });
     if (!card) return { resolved: false, won: null, error: 'card_not_found' };
 
     if (card.eventStatus !== 'RESOLVED') {
