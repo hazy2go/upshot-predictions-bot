@@ -9,6 +9,17 @@ const BASE = 'https://api-mainnet.upshotcards.net/api/v1';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Bounded cache set: the bot is a long-running process, so a plain Map keyed by
+// card id / wallet / contest grows without limit (TTL governs whether a hit is
+// *used*, never frees the entry). cacheSet evicts the oldest entry once the map
+// passes `max` — Maps iterate in insertion order, so the first key is the oldest.
+function cacheSet(map, key, value, max) {
+  if (map.size >= max && !map.has(key)) {
+    map.delete(map.keys().next().value);
+  }
+  map.set(key, value);
+}
+
 // Browser-like headers for read requests. A bare Node fetch (no User-Agent, no
 // Origin) is an easy bot signal — Upshot sits behind Bunny Shield, which can
 // tarpit/drop those connections (they hang until our AbortSignal fires, showing
@@ -121,7 +132,7 @@ async function getContestStandings(contestId) {
   _standingsInFlight.set(contestId, p);
   try {
     const value = await p;
-    if (value) _standingsCache.set(contestId, { at: Date.now(), value });
+    if (value) cacheSet(_standingsCache, contestId, { at: Date.now(), value }, 200);
     return value;
   } finally {
     _standingsInFlight.delete(contestId);
@@ -217,7 +228,7 @@ async function fetchCardDetails(cardId, { retries, timeout }) {
       winningOutcomeId: card.event?.winningOutcomeId || null,
       resolvedAt: card.event?.resolvedAt || null,
     };
-    cardDetailsCache.set(cardId, { at: Date.now(), value });
+    cacheSet(cardDetailsCache, cardId, { at: Date.now(), value }, 2000);
     return { ok: true, value };
   } catch (err) {
     console.error(`Upshot API: getCardDetails(${cardId}) failed:`, err.message);
@@ -505,7 +516,7 @@ export async function getPredictableCards(walletAddress) {
   // Cache only useful results — don't pin an empty list (likely a transient API
   // failure) for the full TTL and lock the user out of their cards.
   if (result.length > 0) {
-    predictableCardsCache.set(walletAddress, { at: Date.now(), value: result });
+    cacheSet(predictableCardsCache, walletAddress, { at: Date.now(), value: result }, 1000);
   }
   return result;
 }
