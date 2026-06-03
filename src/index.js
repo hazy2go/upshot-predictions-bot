@@ -1356,6 +1356,98 @@ async function handleCardDetailPredict(interaction) {
   return showPredictModal(interaction, { presetCardId: cardId, presetCardName });
 }
 
+// ── Manual "Predict by URL" — step 1: ask only for the card URL/ID ──
+// Validation happens on submit (handlePredictUrlModalSubmit) BEFORE asking for
+// the prediction text, so members don't waste effort on a card that's expired or
+// already taken.
+async function showPredictUrlModal(interaction) {
+  const profile = getUpshotProfile(interaction.user.id);
+  if (!profile) return showLinkProfileModal(interaction);
+
+  const modal = new ModalBuilder()
+    .setCustomId('predict_url_modal')
+    .setTitle('Predict by Card URL / ID');
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('card_url')
+        .setLabel('Card URL or ID')
+        .setPlaceholder('https://upshot.cards/card-detail/cm... or cm...')
+        .setStyle(TextInputStyle.Short)
+        .setMaxLength(280)
+        .setRequired(true),
+    ),
+  );
+  return interaction.showModal(modal);
+}
+
+// Manual "Predict by URL" — step 1 submit: validate the card up front, then show
+// it with a "write your prediction" button (the existing card-detail view). If
+// it's expired or already predicted, tell them to pick another — no wasted typing.
+async function handlePredictUrlModalSubmit(interaction) {
+  const raw = interaction.fields.getTextInputValue('card_url')?.trim();
+  const isUrl = raw?.startsWith('https://') && raw.includes('upshot');
+  const isRawId = /^cm[a-z0-9]{10,}$/i.test(raw || '');
+  if (!raw || (!isUrl && !isRawId)) {
+    return interaction.reply({
+      content: '❌ Invalid card URL or ID. Use the full card URL from upshot.cards or a card ID starting with `cm`.',
+      flags: ['Ephemeral'],
+    });
+  }
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  // Fail fast on the daily/open caps before anything else.
+  const maxDaily = getMaxDaily(interaction.guildId);
+  if (countUserDailyPredictions(interaction.user.id) >= maxDaily) {
+    return interaction.editReply({ content: `❌ You've reached the daily limit of **${maxDaily}** predictions. Try again tomorrow.` });
+  }
+  const maxOpen = getMaxOpen(interaction.guildId);
+  if (countUserUnresolved(interaction.user.id) >= maxOpen) {
+    return interaction.editReply({ content: `❌ You have the max of **${maxOpen}** open predictions. Wait for some to resolve before submitting more.` });
+  }
+
+  const cardId = extractCardId(raw);
+
+  // Already predicted?
+  const existing = hasUnresolvedPredictionForCard(cardId);
+  if (existing) {
+    return interaction.editReply({ content: `${cardTakenMessage(existing, interaction.guildId, interaction.user.id)}\n-# Pick another card.` });
+  }
+
+  // Fetch + deadline check (live status, not a cached snapshot).
+  const details = await getCardDetails(cardId, { fresh: true });
+  if (!details) {
+    return interaction.editReply({ content: '❌ Couldn\'t find that card on Upshot. Double-check the URL or ID and try again.' });
+  }
+
+  let deadline = null;
+  if (details.eventDate) {
+    const d = new Date(details.eventDate);
+    deadline = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  }
+  const today = new Date();
+  const todayStr = `${today.getUTCFullYear()}-${String(today.getUTCMonth() + 1).padStart(2, '0')}-${String(today.getUTCDate()).padStart(2, '0')}`;
+  const expired = details.resolvedAt || (deadline && deadline <= todayStr);
+  if (expired) {
+    return interaction.editReply({ content: `❌ This card's event deadline has already passed${deadline ? ` (**${deadline}**)` : ''}. You can't predict on it — pick another card.` });
+  }
+
+  // All good — show the card with a "Predict" button (reuses the My Cards detail
+  // view + its carddetail_predict button → the prediction modal).
+  const card = {
+    id: cardId,
+    name: details.name || cardId,
+    arweaveUrl: details.arweaveUrl || null,
+    rarity: details.rarity || null,
+    deadline,
+    inContest: false,
+  };
+  cardViewCache.set(interaction.user.id, { cardId, cardName: card.name, page: 0 });
+  scheduleCacheEvict(cardViewCache, 'view', interaction.user.id);
+  return interaction.editReply(buildCardDetail(card, { taken: null }));
+}
+
 // Contest-lineup select → straight to the prediction modal (no detail view).
 async function handleCardSelect(interaction) {
   const cardId = interaction.values?.[0];
@@ -2448,10 +2540,10 @@ async function handleButton(interaction) {
     return handleCardPicker(interaction);
   }
 
-  // Manual "Predict by URL" — opens the modal where you paste a card URL/ID
-  // (the original flow, kept alongside My Cards by request).
+  // Manual "Predict by URL" — opens a modal asking only for the card URL/ID; it's
+  // validated (exists / deadline / already-predicted) before the prediction modal.
   if (interaction.customId === 'panel_predict_url') {
-    return showPredictModal(interaction);
+    return showPredictUrlModal(interaction);
   }
 
   // Hub buttons (self-serve panel) — reuse existing handlers
@@ -3547,6 +3639,9 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isModalSubmit()) {
       if (interaction.customId === 'link_profile_modal') {
         return await handleLinkProfileModalSubmit(interaction);
+      }
+      if (interaction.customId === 'predict_url_modal') {
+        return await handlePredictUrlModalSubmit(interaction);
       }
       if (interaction.customId === 'predict_modal') {
         return await handlePredictModalSubmit(interaction);
