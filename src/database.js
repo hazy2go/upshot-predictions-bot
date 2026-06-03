@@ -54,6 +54,9 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_predictions_author ON predictions(author_id);
   CREATE INDEX IF NOT EXISTS idx_predictions_month ON predictions(month_key);
   CREATE INDEX IF NOT EXISTS idx_predictions_status ON predictions(status);
+  -- hasUnresolvedPredictionForCard runs on every new prediction; auto-resolve
+  -- sweeps unresolved cards. Both filter by card_id — index it.
+  CREATE INDEX IF NOT EXISTS idx_predictions_card ON predictions(card_id);
 
   CREATE TABLE IF NOT EXISTS bot_state (
     key   TEXT PRIMARY KEY,

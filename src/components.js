@@ -630,25 +630,37 @@ export function buildHelpPage(page) {
  * Build the contest overview page — lists all contests with a button for each.
  */
 export function buildContestOverview(contests) {
+  // Cap how many we render: each contest is 1 text node + 1 button, and Discord
+  // rejects a message with >40 components / >5 button rows, so a member in 20+
+  // contests would otherwise blow the whole message up. Show the first 20.
+  const MAX = 20;
+  const shown = contests.slice(0, MAX);
+
   const children = [];
   children.push(text('## 🏅 Your Active Contests'));
   children.push(separator());
 
-  for (let i = 0; i < contests.length; i++) {
-    const c = contests[i];
+  // One joined text block (not one node per contest) so the component count
+  // stays well under Discord's 40-per-message cap even with the button row(s).
+  const lines = shown.map(c => {
     const lineupCount = c.lineups.length;
-    const bestRank = Math.min(...c.lineups.map(l => l.rank));
-    children.push(text(`**${c.contestName}**\n${lineupCount} lineup${lineupCount > 1 ? 's' : ''} · Best rank: #${bestRank}`));
-  }
+    const ranks = c.lineups.map(l => l.rank).filter(Number.isFinite);
+    const bestRank = ranks.length ? `#${Math.min(...ranks)}` : '—';
+    return `**${c.contestName}**\n${lineupCount} lineup${lineupCount === 1 ? '' : 's'} · Best rank: ${bestRank}`;
+  });
+  children.push(text(lines.join('\n\n').slice(0, 3900)));
 
   children.push(separator());
 
-  // One button per contest (max 5 per row)
-  const btns = contests.map((c, i) =>
+  // One button per contest (max 5 per row). Index matches `shown`/`contestCache`.
+  const btns = shown.map((c, i) =>
     button(`contest_select:${i}:0`, c.contestName.length > 40 ? c.contestName.slice(0, 37) + '...' : c.contestName, ButtonStyle.Primary)
   );
   for (let i = 0; i < btns.length; i += 5) {
     children.push(actionRow(...btns.slice(i, i + 5)));
+  }
+  if (contests.length > MAX) {
+    children.push(text(`-# Showing ${MAX} of ${contests.length} contests.`));
   }
 
   return {

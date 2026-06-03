@@ -984,9 +984,11 @@ async function handleMyContests(interaction) {
     return interaction.editReply({ content: 'You\'re not entered in any active contests.' });
   }
 
-  // Cache for navigation
+  // Cache for navigation. Use scheduleCacheEvict (not a bare setTimeout) so
+  // re-running /mycontests doesn't stack timers — an early one would otherwise
+  // evict the entry the user just refreshed, mid-navigation.
   contestCache.set(interaction.user.id, contests);
-  setTimeout(() => contestCache.delete(interaction.user.id), 10 * 60 * 1000);
+  scheduleCacheEvict(contestCache, 'contests', interaction.user.id);
 
   const payload = buildContestOverview(contests);
   await interaction.editReply(payload);
@@ -2635,10 +2637,14 @@ async function handleButton(interaction) {
   if (interaction.customId.startsWith('panel_help:')) {
     const page = parseInt(interaction.customId.split(':')[1], 10);
     const payload = buildHelpPage(page);
-    if (interaction.message.flags.has(1 << 6)) {
+    // If this help view is already ephemeral (opened from another ephemeral
+    // flow), edit it in place. From a PUBLIC panel button, reply with a fresh
+    // EPHEMERAL help page instead of posting it publicly — otherwise every
+    // "How It Works" click spams the channel with a new public message.
+    if (interaction.message.flags?.has(1 << 6)) {
       return interaction.update(payload);
     }
-    return interaction.reply(payload);
+    return interaction.reply({ ...payload, flags: (payload.flags || 0) | (1 << 6) });
   }
 
   // Pack send confirmation
@@ -3229,20 +3235,21 @@ async function runContestWatch(guildId, { announce = true } = {}) {
     if (!state[contest.id]) state[contest.id] = contestNewFlags(contest.status);
     const seen = state[contest.id];
 
-    if (contest.status === 'LIVE' && !seen.announcedLive) {
-      if (channel) {
-        await channel.send(buildContestLive(contest)).then(() => { newLive++; })
-          .catch(e => console.error(`Contest watch: live announce failed for ${contest.id}:`, e.message));
-      }
-      seen.announcedLive = true;
+    // Only mark announced on a SUCCESSFUL send — a transient Discord error must
+    // not permanently suppress the announcement (it retries next sweep). With no
+    // channel configured the flag stays false so it fires once one is set.
+    if (contest.status === 'LIVE' && !seen.announcedLive && channel) {
+      try {
+        await channel.send(buildContestLive(contest));
+        seen.announcedLive = true; newLive++;
+      } catch (e) { console.error(`Contest watch: live announce failed for ${contest.id}:`, e.message); }
     }
-    if (contest.status === 'COMPLETED' && !seen.announcedDone) {
-      if (channel) {
+    if (contest.status === 'COMPLETED' && !seen.announcedDone && channel) {
+      try {
         const top = await getContestTop(contest.id, 3);
-        await channel.send(buildContestResults(contest, top)).then(() => { done++; })
-          .catch(e => console.error(`Contest watch: results announce failed for ${contest.id}:`, e.message));
-      }
-      seen.announcedDone = true;
+        await channel.send(buildContestResults(contest, top));
+        seen.announcedDone = true; done++;
+      } catch (e) { console.error(`Contest watch: results announce failed for ${contest.id}:`, e.message); }
     }
     seen.status = contest.status;
   }
@@ -3360,21 +3367,20 @@ async function runRaffleWatch(guildId, { announce = true } = {}) {
     }
     const seen = state[raffle.id];
 
-    if (raffle.status === 'LIVE' && !seen.announcedLive) {
-      if (channel) {
-        await channel.send(buildRaffleLive(raffle)).then(() => { live++; })
-          .catch(e => console.error(`Lucky Shots: live announce failed for ${raffle.id}:`, e.message));
-      }
-      seen.announcedLive = true;
+    // Mark announced only on a successful send (see contest watcher note).
+    if (raffle.status === 'LIVE' && !seen.announcedLive && channel) {
+      try {
+        await channel.send(buildRaffleLive(raffle));
+        seen.announcedLive = true; live++;
+      } catch (e) { console.error(`Lucky Shots: live announce failed for ${raffle.id}:`, e.message); }
     }
 
-    if (raffle.status === 'DRAWN' && !seen.announcedDrawn) {
-      if (channel) {
+    if (raffle.status === 'DRAWN' && !seen.announcedDrawn && channel) {
+      try {
         const detail = await getRaffleDetail(raffle.id);
-        await channel.send(buildRaffleWinner(raffle, detail?.winner || null)).then(() => { winners++; })
-          .catch(e => console.error(`Lucky Shots: winner announce failed for ${raffle.id}:`, e.message));
-      }
-      seen.announcedDrawn = true;
+        await channel.send(buildRaffleWinner(raffle, detail?.winner || null));
+        seen.announcedDrawn = true; winners++;
+      } catch (e) { console.error(`Lucky Shots: winner announce failed for ${raffle.id}:`, e.message); }
     }
 
     seen.status = raffle.status;
@@ -3481,12 +3487,12 @@ async function runStoreWatch(guildId, { announce = true } = {}) {
     if (!state[k]) state[k] = { status: item.status, announcedListed: false }; // new since last seed
     const seen = state[k];
 
-    if (STORE_VISIBLE(item.status) && !seen.announcedListed) {
-      if (channel) {
-        await channel.send(buildStoreListed(item)).then(() => { listed++; })
-          .catch(e => console.error(`Store watch: listing announce failed for ${k}:`, e.message));
-      }
-      seen.announcedListed = true;
+    // Mark announced only on a successful send (see contest watcher note).
+    if (STORE_VISIBLE(item.status) && !seen.announcedListed && channel) {
+      try {
+        await channel.send(buildStoreListed(item));
+        seen.announcedListed = true; listed++;
+      } catch (e) { console.error(`Store watch: listing announce failed for ${k}:`, e.message); }
     }
     seen.status = item.status;
   }
