@@ -44,6 +44,7 @@ import {
   buildContestLive, buildContestResults, buildContestList,
   buildRaffleLive, buildRaffleWinner, buildRaffleList,
   buildStoreListed, buildStoreList,
+  buildAdminPanel, buildAdminPickChannel, buildAdminPickRole, ADMIN_SETTINGS_LIST,
 } from './components.js';
 
 import { commands } from './commands.js';
@@ -2608,6 +2609,15 @@ async function handleButton(interaction) {
     return handleCardPage(interaction, Number.isNaN(page) ? 0 : page);
   }
 
+  // Admin panel
+  if (interaction.customId === 'admin_back' || interaction.customId === 'admin_refresh') {
+    if (!isAdmin(interaction.member)) return interaction.reply({ content: '❌ Admins only.', flags: ['Ephemeral'] });
+    return interaction.update(buildAdminPanel(gatherAdminCfg(interaction.guildId)));
+  }
+  if (interaction.customId.startsWith('admin_act:')) {
+    return handleAdminAction(interaction, interaction.customId.split(':')[1]);
+  }
+
   // My Cards search
   if (interaction.customId === 'mycards_search') {
     return handleMyCardSearch(interaction);
@@ -3666,6 +3676,140 @@ async function safeRunTierRollover() {
   tierTimer = setTimeout(safeRunTierRollover, TIER_CHECK_INTERVAL);
 }
 
+// ── Admin panel (/admin) ─────────────────────────────────────
+// A single overview + quick-access surface. The slash commands all still work;
+// this is purely additive. Every setting reads/writes through the same getters
+// and setConfig the /setup subcommands use, so the two stay in sync.
+
+function gatherAdminCfg(guildId) {
+  const token = getUpshotToken(guildId);
+  let expiresInMin = null;
+  if (token) {
+    const p = decodeJwtPayload(token);
+    if (p?.exp) expiresInMin = Math.round((p.exp * 1000 - Date.now()) / 60000);
+  }
+  return {
+    channels: {
+      predictions: getPredictionsChannelId(guildId),
+      admin: getAdminChannelId(guildId),
+      leaderboard: getLeaderboardChannelId(guildId),
+      contests: getContestsChannelId(guildId),
+      luckyshots: getLuckyShotsChannelId(guildId),
+      store: getStoreChannelId(guildId),
+    },
+    adminRole: getAdminRoleId(guildId),
+    ownerId: getOwnerId(guildId),
+    maxDaily: getMaxDaily(guildId),
+    maxOpen: getMaxOpen(guildId),
+    categories: getCategoryList(guildId),
+    token: { set: !!token, expiresInMin },
+  };
+}
+
+async function handleAdminPanel(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admins only.', flags: ['Ephemeral'] });
+  }
+  return interaction.reply(buildAdminPanel(gatherAdminCfg(interaction.guildId)));
+}
+
+// "⚙️ Change a setting…" select → route to the right input for that setting.
+async function handleAdminConfigure(interaction) {
+  if (!isAdmin(interaction.member)) return interaction.reply({ content: '❌ Admins only.', flags: ['Ephemeral'] });
+  const setting = ADMIN_SETTINGS_LIST.find(s => s.key === interaction.values?.[0]);
+  if (!setting) return interaction.update(buildAdminPanel(gatherAdminCfg(interaction.guildId)));
+
+  if (setting.kind === 'channel') return interaction.update(buildAdminPickChannel(setting));
+  if (setting.kind === 'role') return interaction.update(buildAdminPickRole());
+  if (setting.kind === 'owner') {
+    setConfig(interaction.guildId, 'owner_id', interaction.user.id);
+    return interaction.update(buildAdminPanel(gatherAdminCfg(interaction.guildId)));
+  }
+  if (setting.kind === 'int') {
+    const current = setting.key === 'max_daily' ? getMaxDaily(interaction.guildId) : getMaxOpen(interaction.guildId);
+    const modal = new ModalBuilder().setCustomId(`admin_limit:${setting.key}`).setTitle(setting.label);
+    modal.addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId('value').setLabel(setting.label)
+        .setPlaceholder(String(current)).setValue(String(current))
+        .setStyle(TextInputStyle.Short).setMaxLength(3).setRequired(true)));
+    return interaction.showModal(modal);
+  }
+  if (setting.kind === 'token') {
+    const modal = new ModalBuilder().setCustomId('admin_token').setTitle('Set Upshot Token');
+    modal.addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId('token').setLabel('Bearer token or upshot-token.json')
+        .setPlaceholder('Paste the raw token, OR the whole upshot-token.json')
+        .setStyle(TextInputStyle.Paragraph).setMaxLength(4000).setRequired(true)));
+    return interaction.showModal(modal);
+  }
+}
+
+async function handleAdminSetChannel(interaction) {
+  if (!isAdmin(interaction.member)) return interaction.reply({ content: '❌ Admins only.', flags: ['Ephemeral'] });
+  const key = interaction.customId.split(':')[1];
+  const channelId = interaction.values?.[0];
+  if (key && channelId) setConfig(interaction.guildId, key, channelId);
+  return interaction.update(buildAdminPanel(gatherAdminCfg(interaction.guildId)));
+}
+
+async function handleAdminSetRole(interaction) {
+  if (!isAdmin(interaction.member)) return interaction.reply({ content: '❌ Admins only.', flags: ['Ephemeral'] });
+  const roleId = interaction.values?.[0];
+  if (roleId) setConfig(interaction.guildId, 'admin_role', roleId);
+  return interaction.update(buildAdminPanel(gatherAdminCfg(interaction.guildId)));
+}
+
+async function handleAdminLimitModal(interaction) {
+  const key = interaction.customId.split(':')[1];
+  const max = key === 'max_daily' ? 20 : 50;
+  const val = parseInt(interaction.fields.getTextInputValue('value'), 10);
+  if (!Number.isInteger(val) || val < 1 || val > max) {
+    return interaction.reply({ content: `❌ Enter a whole number between 1 and ${max}.`, flags: ['Ephemeral'] });
+  }
+  setConfig(interaction.guildId, key, val);
+  return interaction.update(buildAdminPanel(gatherAdminCfg(interaction.guildId)));
+}
+
+async function handleAdminTokenModal(interaction) {
+  const token = extractTokenFromInput(interaction.fields.getTextInputValue('token'));
+  if (!token) return interaction.reply({ content: '❌ Couldn\'t find a token in that input.', flags: ['Ephemeral'] });
+  const payload = decodeJwtPayload(token);
+  if (payload?.exp && payload.exp * 1000 <= Date.now()) {
+    return interaction.reply({ content: '❌ That token has already expired — grab a fresh one.', flags: ['Ephemeral'] });
+  }
+  setConfig(interaction.guildId, 'upshot_token', token);
+  return interaction.update(buildAdminPanel(gatherAdminCfg(interaction.guildId)));
+}
+
+// Action buttons run the work in a SEPARATE ephemeral reply so the panel stays.
+async function handleAdminAction(interaction, action) {
+  if (!isAdmin(interaction.member)) return interaction.reply({ content: '❌ Admins only.', flags: ['Ephemeral'] });
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+  const gid = interaction.guildId;
+  try {
+    if (action === 'refresh_lb') {
+      await refreshLeaderboard(gid);
+      return interaction.editReply({ content: '✅ Leaderboard refreshed.' });
+    }
+    if (action === 'resolve') {
+      runAutoResolve().catch(e => console.error('Admin resolve:', e.message));
+      return interaction.editReply({ content: '✅ Resolution check started — results post to the admin channel.' });
+    }
+    const watch = action === 'contests' ? runContestWatch
+      : action === 'luckyshots' ? runRaffleWatch
+      : action === 'store' ? runStoreWatch : null;
+    if (!watch) return interaction.editReply({ content: '❌ Unknown action.' });
+    const r = await watch(gid, { announce: true });
+    if (!r.ok) return interaction.editReply({ content: '⚠️ Couldn\'t reach the Upshot API just now — try again in a moment.' });
+    if (r.seeded) return interaction.editReply({ content: `✅ First sync — seeded **${r.total}** silently. Future changes will announce.` });
+    const n = r.newLive ?? r.live ?? r.listed ?? 0;
+    const extra = r.done ? `, ${r.done} completed` : r.winners ? `, ${r.winners} winner(s)` : '';
+    return interaction.editReply({ content: `✅ Checked **${r.total}** — announced **${n}** new${extra}.` });
+  } catch (err) {
+    return interaction.editReply({ content: `❌ Action failed: ${err.message}` });
+  }
+}
+
 // ── Event routing ────────────────────────────────────────────
 
 client.on(Events.InteractionCreate, async interaction => {
@@ -3690,6 +3834,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'contests': return await handleContestsCommand(interaction);
         case 'luckyshots': return await handleLuckyShotsCommand(interaction);
         case 'store': return await handleStoreCommand(interaction);
+        case 'admin': return await handleAdminPanel(interaction);
         case 'refresh': return await handleRefreshCommand(interaction);
         case 'resolve': return await handleResolveCommand(interaction);
         case 'leaderboard': return await handleLeaderboardCommand(interaction);
@@ -3718,6 +3863,12 @@ client.on(Events.InteractionCreate, async interaction => {
       if (interaction.customId.startsWith('stars_modal:')) {
         return await handleStarsModalSubmit(interaction);
       }
+      if (interaction.customId.startsWith('admin_limit:')) {
+        return await handleAdminLimitModal(interaction);
+      }
+      if (interaction.customId === 'admin_token') {
+        return await handleAdminTokenModal(interaction);
+      }
     }
 
     if (interaction.isButton()) {
@@ -3734,9 +3885,21 @@ client.on(Events.InteractionCreate, async interaction => {
       if (interaction.customId === 'contest_predict_select') {
         return await handleCardSelect(interaction);
       }
+      if (interaction.customId === 'admin_configure') {
+        return await handleAdminConfigure(interaction);
+      }
+    }
+
+    if (interaction.isChannelSelectMenu?.()) {
+      if (interaction.customId.startsWith('admin_setchan:')) {
+        return await handleAdminSetChannel(interaction);
+      }
     }
 
     if (interaction.isRoleSelectMenu?.()) {
+      if (interaction.customId === 'admin_setrole') {
+        return await handleAdminSetRole(interaction);
+      }
       if (interaction.customId.startsWith('leaderboard_role_select:')) {
         const monthKey = interaction.customId.slice('leaderboard_role_select:'.length);
         return await handleLeaderboardGrantRole(interaction, monthKey);

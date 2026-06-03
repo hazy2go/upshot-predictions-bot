@@ -108,6 +108,11 @@ export const commands = [
         .setDescription('Post the current Lucky Shots and their status to the channel')),
 
   new SlashCommandBuilder()
+    .setName('admin')
+    .setDescription('Admin control panel — overview of all settings + quick actions (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
     .setName('store')
     .setDescription('Upshot store (packs & bundles) announcements (admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)

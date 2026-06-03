@@ -484,6 +484,128 @@ export function buildStoreList(items) {
   return { components: [container(Colors.Stats, children)], flags: 1 << 15 };
 }
 
+// ── Admin panel (/admin) — overview + quick access to settings & actions ────
+//
+// `cfg` is assembled by the handler: {
+//   channels: { predictions, admin, leaderboard, contests, luckyshots, store } (id|null),
+//   adminRole (id|null), ownerId (id|null), maxDaily, maxOpen, categories: [],
+//   token: { set: bool, expiresInMin: number|null }
+// }
+// SETTINGS lists every configurable item so the panel and the configure select
+// stay in sync. `key` is the select value; `kind` drives the input widget.
+const ADMIN_SETTINGS = [
+  { key: 'predictions_channel', label: 'Predictions channel', kind: 'channel', emoji: '📣' },
+  { key: 'admin_channel',       label: 'Admin channel',       kind: 'channel', emoji: '🛡' },
+  { key: 'leaderboard_channel', label: 'Leaderboard channel', kind: 'channel', emoji: '🏆' },
+  { key: 'contests_channel',    label: 'Contests channel',    kind: 'channel', emoji: '🎯' },
+  { key: 'luckyshots_channel',  label: 'Lucky Shots channel', kind: 'channel', emoji: '🎰' },
+  { key: 'store_channel',       label: 'Store channel',       kind: 'channel', emoji: '🛒' },
+  { key: 'admin_role',          label: 'Admin role',          kind: 'role',    emoji: '👮' },
+  { key: 'max_daily',           label: 'Max predictions / day', kind: 'int',   emoji: '📆' },
+  { key: 'max_open',            label: 'Max open predictions',  kind: 'int',   emoji: '📂' },
+  { key: 'upshot_token',        label: 'Upshot token (/sendpack)', kind: 'token', emoji: '🔑' },
+  { key: 'owner_id',            label: 'Lock /sendpack to me',  kind: 'owner', emoji: '🔒' },
+];
+
+export const ADMIN_SETTINGS_LIST = ADMIN_SETTINGS; // exported for the handler
+
+export function buildAdminPanel(cfg) {
+  const ch = cfg.channels || {};
+  const chan = (id) => id ? `<#${id}>` : '❌ not set';
+  const tokenLine = cfg.token?.set
+    ? (cfg.token.expiresInMin != null
+        ? (cfg.token.expiresInMin > 0 ? `✅ set · expires in ~${cfg.token.expiresInMin} min` : '⚠️ set but EXPIRED')
+        : '✅ set')
+    : '❌ not set';
+
+  const children = [];
+  children.push(text('## 🛠 Admin Panel'));
+  children.push(text('-# Overview of every setting. Use the menu to change one, or the buttons to run an action. (Slash commands still work too.)'));
+  children.push(separator());
+  children.push(text([
+    '**Channels**',
+    `📣 Predictions: ${chan(ch.predictions)}`,
+    `🛡 Admin review: ${chan(ch.admin)}`,
+    `🏆 Leaderboard: ${chan(ch.leaderboard)}`,
+    `🎯 Contests: ${chan(ch.contests)}`,
+    `🎰 Lucky Shots: ${chan(ch.luckyshots)}`,
+    `🛒 Store: ${chan(ch.store)}`,
+  ].join('\n')));
+  children.push(text([
+    '**Settings**',
+    `👮 Admin role: ${cfg.adminRole ? `<@&${cfg.adminRole}>` : 'server admins'}`,
+    `🔒 /sendpack owner: ${cfg.ownerId ? `<@${cfg.ownerId}>` : 'any admin'}`,
+    `📆 Max daily: **${cfg.maxDaily}** · 📂 Max open: **${cfg.maxOpen}**`,
+    `🔑 Upshot token: ${tokenLine}`,
+    `🗂 Categories: ${cfg.categories?.length ? cfg.categories.join(', ') : '—'}`,
+  ].join('\n')));
+  children.push(separator());
+
+  // Configure select
+  children.push({
+    type: CT.ActionRow,
+    components: [{
+      type: CT.StringSelect,
+      custom_id: 'admin_configure',
+      placeholder: '⚙️ Change a setting…',
+      min_values: 1,
+      max_values: 1,
+      options: ADMIN_SETTINGS.map(s => ({ label: s.label, value: s.key, emoji: { name: s.emoji } })),
+    }],
+  });
+
+  // Action buttons
+  children.push(actionRow(
+    button('admin_act:refresh_lb', '🔄 Refresh leaderboard', ButtonStyle.Secondary),
+    button('admin_act:contests', '🎯 Check contests', ButtonStyle.Secondary),
+    button('admin_act:luckyshots', '🎰 Check Lucky Shots', ButtonStyle.Secondary),
+  ));
+  children.push(actionRow(
+    button('admin_act:store', '🛒 Check store', ButtonStyle.Secondary),
+    button('admin_act:resolve', '✅ Check resolutions', ButtonStyle.Secondary),
+    button('admin_refresh', '↻ Refresh panel', ButtonStyle.Primary),
+  ));
+
+  return { components: [container(Colors.Admin, children)], flags: (1 << 15) | (1 << 6) };
+}
+
+// Sub-view: pick a channel for a given setting (ChannelSelect + Back).
+export function buildAdminPickChannel(setting) {
+  return {
+    components: [container(Colors.Admin, [
+      text(`## ${setting.emoji} Set ${setting.label}`),
+      text('-# Pick a text channel below, or go back.'),
+      { type: CT.ActionRow, components: [{
+        type: CT.ChannelSelect,
+        custom_id: `admin_setchan:${setting.key}`,
+        placeholder: 'Select a channel…',
+        channel_types: [0], // GuildText
+        min_values: 1, max_values: 1,
+      }] },
+      actionRow(button('admin_back', '← Back', ButtonStyle.Secondary)),
+    ])],
+    flags: (1 << 15) | (1 << 6),
+  };
+}
+
+// Sub-view: pick the admin role (RoleSelect + Back).
+export function buildAdminPickRole() {
+  return {
+    components: [container(Colors.Admin, [
+      text('## 👮 Set Admin role'),
+      text('-# Pick the role that can review/resolve predictions, or go back.'),
+      { type: CT.ActionRow, components: [{
+        type: CT.RoleSelect,
+        custom_id: 'admin_setrole',
+        placeholder: 'Select a role…',
+        min_values: 1, max_values: 1,
+      }] },
+      actionRow(button('admin_back', '← Back', ButtonStyle.Secondary)),
+    ])],
+    flags: (1 << 15) | (1 << 6),
+  };
+}
+
 export function buildCardPickerEmpty() {
   return {
     components: [

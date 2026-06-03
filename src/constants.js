@@ -4,6 +4,8 @@ export const ComponentType = {
   Button: 2,
   StringSelect: 3,
   TextInput: 4,
+  RoleSelect: 6,
+  ChannelSelect: 8,
   Section: 9,
   TextDisplay: 10,
   Thumbnail: 11,
