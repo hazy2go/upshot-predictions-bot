@@ -1184,6 +1184,24 @@ const cardPickerCache = new Map();
 // Shape: userId -> { cardId, cardName, page }
 const cardViewCache = new Map();
 
+// Schedule a per-user cache eviction, clearing any prior timer first. Without
+// this, re-opening My Cards stacks bare setTimeouts: the earliest one fires ~10
+// min after the FIRST open and deletes the entry the user just refreshed,
+// dropping them into the "cache expired" fallback mid-flow (and leaking timer
+// handles). Keyed by `${cache tag}:${userId}` so the two caches don't collide.
+const cacheEvictTimers = new Map();
+function scheduleCacheEvict(cache, tag, userId, ms = 10 * 60 * 1000) {
+  const key = `${tag}:${userId}`;
+  const prev = cacheEvictTimers.get(key);
+  if (prev) clearTimeout(prev);
+  const handle = setTimeout(() => {
+    cache.delete(userId);
+    cacheEvictTimers.delete(key);
+  }, ms);
+  if (handle.unref) handle.unref();
+  cacheEvictTimers.set(key, handle);
+}
+
 async function handleCardPicker(interaction) {
   const profile = getUpshotProfile(interaction.user.id);
   if (!profile?.wallet_address) {
@@ -1209,7 +1227,7 @@ async function handleCardPicker(interaction) {
   }
 
   cardPickerCache.set(interaction.user.id, { cards: available, page: 0 });
-  setTimeout(() => cardPickerCache.delete(interaction.user.id), 10 * 60 * 1000);
+  scheduleCacheEvict(cardPickerCache, 'picker', interaction.user.id);
 
   return interaction.editReply(buildCardPicker(available, { page: 0 }));
 }
@@ -1271,7 +1289,7 @@ async function handleMyCardSelect(interaction) {
     : null;
 
   cardViewCache.set(interaction.user.id, { cardId, cardName: card.name, page });
-  setTimeout(() => cardViewCache.delete(interaction.user.id), 10 * 60 * 1000);
+  scheduleCacheEvict(cardViewCache, 'view', interaction.user.id);
 
   return interaction.editReply(buildCardDetail(card, { taken }));
 }
@@ -2226,6 +2244,21 @@ async function handlePredictModalSubmit(interaction) {
     if (existing) {
       return interaction.editReply({ content: cardTakenMessage(existing, guildId, interaction.user.id) });
     }
+  }
+
+  // Re-enforce the daily/open caps here, not just at modal-open. showPredictModal
+  // checks them before opening the modal, but a user can open several Predict
+  // modals while under the cap and submit them all — only this check, right
+  // before createPrediction, is authoritative (the modal-open check is just a
+  // fast UX bail-out).
+  const maxDaily = getMaxDaily(guildId);
+  if (countUserDailyPredictions(interaction.user.id) >= maxDaily) {
+    return interaction.editReply({ content: `❌ You've reached the daily limit of **${maxDaily}** predictions. Try again tomorrow.` });
+  }
+  const maxOpen = getMaxOpen(guildId);
+  const openCount = countUserUnresolved(interaction.user.id);
+  if (openCount >= maxOpen) {
+    return interaction.editReply({ content: `❌ You have **${openCount}** open predictions (max **${maxOpen}**). Wait for some to resolve before submitting more.` });
   }
 
   // Fallback deadline if API didn't return one
