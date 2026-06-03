@@ -183,17 +183,22 @@ export function extractCardId(input) {
 const cardDetailsCache = new Map(); // cardId -> { at, value }
 const CARD_DETAILS_TTL = 30 * 60 * 1000;
 
-export async function getCardDetails(cardId, { retries = 3, fresh = false, timeout = 15_000 } = {}) {
-  const cached = cardDetailsCache.get(cardId);
-  if (!fresh && cached && Date.now() - cached.at < CARD_DETAILS_TTL) {
-    return cached.value;
-  }
+// Fetch + normalize a card, reporting WHY it failed so callers can tell a card
+// that genuinely no longer exists from one we just couldn't reach. Returns:
+//   { ok: true, value }            — found & parsed (also written to the cache)
+//   { ok: false, notFound: true }  — API said 404 / returned no data: card gone
+//   { ok: false, notFound: false } — transient: timeout, 5xx, network, bad JSON
+// This distinction matters for auto-resolve: a transient miss must be retried on
+// the next sweep, not logged as "card not found" (which scared us into thinking
+// the API had dropped live cards when it was really just a timeout/shield block).
+async function fetchCardDetails(cardId, { retries, timeout }) {
   try {
     const res = await fetchRetry(`${BASE}/cards/${cardId}?include=event,supply`, { timeout, retries });
-    if (!res.ok) return null;
+    if (res.status === 404) return { ok: false, notFound: true };
+    if (!res.ok) return { ok: false, notFound: false };
     const json = await res.json();
     const card = json.data;
-    if (!card) return null;
+    if (!card) return { ok: false, notFound: true };
 
     const value = {
       id: card.id,
@@ -213,11 +218,20 @@ export async function getCardDetails(cardId, { retries = 3, fresh = false, timeo
       resolvedAt: card.event?.resolvedAt || null,
     };
     cardDetailsCache.set(cardId, { at: Date.now(), value });
-    return value;
+    return { ok: true, value };
   } catch (err) {
     console.error(`Upshot API: getCardDetails(${cardId}) failed:`, err.message);
-    return null;
+    return { ok: false, notFound: false };
   }
+}
+
+export async function getCardDetails(cardId, { retries = 3, fresh = false, timeout = 15_000 } = {}) {
+  const cached = cardDetailsCache.get(cardId);
+  if (!fresh && cached && Date.now() - cached.at < CARD_DETAILS_TTL) {
+    return cached.value;
+  }
+  const result = await fetchCardDetails(cardId, { retries, timeout });
+  return result.ok ? result.value : null;
 }
 
 /**
@@ -504,25 +518,26 @@ export async function getPredictableCards(walletAddress) {
  *   - resolved=true, won=false: card lost (fail)
  */
 export async function checkCardResolution(cardId) {
-  try {
-    // Resolution detection must use live event status, not a cached snapshot.
-    // Fail fast (1 retry, 10s): the auto-resolve sweep runs sequentially over
-    // every open prediction, so the default 3 retries × 15s would let a single
-    // hung/tarpitted card stall the whole batch for ~60s. A card that can't be
-    // reached now is simply rechecked on the next 12h sweep.
-    const card = await getCardDetails(cardId, { fresh: true, retries: 1, timeout: 10_000 });
-    if (!card) return { resolved: false, won: null, error: 'card_not_found' };
-
-    if (card.eventStatus !== 'RESOLVED') {
-      return { resolved: false, won: null };
-    }
-
-    const won = card.outcomeId === card.winningOutcomeId;
-    return { resolved: true, won };
-  } catch (err) {
-    console.error(`Upshot API: checkCardResolution(${cardId}) failed:`, err.message);
-    return { resolved: false, won: null, error: err.message };
+  // Resolution detection must use live event status, not a cached snapshot, and
+  // fail fast (1 retry, 10s): the auto-resolve sweep runs sequentially over
+  // every open prediction, so the default 3 retries × 15s would let a single
+  // hung/tarpitted card stall the whole batch for ~60s.
+  //
+  // Distinguish a genuine 404 (card gone — error 'card_not_found') from a
+  // transient miss (timeout/5xx/network — error 'fetch_failed'). Both leave the
+  // prediction unresolved for the next sweep, but only a real 404 is worth
+  // flagging; conflating the two made transient timeouts look like Upshot had
+  // dropped live cards.
+  const r = await fetchCardDetails(cardId, { retries: 1, timeout: 10_000 });
+  if (!r.ok) {
+    return { resolved: false, won: null, error: r.notFound ? 'card_not_found' : 'fetch_failed' };
   }
+  const card = r.value;
+  if (card.eventStatus !== 'RESOLVED') {
+    return { resolved: false, won: null };
+  }
+  const won = card.outcomeId === card.winningOutcomeId;
+  return { resolved: true, won };
 }
 
 /**
