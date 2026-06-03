@@ -3,7 +3,7 @@ import { SlashCommandBuilder, PermissionFlagsBits, ChannelType } from 'discord.j
 export const commands = [
   new SlashCommandBuilder()
     .setName('predict')
-    .setDescription('Submit a prediction — prove your alpha with your Upshot cards'),
+    .setDescription('Browse your Upshot cards and make a prediction'),
 
   new SlashCommandBuilder()
     .setName('panel')

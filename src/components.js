@@ -67,9 +67,6 @@ export function buildPredictionPanel(title, description, imageUrl) {
   children.push(text('-# Everything you need is one tap away — no commands to memorize.'));
   children.push(actionRow(
     button('hub_mycards', '📇 My Cards', ButtonStyle.Success),
-    button('panel_predict', '🔮 Make a Prediction', ButtonStyle.Primary),
-  ));
-  children.push(actionRow(
     button('hub_mystats', '📊 My Stats', ButtonStyle.Secondary),
     button('panel_help:0', '❓ How It Works', ButtonStyle.Secondary),
   ));
@@ -82,18 +79,28 @@ export function buildPredictionPanel(title, description, imageUrl) {
 
 // ── Card picker (ephemeral — pick a card to predict, no URL needed) ──
 
+// Discord StringSelect menus cap at 25 options, so we page through the full
+// list 25 at a time with prev/next buttons — every card stays reachable.
+export const CARDS_PER_PAGE = 25;
+
 /**
- * StringSelect listing the cards a member can predict on right now.
+ * StringSelect listing the cards a member can predict on right now, paginated.
  * cards: [{ id, name, inContest }] — already filtered (no taken cards).
+ * Pick a card to open its detail view; predictions are made from there.
  */
-export function buildCardPicker(cards, { truncated = false } = {}) {
+export function buildCardPicker(cards, { page = 0 } = {}) {
+  const totalPages = Math.max(1, Math.ceil(cards.length / CARDS_PER_PAGE));
+  const idx = Math.max(0, Math.min(page, totalPages - 1));
+  const start = idx * CARDS_PER_PAGE;
+  const pageCards = cards.slice(start, start + CARDS_PER_PAGE);
+
   const children = [];
 
   children.push(text('## 📇 Your Predictable Cards'));
-  children.push(text('-# Pick a card to predict on — no URL needed. Cards already in an open prediction are hidden.'));
+  children.push(text(`-# Pick a card to see its details, then predict. Cards already in an open prediction are hidden. (**${cards.length}** card${cards.length === 1 ? '' : 's'})`));
   children.push(separator());
 
-  const options = cards.slice(0, 25).map(c => ({
+  const options = pageCards.map(c => ({
     label: c.name.length > 100 ? c.name.slice(0, 97) + '...' : c.name,
     value: c.id,
     description: c.inContest ? '🏅 From a contest you entered' : 'In your wallet',
@@ -104,21 +111,82 @@ export function buildCardPicker(cards, { truncated = false } = {}) {
     components: [{
       type: CT.StringSelect,
       custom_id: 'predict_card_select',
-      placeholder: 'Select a card to predict on…',
+      placeholder: totalPages > 1
+        ? `Select a card… (page ${idx + 1} of ${totalPages})`
+        : 'Select a card to see its details…',
       min_values: 1,
       max_values: 1,
       options,
     }],
   });
 
-  if (truncated) {
-    children.push(text('-# Showing the first 25 cards. Use “Paste a card URL instead” for any others.'));
+  if (totalPages > 1) {
+    children.push(separator());
+    children.push(text(`-# Page ${idx + 1} of ${totalPages} · showing cards ${start + 1}–${start + pageCards.length}`));
+    children.push(actionRow(
+      button('mycards_page:0', '« First', ButtonStyle.Secondary, { disabled: idx === 0 }),
+      button(`mycards_page:${idx - 1}`, '← Prev', ButtonStyle.Secondary, { disabled: idx === 0 }),
+      button(`mycards_page:${idx + 1}`, 'Next →', ButtonStyle.Secondary, { disabled: idx >= totalPages - 1 }),
+      button(`mycards_page:${totalPages - 1}`, 'Last »', ButtonStyle.Secondary, { disabled: idx >= totalPages - 1 }),
+    ));
   }
 
+  return {
+    components: [container(Colors.Leaderboard, children)],
+    flags: (1 << 15) | (1 << 6),
+  };
+}
+
+/**
+ * Card detail view shown after a member picks a card from the picker.
+ * Surfaces the marketplace URL and card ID (both copyable/shareable) and offers
+ * Back / Predict actions. `taken` is a message string when the card already has
+ * an open prediction — in that case the Predict button is withheld.
+ * card: { id, name, arweaveUrl?, rarity?, deadline?, inContest? }
+ */
+export function buildCardDetail(card, { taken = null } = {}) {
+  const marketplaceUrl = `https://upshot.cards/card-detail/${card.id}`;
+  const children = [];
+
+  children.push(text(`## ${card.name || 'Upshot Card'}`));
+
+  const image = card.arweaveUrl || card.image;
+  if (image) {
+    children.push({
+      type: CT.MediaGallery,
+      items: [{ media: { url: image } }],
+    });
+  }
+
+  const meta = [];
+  if (card.rarity) meta.push(`**Rarity:** ${card.rarity}`);
+  if (card.deadline) meta.push(`**Event deadline:** ${card.deadline}`);
+  meta.push(card.inContest ? '🏅 From a contest you entered' : '👛 In your wallet');
+  children.push(text(meta.join(' · ')));
+
   children.push(separator());
-  children.push(actionRow(
-    button('panel_predict', '✏️ Paste a card URL instead', ButtonStyle.Secondary),
-  ));
+
+  // Marketplace URL + card ID — both rendered as plain/code text so they're
+  // easy to copy out of the embed and share.
+  children.push(text(`🛒 **Marketplace URL**\n${marketplaceUrl}`));
+  children.push(text(`🆔 **Card ID**\n\`${card.id}\``));
+  children.push(text('-# Copy the link or ID above to share this card with anyone.'));
+
+  children.push(separator());
+
+  if (taken) {
+    children.push(text(taken));
+    children.push(actionRow(
+      button('carddetail_back', '← Back to My Cards', ButtonStyle.Secondary),
+      linkButton(marketplaceUrl, '🛒 View on Upshot'),
+    ));
+  } else {
+    children.push(actionRow(
+      button('carddetail_back', '← Back to My Cards', ButtonStyle.Secondary),
+      button(`carddetail_predict:${card.id}`, '🔮 Predict on this card', ButtonStyle.Success),
+      linkButton(marketplaceUrl, '🛒 View on Upshot'),
+    ));
+  }
 
   return {
     components: [container(Colors.Leaderboard, children)],
@@ -132,11 +200,10 @@ export function buildCardPickerEmpty() {
       container(Colors.Stats, [
         text('## 📇 No Predictable Cards Found'),
         text('We couldn\'t find any Upshot cards in your wallet or active contest lineups.'),
-        text('-# Your wallet may be empty, or the Upshot API may be temporarily down. Get cards at [upshot.cards](https://upshot.cards), then tap Try Again — or submit by pasting a card URL.'),
+        text('-# Your wallet may be empty, or the Upshot API may be temporarily down. Get cards at [upshot.cards](https://upshot.cards), then tap Try Again.'),
         separator(),
         actionRow(
           button('mycards_retry', '🔄 Try Again', ButtonStyle.Success),
-          button('panel_predict', '✏️ Paste a card URL instead', ButtonStyle.Secondary),
         ),
       ]),
     ],
@@ -152,29 +219,29 @@ const helpPages = [
     '## Getting Started',
     '',
     '**The panel has everything — no commands needed:**',
-    '📇 **My Cards** · 🔮 **Make a Prediction** · 📊 **My Stats** · ❓ **How It Works**',
+    '📇 **My Cards** · 📊 **My Stats** · ❓ **How It Works**',
     '',
     '-# 🏆 The Top 10 each month earn rewards — predictions are **70%** of your score. See the last page for details.',
     '',
     '**1. Link your Upshot profile**',
-    'The first time you tap **My Cards** or **Make a Prediction**, you\'ll be asked to paste your Upshot profile URL.',
+    'The first time you tap **My Cards**, you\'ll be asked to paste your Upshot profile URL.',
     '',
     '**How to get your profile URL:**',
     'Go to [upshot.cards](https://upshot.cards), click **View Profile** (top-right), then copy the URL or click **Share Profile**.',
     '',
     '**2. Pick a card and predict**',
-    'Tap **📇 My Cards** to see every card you can predict on — including cards in your contest lineups. Pick one, write your thesis, done. No URLs to copy.',
+    'Tap **📇 My Cards** to browse every card you can predict on — including cards in your contest lineups. Open one to see its details and marketplace link, then hit **Predict** and write your thesis. No URLs to copy.',
   ].join('\n'),
 
   // Page 2 — Picking your card
   [
     '## Picking Your Card',
     '',
-    '**The easy way — 📇 My Cards**',
-    'Tap **My Cards** to get a dropdown of every card you own or have entered in a contest. Cards someone has already predicted on are hidden, so you never pick a dead end. Choose one and the form fills the rest in for you.',
+    '**📇 My Cards — the only way to predict**',
+    'Tap **My Cards** to browse every card you own or have entered in a contest. The list pages through all of them 25 at a time, and cards someone already predicted on are hidden, so you never pick a dead end.',
     '',
-    '**The manual way — 🔮 Make a Prediction**',
-    'Prefer to paste a link? On [upshot.cards](https://upshot.cards), open any card you own and copy the URL (or click **Share**), then paste it into the form.',
+    '**Card details**',
+    'Open a card to see its image, rarity, event deadline, and its **marketplace URL + card ID** — both easy to copy and share. From there, hit **🔮 Predict** to make your call, or **← Back** to browse more.',
     '',
     '**What happens after you submit:**',
     '- The bot fetches the card image, name, and deadline automatically',
@@ -626,7 +693,7 @@ export function buildLeaderboard(entries, monthLabel, options = {}) {
     color: Colors.Leaderboard,
     title: `🏆 ${monthLabel} Leaderboard`,
     description,
-    footer: { text: 'Updated in real-time · Tap 🔮 Make a Prediction to play · 📊 My Stats for your standings' },
+    footer: { text: 'Updated in real-time · Tap 📇 My Cards to play · 📊 My Stats for your standings' },
     timestamp: new Date().toISOString(),
   };
 

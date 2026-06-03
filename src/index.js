@@ -37,7 +37,7 @@ import {
   buildLeaderboard, buildStatsCard, buildDeleteConfirm,
   buildPredictionPanel, buildHelpPage,
   buildContestOverview, buildContestLineupPage,
-  buildCardPicker, buildCardPickerEmpty,
+  buildCardPicker, buildCardPickerEmpty, buildCardDetail,
 } from './components.js';
 
 import { commands } from './commands.js';
@@ -769,7 +769,7 @@ async function handleUpshotRank(interaction) {
   const profile = getUpshotProfile(interaction.user.id);
   if (!profile?.wallet_address) {
     return interaction.reply({
-      content: '❌ Link your Upshot profile first with `/link-upshot` or click "Make a Prediction".',
+      content: '❌ Link your Upshot profile first with `/link-upshot` or tap **📇 My Cards**.',
       flags: ['Ephemeral'],
     });
   }
@@ -942,7 +942,7 @@ async function handleMyContests(interaction) {
   const profile = getUpshotProfile(interaction.user.id);
   if (!profile?.wallet_address) {
     return interaction.reply({
-      content: '❌ Link your Upshot profile first with `/link-upshot` or click "Make a Prediction".',
+      content: '❌ Link your Upshot profile first with `/link-upshot` or tap **📇 My Cards**.',
       flags: ['Ephemeral'],
     });
   }
@@ -1175,6 +1175,15 @@ async function handleCancelSendPack(interaction) {
 
 // ── Card picker (pick a card to predict — no URL needed) ─────
 
+// Per-user cache of the full predictable-card list so the pagination buttons can
+// page through every card without re-hitting the Upshot API on each click.
+// Shape: userId -> { cards: [{id,name,inContest}], page: number }
+const cardPickerCache = new Map();
+// Per-user cache of the card currently being viewed in detail, so the Back /
+// Predict buttons know which card (and which picker page to return to).
+// Shape: userId -> { cardId, cardName, page }
+const cardViewCache = new Map();
+
 async function handleCardPicker(interaction) {
   const profile = getUpshotProfile(interaction.user.id);
   if (!profile?.wallet_address) {
@@ -1206,12 +1215,111 @@ async function handleCardPicker(interaction) {
   const available = cards.filter(c => !hasUnresolvedPredictionForCard(c.id));
 
   if (available.length === 0) {
+    cardPickerCache.delete(interaction.user.id);
     return interaction.editReply(buildCardPickerEmpty());
   }
 
-  return interaction.editReply(buildCardPicker(available, { truncated: available.length > 25 }));
+  cardPickerCache.set(interaction.user.id, { cards: available, page: 0 });
+  setTimeout(() => cardPickerCache.delete(interaction.user.id), 10 * 60 * 1000);
+
+  return interaction.editReply(buildCardPicker(available, { page: 0 }));
 }
 
+// Pagination: jump the My Cards picker to a specific page (no API refetch).
+async function handleCardPage(interaction, page) {
+  const cached = cardPickerCache.get(interaction.user.id);
+  if (!cached?.cards?.length) {
+    // Cache expired — rebuild the list from scratch.
+    return handleCardPicker(interaction);
+  }
+  cached.page = page;
+  return interaction.update(buildCardPicker(cached.cards, { page }));
+}
+
+// My Cards select → show the card detail view (image, marketplace URL, card ID)
+// with Back / Predict actions. Predictions are made from this detail view.
+async function handleMyCardSelect(interaction) {
+  const cardId = interaction.values?.[0];
+  if (!cardId) {
+    return interaction.reply({ content: '❌ No card selected.', flags: ['Ephemeral'] });
+  }
+
+  // Fetching card details can exceed the 3s window — ack first, then edit.
+  await interaction.deferUpdate();
+
+  const cached = cardPickerCache.get(interaction.user.id);
+  const page = cached?.page ?? 0;
+  const pickerLabel = interaction.component?.options?.find(o => o.value === cardId)?.label || null;
+  const pickerCard = cached?.cards?.find(c => c.id === cardId) || null;
+
+  // Best-effort enrichment — the detail view still renders if the API is down.
+  let details = null;
+  try {
+    details = await getCardDetails(cardId);
+  } catch (err) {
+    console.error(`Card detail: getCardDetails failed for ${cardId}:`, err.message);
+  }
+
+  let deadline = null;
+  if (details?.eventDate) {
+    const d = new Date(details.eventDate);
+    deadline = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  }
+
+  const card = {
+    id: cardId,
+    name: details?.name || pickerLabel || cardId,
+    arweaveUrl: details?.arweaveUrl || null,
+    rarity: details?.rarity || null,
+    deadline,
+    inContest: pickerCard?.inContest || false,
+  };
+
+  // The card may have been claimed by someone else while the picker was open.
+  const existing = hasUnresolvedPredictionForCard(cardId);
+  const taken = existing
+    ? cardTakenMessage(existing, interaction.guildId, interaction.user.id)
+    : null;
+
+  cardViewCache.set(interaction.user.id, { cardId, cardName: card.name, page });
+  setTimeout(() => cardViewCache.delete(interaction.user.id), 10 * 60 * 1000);
+
+  return interaction.editReply(buildCardDetail(card, { taken }));
+}
+
+// Detail view → Back: return to the picker at the page they came from.
+async function handleCardDetailBack(interaction) {
+  const cached = cardPickerCache.get(interaction.user.id);
+  if (!cached?.cards?.length) {
+    // Cache expired — rebuild the list from scratch.
+    return handleCardPicker(interaction);
+  }
+  const view = cardViewCache.get(interaction.user.id);
+  const page = view?.page ?? cached.page ?? 0;
+  cached.page = page;
+  return interaction.update(buildCardPicker(cached.cards, { page }));
+}
+
+// Detail view → Predict: open the prediction modal for the viewed card.
+async function handleCardDetailPredict(interaction) {
+  const cardId = interaction.customId.split(':')[1];
+  if (!cardId) {
+    return interaction.reply({ content: '❌ No card selected.', flags: ['Ephemeral'] });
+  }
+  // Re-check — someone may have grabbed this card while the detail was open.
+  const existing = hasUnresolvedPredictionForCard(cardId);
+  if (existing) {
+    return interaction.reply({
+      content: cardTakenMessage(existing, interaction.guildId, interaction.user.id),
+      flags: ['Ephemeral'],
+    });
+  }
+  const view = cardViewCache.get(interaction.user.id);
+  const presetCardName = view?.cardId === cardId ? view.cardName : null;
+  return showPredictModal(interaction, { presetCardId: cardId, presetCardName });
+}
+
+// Contest-lineup select → straight to the prediction modal (no detail view).
 async function handleCardSelect(interaction) {
   const cardId = interaction.values?.[0];
   if (!cardId) {
@@ -2004,7 +2112,7 @@ async function handlePredictModalSubmit(interaction) {
   const pending = pendingSubmissions.get(interaction.user.id);
   if (!pending) {
     return interaction.reply({
-      content: '❌ Submission expired. Please run `/predict` again or click the Predict button.',
+      content: '❌ Submission expired. Tap **📇 My Cards**, pick your card again, and hit Predict.',
       flags: ['Ephemeral'],
     });
   }
@@ -2268,14 +2376,29 @@ async function handleStarsModalSubmit(interaction) {
 // ── Button handlers ─────────────────────────────────────────
 
 async function handleButton(interaction) {
-  // Panel predict button
+  // Legacy panel "Make a Prediction" button — predictions now flow only through
+  // My Cards, so funnel any old panels still showing it into the card picker.
   if (interaction.customId === 'panel_predict') {
-    return showPredictModal(interaction);
+    return handleCardPicker(interaction);
   }
 
   // Hub buttons (self-serve panel) — reuse existing handlers
   if (interaction.customId === 'hub_mycards' || interaction.customId === 'mycards_retry') {
     return handleCardPicker(interaction);
+  }
+
+  // My Cards pagination
+  if (interaction.customId.startsWith('mycards_page:')) {
+    const page = parseInt(interaction.customId.split(':')[1], 10);
+    return handleCardPage(interaction, Number.isNaN(page) ? 0 : page);
+  }
+
+  // Card detail view actions
+  if (interaction.customId === 'carddetail_back') {
+    return handleCardDetailBack(interaction);
+  }
+  if (interaction.customId.startsWith('carddetail_predict:')) {
+    return handleCardDetailPredict(interaction);
   }
   if (interaction.customId === 'hub_mystats') {
     return handleMyStats(interaction);
@@ -2950,7 +3073,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.isChatInputCommand()) {
       switch (interaction.commandName) {
-        case 'predict': return await showPredictModal(interaction);
+        case 'predict': return await handleCardPicker(interaction);
         case 'panel': return await handlePanel(interaction);
         case 'edit-panel': return await handleEditPanel(interaction);
         case 'link-upshot': return await handleLinkUpshot(interaction);
@@ -2987,10 +3110,13 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.isStringSelectMenu?.()) {
-      // Both the card picker and the contest-lineup picker carry a card id in
-      // interaction.values[0] and the name in the option label — handleCardSelect
-      // is generic over both.
-      if (interaction.customId === 'predict_card_select' || interaction.customId === 'contest_predict_select') {
+      // My Cards select opens the card detail view first; the contest-lineup
+      // select goes straight to the prediction modal. Both carry a card id in
+      // interaction.values[0] and the name in the option label.
+      if (interaction.customId === 'predict_card_select') {
+        return await handleMyCardSelect(interaction);
+      }
+      if (interaction.customId === 'contest_predict_select') {
         return await handleCardSelect(interaction);
       }
     }
