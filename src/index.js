@@ -30,6 +30,7 @@ import {
   getPendingVerificationPredictions, getUnratedVerifiedPredictions,
   getContestWatchState, setContestWatchState,
   getRaffleWatchState, setRaffleWatchState,
+  getStoreWatchState, setStoreWatchState,
 } from './database.js';
 
 import { rateWithAI } from './nim.js';
@@ -42,6 +43,7 @@ import {
   buildCardPicker, buildCardPickerEmpty, buildCardDetail,
   buildContestLive, buildContestResults, buildContestList,
   buildRaffleLive, buildRaffleWinner, buildRaffleList,
+  buildStoreListed, buildStoreList,
 } from './components.js';
 
 import { commands } from './commands.js';
@@ -57,6 +59,7 @@ import {
   getSeasonRank, getUserContestLineups, getPredictableCards,
   getUserProfile, getUserPacks, transferPack, refreshUpshotAccessToken,
   getContests, getContestTop, getRaffles, getRaffleDetail, getRaffleTop,
+  getStorePacks, getStoreBundles,
 } from './api.js';
 
 // ── Client ──────────────────────────────────────────────────
@@ -271,6 +274,10 @@ function getContestsChannelId(guildId) {
 
 function getLuckyShotsChannelId(guildId) {
   return cfg(guildId, 'luckyshots_channel', 'LUCKYSHOTS_CHANNEL_ID');
+}
+
+function getStoreChannelId(guildId) {
+  return cfg(guildId, 'store_channel', 'STORE_CHANNEL_ID');
 }
 
 function getAdminRoleId(guildId) {
@@ -1664,6 +1671,11 @@ async function handleSetup(interaction) {
       const channel = interaction.options.getChannel('channel', true);
       setConfig(guildId, 'luckyshots_channel', channel.id);
       return interaction.reply({ content: `✅ Lucky Shots channel set to <#${channel.id}>. New live raffles and winners will be announced there (first sync seeds silently).`, flags: ['Ephemeral'] });
+    }
+    case 'store-channel': {
+      const channel = interaction.options.getChannel('channel', true);
+      setConfig(guildId, 'store_channel', channel.id);
+      return interaction.reply({ content: `✅ Store channel set to <#${channel.id}>. New packs and bundles will be announced there (first sync seeds silently).`, flags: ['Ephemeral'] });
     }
     case 'admin-role': {
       const role = interaction.options.getRole('role', true);
@@ -3259,6 +3271,107 @@ async function handleLuckyShotsCommand(interaction) {
   return interaction.editReply({ content: `✅ Checked **${r.total}** raffle(s) — announced **${r.live}** live, **${r.winners}** winner(s).${note}` });
 }
 
+// ── Store watcher (packs + bundles) ──────────────────────────
+//
+// Polls Upshot's /packs and /bundles hourly and announces, in the configured
+// store channel, when a NEW pack or bundle is LISTED (becomes ACTIVE or
+// COMING_SOON) — with price, supply, and remaining stock. Per-guild state in
+// bot_state; first run seeds silently. Items are keyed by id with a kind prefix
+// so a pack and bundle can never collide.
+
+const STORE_WATCH_INTERVAL = 60 * 60 * 1000; // 60 min
+const STORE_SEED_V = 1;
+let storeWatchTimer = null;
+
+const STORE_VISIBLE = (status) => status === 'ACTIVE' || status === 'COMING_SOON';
+
+async function getStoreItems() {
+  const [packs, bundles] = await Promise.all([getStorePacks(), getStoreBundles()]);
+  return [...packs, ...bundles];
+}
+
+async function runStoreWatch(guildId, { announce = true } = {}) {
+  const items = await getStoreItems();
+  if (!items.length) return { ok: false, total: 0, listed: 0, seeded: false };
+
+  const prev = getStoreWatchState(guildId);
+  const seeding = !prev || prev._v !== STORE_SEED_V;
+  const key = (i) => `${i.kind}:${i.id}`;
+
+  if (seeding) {
+    const state = { _v: STORE_SEED_V };
+    for (const i of items) state[key(i)] = { status: i.status, announcedListed: true };
+    setStoreWatchState(guildId, state);
+    console.log(`Store watch: seeded ${items.length} item(s) silently for ${guildId} (v${STORE_SEED_V})`);
+    return { ok: true, total: items.length, listed: 0, seeded: true };
+  }
+
+  const state = prev;
+  const channelId = getStoreChannelId(guildId);
+  const channel = announce && channelId ? await safeGetChannel(channelId) : null;
+  const liveKeys = new Set(items.map(key));
+
+  let listed = 0;
+  for (const item of items) {
+    const k = key(item);
+    if (!state[k]) state[k] = { status: item.status, announcedListed: false }; // new since last seed
+    const seen = state[k];
+
+    if (STORE_VISIBLE(item.status) && !seen.announcedListed) {
+      if (channel) {
+        await channel.send(buildStoreListed(item)).then(() => { listed++; })
+          .catch(e => console.error(`Store watch: listing announce failed for ${k}:`, e.message));
+      }
+      seen.announcedListed = true;
+    }
+    seen.status = item.status;
+  }
+
+  for (const k of Object.keys(state)) if (k !== '_v' && !liveKeys.has(k)) delete state[k];
+
+  setStoreWatchState(guildId, state);
+  if (listed) console.log(`Store watch: announced ${listed} new listing(s)`);
+  return { ok: true, total: items.length, listed, seeded: false };
+}
+
+async function safeRunStoreWatch() {
+  const guildId = process.env.GUILD_ID;
+  if (guildId) {
+    try {
+      await runStoreWatch(guildId);
+    } catch (err) {
+      console.error('Store watch: fatal error:', err.message);
+    }
+  }
+  storeWatchTimer = setTimeout(safeRunStoreWatch, STORE_WATCH_INTERVAL);
+}
+
+// Admin /store command: `check` runs a watch pass now, `list` posts the
+// available + upcoming packs/bundles (with remaining stock) publicly.
+async function handleStoreCommand(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admins only.', flags: ['Ephemeral'] });
+  }
+  const sub = interaction.options.getSubcommand();
+  await interaction.deferReply(sub === 'list' ? {} : { flags: ['Ephemeral'] });
+
+  if (sub === 'list') {
+    return interaction.editReply(buildStoreList(await getStoreItems()));
+  }
+
+  // sub === 'check'
+  const r = await runStoreWatch(interaction.guildId, { announce: true });
+  if (!r.ok) {
+    return interaction.editReply({ content: '⚠️ Couldn\'t reach the Upshot store API just now — try again in a moment.' });
+  }
+  if (r.seeded) {
+    return interaction.editReply({ content: `✅ First sync done — seeded **${r.total}** store item(s) silently. From now on new packs/bundles will post to the channel.` });
+  }
+  const channelSet = !!getStoreChannelId(interaction.guildId);
+  const note = channelSet ? '' : '\n-# ⚠️ No store channel set — run `/setup store-channel`.';
+  return interaction.editReply({ content: `✅ Checked **${r.total}** store item(s) — announced **${r.listed}** new listing(s).${note}` });
+}
+
 // ── Tier roles (cumulative top-10 leaderboard tiers) ─────────
 //
 // Each month a user finishes top 10 they earn one tier. Tiers are cumulative
@@ -3406,6 +3519,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'mycontests': return await handleMyContests(interaction);
         case 'contests': return await handleContestsCommand(interaction);
         case 'luckyshots': return await handleLuckyShotsCommand(interaction);
+        case 'store': return await handleStoreCommand(interaction);
         case 'refresh': return await handleRefreshCommand(interaction);
         case 'resolve': return await handleResolveCommand(interaction);
         case 'leaderboard': return await handleLeaderboardCommand(interaction);
@@ -3520,6 +3634,10 @@ client.once(Events.ClientReady, async () => {
   // Start the Lucky Shots (raffle) watcher (first run after 2 min, then 30 min).
   raffleWatchTimer = setTimeout(safeRunRaffleWatch, 120_000);
   console.log(`   Lucky Shots watch: first check in 2 min, then every 30min`);
+
+  // Start the store watcher (first run after 2.5 min, then every 60 min).
+  storeWatchTimer = setTimeout(safeRunStoreWatch, 150_000);
+  console.log(`   Store watch: first check in 2.5 min, then every 60min`);
 
   // Keep the Upshot token fresh hands-off: the access token lives ~15h and the
   // refresh token is a rotating 7-day sliding window, so a check every 6h keeps

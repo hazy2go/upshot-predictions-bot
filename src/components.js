@@ -391,6 +391,76 @@ export function buildRaffleList(raffles, topByRaffle = new Map()) {
   return { components: [container(Colors.Stats, children)], flags: 1 << 15 };
 }
 
+// ── Store (packs + bundles) announcements ───────────────────
+//
+// `item` is the normalized shape from api.getStorePacks()/getStoreBundles():
+// { id, kind: 'pack'|'bundle', name, description, image, status, price,
+//   currency, cardQuantity, totalPacks, remaining }
+
+const PACK_URL = () => 'https://upshot.cards/store';
+
+function storePrice(item) {
+  if (item.price == null) return null;
+  const amount = item.price.toLocaleString('en-US', { maximumFractionDigits: 2 });
+  return `${amount} ${item.currency || 'CASH'}`;
+}
+
+export function buildStoreListed(item) {
+  const isBundle = item.kind === 'bundle';
+  const children = [];
+  children.push(text(isBundle ? '## 🎁 New Bundle Listed' : '## 📦 New Pack Listed'));
+  children.push(text(`### ${(item.name || 'Upshot item').replace(/[\r\n]+/g, ' ')}`));
+
+  const img = eventImage(item.image);
+  if (img) children.push({ type: CT.MediaGallery, items: [{ media: { url: img } }] });
+
+  if (item.description) children.push(text(item.description.slice(0, 500)));
+
+  const meta = [];
+  const price = storePrice(item);
+  if (price) meta.push(`💵 **Price:** ${price}`);
+  if (isBundle && item.totalPacks != null) meta.push(`📦 **Packs:** ${item.totalPacks}`);
+  if (!isBundle && item.cardQuantity != null) meta.push(`🃏 **Cards per pack:** ${item.cardQuantity}`);
+  if (item.remaining != null) meta.push(`📊 **Remaining:** ${item.remaining.toLocaleString('en-US')}`);
+  if (item.status === 'COMING_SOON') meta.push('🔜 **Coming soon**');
+  if (meta.length) { children.push(separator()); children.push(text(meta.join('\n'))); }
+
+  children.push(actionRow(linkButton(PACK_URL(), '🛒 Open the Store')));
+
+  return { components: [container(Colors.Verified, children)], flags: 1 << 15 };
+}
+
+// Public list of available (ACTIVE) + upcoming (COMING_SOON) packs & bundles with
+// remaining stock, for `/store list`. `items` is packs+bundles combined.
+export function buildStoreList(items) {
+  const order = { ACTIVE: 0, COMING_SOON: 1 };
+  const shown = items.filter(i => i.status === 'ACTIVE' || i.status === 'COMING_SOON')
+    .sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
+
+  const children = [];
+  children.push(text(`## 🛒 Upshot Store (${shown.length} available)`));
+  if (!shown.length) {
+    children.push(text('-# Nothing available right now.'));
+    return { components: [container(Colors.Stats, children)], flags: 1 << 15 };
+  }
+
+  const fmt = (i) => {
+    const tag = i.kind === 'bundle' ? '🎁' : '📦';
+    const soon = i.status === 'COMING_SOON' ? ' 🔜' : '';
+    const price = storePrice(i);
+    const rem = i.remaining != null
+      ? (i.remaining > 0 ? `${i.remaining.toLocaleString('en-US')} left` : 'sold out')
+      : '';
+    const bits = [price, rem].filter(Boolean).join(' · ');
+    return `${tag} **${(i.name || i.id).slice(0, 70)}**${soon}${bits ? ` — ${bits}` : ''}`;
+  };
+  children.push(text(shown.slice(0, 40).map(fmt).join('\n').slice(0, 3800)));
+  if (shown.length > 40) children.push(text(`-# …and ${shown.length - 40} more`));
+  children.push(actionRow(linkButton(PACK_URL(), '🛒 Open the Store')));
+
+  return { components: [container(Colors.Stats, children)], flags: 1 << 15 };
+}
+
 export function buildCardPickerEmpty() {
   return {
     components: [
