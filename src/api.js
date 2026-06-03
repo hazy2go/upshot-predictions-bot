@@ -589,6 +589,75 @@ export async function getEvents() {
   }
 }
 
+// Base for Lucky Shots / raffle requests. Defaults to the normal API, but can be
+// pointed at a local relay (e.g. the Upshot sniper CDP browser proxy) via
+// UPSHOT_RAFFLE_BASE when direct server-side requests are blocked by the shield.
+// The relay must mirror the same paths and return the same JSON.
+const RAFFLE_BASE = process.env.UPSHOT_RAFFLE_BASE || BASE;
+
+/**
+ * List Upshot raffles ("Lucky Shots"). Pass a status to filter — unlike /events,
+ * the ?status filter is honored here: READY (upcoming), LIVE, ENDED, DRAWN.
+ * Read-only, best-effort: returns [] on any failure. Normalized shape:
+ *   { id, name, description, image, startDate, endDate, status, rewardType,
+ *     rewardAmount, winnerId, totalTickets, rewards: [{ refId, quantity }] }
+ */
+export async function getRaffles(status) {
+  try {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : '';
+    const res = await fetchRetry(`${RAFFLE_BASE}/raffles${qs}`, { timeout: 12_000 });
+    if (!res.ok) return [];
+    const json = await res.json();
+    const all = json.data ?? json;
+    if (!Array.isArray(all)) return [];
+    return all.map(r => ({
+      id: r.id,
+      name: r.shortName || r.name || r.id,
+      description: r.shortDescription || null,
+      image: r.image || null,
+      startDate: r.startDate || null,
+      endDate: r.endDate || null,
+      status: r.status || null,
+      rewardType: r.rewardType || null,
+      rewardAmount: r.rewardAmount ?? null,
+      winnerId: r.winnerId || null,
+      totalTickets: r.totalTickets ?? null,
+      rewards: Array.isArray(r.rewards) ? r.rewards.map(x => ({ refId: x.refId, quantity: x.quantity })) : [],
+    })).filter(r => r.id);
+  } catch (err) {
+    console.error('Upshot API: getRaffles() failed:', err.message);
+    return [];
+  }
+}
+
+/**
+ * Fetch a single raffle's detail, including the embedded winner once DRAWN.
+ * Returns { ...raffle, winner: { id, username, avatarUrl, walletAddress } | null }
+ * or null on failure.
+ */
+export async function getRaffleDetail(raffleId) {
+  try {
+    const res = await fetchRetry(`${RAFFLE_BASE}/raffles/${raffleId}`, { timeout: 12_000 });
+    if (!res.ok) return null;
+    const json = await res.json();
+    const r = json.data ?? json;
+    if (!r?.id) return null;
+    return {
+      id: r.id,
+      name: r.shortName || r.name || r.id,
+      status: r.status || null,
+      endDate: r.endDate || null,
+      image: r.image || null,
+      winner: r.winner
+        ? { id: r.winner.id, username: r.winner.username || null, avatarUrl: r.winner.avatarUrl || null, walletAddress: r.winner.walletAddress || null }
+        : null,
+    };
+  } catch (err) {
+    console.error(`Upshot API: getRaffleDetail(${raffleId}) failed:`, err.message);
+    return null;
+  }
+}
+
 /**
  * Get a user's season rank and XP from the Upshot leaderboard.
  * Returns { rank, effectiveXP, winningCardPoints, setCompletionPoints, otherRankPoints, totalParticipants, seasonEnd } or null.
