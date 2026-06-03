@@ -2433,10 +2433,15 @@ async function handleStarsModalSubmit(interaction) {
 // ── Button handlers ─────────────────────────────────────────
 
 async function handleButton(interaction) {
-  // Legacy panel "Make a Prediction" button — predictions now flow only through
-  // My Cards, so funnel any old panels still showing it into the card picker.
+  // Legacy panel "Make a Prediction" button — route to the card picker.
   if (interaction.customId === 'panel_predict') {
     return handleCardPicker(interaction);
+  }
+
+  // Manual "Predict by URL" — opens the modal where you paste a card URL/ID
+  // (the original flow, kept alongside My Cards by request).
+  if (interaction.customId === 'panel_predict_url') {
+    return showPredictModal(interaction);
   }
 
   // Hub buttons (self-serve panel) — reuse existing handlers
