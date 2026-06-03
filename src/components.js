@@ -994,8 +994,7 @@ export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = []
       `**Total cards:** ${c.totalCards.toLocaleString('en-US')}${copies}`,
       `**🟢 Active:** ${c.active.toLocaleString('en-US')}`,
       `**🏆 Winning:** ${c.winning.toLocaleString('en-US')}  ·  **🔴 Lost:** ${c.lost.toLocaleString('en-US')}  (${cardWinRate}% of ${c.resolved.toLocaleString('en-US')} resolved)`,
-      c.unclaimed > 0 ? `**🎁 Unclaimed:** ${c.unclaimed.toLocaleString('en-US')}` : null,
-    ].filter(Boolean).join('\n')));
+    ].join('\n')));
     children.push(separator());
   }
 

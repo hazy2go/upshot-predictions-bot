@@ -388,10 +388,13 @@ export async function getUserContestLineups(walletAddress) {
     // Resolve card names via getCardDetails so the lookups land in the shared
     // card cache — the deadline filter (filterOutExpiredCards) then reuses them
     // instead of fetching every contest card a second time.
+    // retries:2 so a transient miss doesn't leave the card showing its raw ID in
+    // the picker (the global concurrency limiter keeps the extra attempts from
+    // flooding the API).
     const cardNames = new Map();
     const cardFetches = await Promise.allSettled(
       [...allCardIds].map(async (cardId) => {
-        const details = await getCardDetails(cardId, { retries: 1 });
+        const details = await getCardDetails(cardId, { retries: 2 });
         return { cardId, name: details?.name || cardId };
       })
     );
@@ -467,7 +470,7 @@ async function filterOutExpiredCards(cards) {
   const CHUNK = 12;
   for (let i = 0; i < needFetch.length; i += CHUNK) {
     const chunk = needFetch.slice(i, i + CHUNK);
-    const results = await Promise.allSettled(chunk.map(c => getCardDetails(c.id, { retries: 1 })));
+    const results = await Promise.allSettled(chunk.map(c => getCardDetails(c.id, { retries: 2 })));
     for (let j = 0; j < chunk.length; j++) {
       const details = results[j].status === 'fulfilled' ? results[j].value : null;
       if (eventDeadlinePassed(details)) continue;
@@ -535,8 +538,10 @@ async function fetchAllBalancePairs(walletAddress) {
 
 // Aggregate collection stats for a wallet from its (paginated) balances. Uses
 // the embedded event on each card, so no per-card fetches. Returns:
-//   { totalCards, totalCopies, active, resolved, winning, lost, unclaimed }
+//   { totalCards, totalCopies, active, resolved, winning, lost }
 // totalCards = distinct cards held (qty>0); totalCopies = sum of all copies.
+// (We deliberately don't surface claimed/unclaimed — that's an internal Upshot
+// accounting split, not "prizes to claim", and is confusing as a headline stat.)
 // Cached briefly so repeated /mystats taps don't re-page a large wallet.
 const cardStatsCache = new Map(); // wallet -> { at, value }
 const CARD_STATS_TTL = 2 * 60 * 1000;
@@ -545,7 +550,7 @@ export async function getCardStats(walletAddress) {
   const cached = cardStatsCache.get(walletAddress);
   if (cached && Date.now() - cached.at < CARD_STATS_TTL) return cached.value;
 
-  const s = { totalCards: 0, totalCopies: 0, active: 0, resolved: 0, winning: 0, lost: 0, unclaimed: 0 };
+  const s = { totalCards: 0, totalCopies: 0, active: 0, resolved: 0, winning: 0, lost: 0 };
   try {
     for (const [cardId, entry] of await fetchAllBalancePairs(walletAddress)) {
       if (!cardId || !entry) continue;
@@ -555,7 +560,6 @@ export async function getCardStats(walletAddress) {
       if (qty <= 0) continue;
       s.totalCards++;
       s.totalCopies += qty;
-      if (unc > 0) s.unclaimed += unc;
       const ev = entry.card?.event || entry.card?.outcome?.event || null;
       if (ev?.status === 'RESOLVED') {
         s.resolved++;
