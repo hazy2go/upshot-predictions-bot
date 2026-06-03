@@ -3016,38 +3016,62 @@ function scheduleNextResolve() {
 const EVENT_WATCH_INTERVAL = 60 * 60 * 1000; // 60 min
 let eventWatchTimer = null;
 
-// Run one event-watch pass. Returns a summary; posts to the events channel
-// unless `announce` is false. `force` re-announces nothing — it only controls
-// whether we post (used so /events check behaves like the scheduled run).
+// Seed-state schema version. Bump to force a silent re-seed: v1 seeded
+// already-RESOLVED events with announcedResolved:false, which made them
+// re-announce on the next poll as if freshly resolved (the SpaceX "Ticker Day"
+// bug). v2 marks already-resolved events as announced at seed time, so only a
+// genuine ACTIVE→RESOLVED transition we witness gets announced. The version bump
+// makes existing buggy state on the Pi self-heal on the next run.
+const EVENT_SEED_V = 2;
+
+// Flags when SEEDING an event (firstRun/reseed): everything currently present is
+// pre-existing, so suppress every "live" announcement; only allow a future
+// resolve to fire (announcedResolved stays false while it's still ACTIVE).
+function eventSeedFlags(status) {
+  return { status, announcedLive: true, announcedResolved: status === 'RESOLVED' };
+}
+// Flags for a GENUINELY-NEW event seen after seeding: announce it if it's newly
+// ACTIVE; an event first seen already RESOLVED is suppressed (we didn't witness
+// the transition — avoids announcing an old event rotating into the list).
+function eventNewFlags(status) {
+  return { status, announcedLive: status !== 'ACTIVE', announcedResolved: status === 'RESOLVED' };
+}
+
 async function runEventWatch(guildId, { announce = true } = {}) {
   const events = await getEvents();
   if (!events.length) return { ok: false, total: 0, newLive: 0, resolved: 0, seeded: false };
 
   const prev = getEventWatchState(guildId);
-  const firstRun = prev === null;
-  const state = prev || {};
+  // Treat a missing state OR an out-of-date seed version as "seed silently".
+  const seeding = !prev || prev._v !== EVENT_SEED_V;
+
+  if (seeding) {
+    const state = { _v: EVENT_SEED_V };
+    for (const event of events) state[event.id] = eventSeedFlags(event.status);
+    setEventWatchState(guildId, state);
+    console.log(`Event watch: seeded ${events.length} event(s) silently for ${guildId} (v${EVENT_SEED_V})`);
+    return { ok: true, total: events.length, newLive: 0, resolved: 0, seeded: true };
+  }
+
+  const state = prev;
   const channelId = getEventsChannelId(guildId);
-  const channel = announce && !firstRun && channelId ? await safeGetChannel(channelId) : null;
+  const channel = announce && channelId ? await safeGetChannel(channelId) : null;
+  const liveIds = new Set(events.map(e => e.id));
 
   let newLive = 0;
   let resolved = 0;
 
   for (const event of events) {
+    if (!state[event.id]) state[event.id] = eventNewFlags(event.status); // genuinely new since last seed
     const seen = state[event.id];
 
-    // Brand-new event we've never recorded.
-    if (!seen) {
-      state[event.id] = { status: event.status, announcedLive: false, announcedResolved: false };
-      if (!firstRun && event.status === 'ACTIVE' && channel) {
+    if (event.status === 'ACTIVE' && !seen.announcedLive) {
+      if (channel) {
         await channel.send(buildEventLive(event)).then(() => { newLive++; })
           .catch(e => console.error(`Event watch: live announce failed for ${event.id}:`, e.message));
-        state[event.id].announcedLive = true;
       }
-      // On first run we just record current status (seed) — no announcement.
-      continue;
+      seen.announcedLive = true;
     }
-
-    // Known event that has just transitioned to RESOLVED.
     if (event.status === 'RESOLVED' && !seen.announcedResolved) {
       if (channel) {
         const winnerName = event.outcomes?.find(o => o.id === event.winningOutcomeId)?.name || null;
@@ -3059,13 +3083,12 @@ async function runEventWatch(guildId, { announce = true } = {}) {
     seen.status = event.status;
   }
 
+  // Prune events that have dropped off the API list so state doesn't grow forever.
+  for (const id of Object.keys(state)) if (id !== '_v' && !liveIds.has(id)) delete state[id];
+
   setEventWatchState(guildId, state);
-  if (firstRun) {
-    console.log(`Event watch: seeded ${events.length} existing event(s) silently for ${guildId}`);
-  } else if (newLive || resolved) {
-    console.log(`Event watch: announced ${newLive} new live, ${resolved} resolved`);
-  }
-  return { ok: true, total: events.length, newLive, resolved, seeded: firstRun };
+  if (newLive || resolved) console.log(`Event watch: announced ${newLive} new live, ${resolved} resolved`);
+  return { ok: true, total: events.length, newLive, resolved, seeded: false };
 }
 
 async function safeRunEventWatch() {
@@ -3119,7 +3142,20 @@ async function handleEventsCommand(interaction) {
 // guild seeds the whole backlog silently. Mirrors the event watcher.
 
 const RAFFLE_WATCH_INTERVAL = 30 * 60 * 1000; // 30 min — Lucky Shots are time-sensitive
+const RAFFLE_SEED_V = 1;
 let raffleWatchTimer = null;
+
+// Flags when SEEDING a raffle (firstRun/reseed): everything present is
+// pre-existing, so suppress its current state. A READY raffle keeps
+// announcedLive:false so its future READY→LIVE transition still announces;
+// anything already LIVE/ENDED/DRAWN is suppressed.
+function raffleSeedFlags(status) {
+  return {
+    status,
+    announcedLive: status !== 'READY',
+    announcedDrawn: status === 'DRAWN',
+  };
+}
 
 async function runRaffleWatch(guildId, { announce = true } = {}) {
   // Pull the statuses we care about and merge (a raffle appears under one).
@@ -3130,23 +3166,32 @@ async function runRaffleWatch(guildId, { announce = true } = {}) {
   if (!raffles.length) return { ok: false, total: 0, live: 0, winners: 0, seeded: false };
 
   const prev = getRaffleWatchState(guildId);
-  const firstRun = prev === null;
-  const state = prev || {};
+  const seeding = !prev || prev._v !== RAFFLE_SEED_V;
+
+  if (seeding) {
+    const state = { _v: RAFFLE_SEED_V };
+    for (const raffle of raffles) state[raffle.id] = raffleSeedFlags(raffle.status);
+    setRaffleWatchState(guildId, state);
+    console.log(`Lucky Shots: seeded ${raffles.length} raffle(s) silently for ${guildId} (v${RAFFLE_SEED_V})`);
+    return { ok: true, total: raffles.length, live: 0, winners: 0, seeded: true };
+  }
+
+  const state = prev;
   const channelId = getLuckyShotsChannelId(guildId);
-  const channel = announce && !firstRun && channelId ? await safeGetChannel(channelId) : null;
+  const channel = announce && channelId ? await safeGetChannel(channelId) : null;
+  const liveIds = new Set(raffles.map(r => r.id));
 
   let live = 0;
   let winners = 0;
 
   for (const raffle of raffles) {
-    const isNew = !state[raffle.id];
-    if (isNew) {
-      // Seed flags so we never announce the CURRENT state, only future
-      // transitions: suppress live unless it's a genuinely-new LIVE raffle on a
-      // normal run; always suppress winners for raffles first seen already DRAWN.
+    if (!state[raffle.id]) {
+      // Genuinely new since last seed. A new LIVE raffle is freshly live (announce
+      // it); anything first seen already DRAWN is seeded silently (it may just be
+      // rotating into the historical DRAWN list, not freshly won).
       state[raffle.id] = {
         status: raffle.status,
-        announcedLive: raffle.status === 'ENDED' || raffle.status === 'DRAWN' || (firstRun && raffle.status === 'LIVE'),
+        announcedLive: raffle.status === 'ENDED' || raffle.status === 'DRAWN',
         announcedDrawn: raffle.status === 'DRAWN',
       };
     }
@@ -3172,13 +3217,12 @@ async function runRaffleWatch(guildId, { announce = true } = {}) {
     seen.status = raffle.status;
   }
 
+  // Prune raffles that have dropped off the API lists so state doesn't grow forever.
+  for (const id of Object.keys(state)) if (id !== '_v' && !liveIds.has(id)) delete state[id];
+
   setRaffleWatchState(guildId, state);
-  if (firstRun) {
-    console.log(`Lucky Shots: seeded ${raffles.length} raffle(s) silently for ${guildId}`);
-  } else if (live || winners) {
-    console.log(`Lucky Shots: announced ${live} live, ${winners} winner(s)`);
-  }
-  return { ok: true, total: raffles.length, live, winners, seeded: firstRun };
+  if (live || winners) console.log(`Lucky Shots: announced ${live} live, ${winners} winner(s)`);
+  return { ok: true, total: raffles.length, live, winners, seeded: false };
 }
 
 async function safeRunRaffleWatch() {
