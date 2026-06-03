@@ -260,8 +260,47 @@ export async function getUserContestLineups(walletAddress) {
 }
 
 /**
+ * True when a card's event deadline is today or in the past (UTC) — i.e. it can
+ * no longer be predicted on. Mirrors the deadline check in the submit flow.
+ * Returns false on missing/unparseable data so we never hide a card we can't
+ * positively prove is expired (the submit flow rejects stragglers as a backstop).
+ */
+function eventDeadlinePassed(details) {
+  if (!details) return false;          // lookup failed — keep the card
+  if (details.resolvedAt) return true; // event already resolved
+  if (!details.eventDate) return false;
+  const d = new Date(details.eventDate);
+  if (Number.isNaN(d.getTime())) return false;
+  const fmt = (dt) =>
+    `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+  return fmt(d) <= fmt(new Date());
+}
+
+/**
+ * Enrich cards with event details and drop any whose deadline has already
+ * passed. Runs lookups in small concurrent batches to avoid hammering the API.
+ * Also upgrades each card's name with the canonical one from the details call.
+ */
+async function filterOutExpiredCards(cards) {
+  const out = [];
+  const CHUNK = 10;
+  for (let i = 0; i < cards.length; i += CHUNK) {
+    const chunk = cards.slice(i, i + CHUNK);
+    const results = await Promise.allSettled(chunk.map(c => getCardDetails(c.id)));
+    for (let j = 0; j < chunk.length; j++) {
+      const details = results[j].status === 'fulfilled' ? results[j].value : null;
+      if (eventDeadlinePassed(details)) continue;
+      if (details?.name) chunk[j].name = details.name;
+      out.push(chunk[j]);
+    }
+  }
+  return out;
+}
+
+/**
  * Get every card a wallet could back a prediction with — owned cards (wallet
- * balances) plus cards entered in active contest lineups.
+ * balances) plus cards entered in active contest lineups, with cards whose
+ * event deadline has already passed removed.
  * Returns array of { id, name, inContest }. Best-effort: returns whatever it
  * could gather, [] on total failure. Wallet-owned cards win over contest cards
  * when a card appears in both.
@@ -311,7 +350,13 @@ export async function getPredictableCards(walletAddress) {
     console.error(`Upshot API: getPredictableCards contests(${walletAddress}) failed:`, err.message);
   }
 
-  return [...byId.values()];
+  // Drop cards whose event deadline has already passed — they can't be predicted.
+  try {
+    return await filterOutExpiredCards([...byId.values()]);
+  } catch (err) {
+    console.error(`Upshot API: getPredictableCards deadline filter(${walletAddress}) failed:`, err.message);
+    return [...byId.values()];
+  }
 }
 
 /**
