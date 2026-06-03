@@ -707,6 +707,57 @@ export async function getRaffleTop(raffleId, n = 3, totalTickets = null) {
   }
 }
 
+// ── Store (packs + bundles) ──────────────────────────────────
+//
+// The store at upshot.cards/store is two endpoints: /packs and /bundles. Both
+// carry `status` (ACTIVE / COMING_SOON / SOLD_OUT / DRAFT / UNAVAILABLE /
+// ARCHIVED), an effective price in micro-units, and `remainingStock`.
+
+function normalizeStoreItem(raw, kind) {
+  const priceRaw = raw.effectivePrice ?? raw.finalPrice ?? raw.pricePerPack ?? raw.basePrice;
+  const price = priceRaw != null && Number.isFinite(Number(priceRaw)) ? Number(priceRaw) / 1_000_000 : null;
+  return {
+    id: raw.id,
+    kind, // 'pack' | 'bundle'
+    name: raw.name,
+    description: raw.description || null,
+    image: raw.image || null,
+    status: raw.status || null,
+    price,
+    currency: raw.priceCurrency || 'CASH',
+    cardQuantity: raw.cardQuantity ?? null,   // packs
+    totalPacks: raw.totalPacks ?? null,        // bundles
+    remaining: raw.remainingStock ?? null,
+    releaseDate: raw.releaseDate || null,
+  };
+}
+
+// List store packs (normalized). Read-only, best-effort: [] on failure.
+export async function getStorePacks() {
+  try {
+    const res = await fetchRetry(`${BASE}/packs`, { timeout: 12_000 });
+    if (!res.ok) return [];
+    const all = (await res.json()).data ?? [];
+    return Array.isArray(all) ? all.map(p => normalizeStoreItem(p, 'pack')).filter(x => x.id) : [];
+  } catch (err) {
+    console.error('Upshot API: getStorePacks() failed:', err.message);
+    return [];
+  }
+}
+
+// List store bundles (normalized). Read-only, best-effort: [] on failure.
+export async function getStoreBundles() {
+  try {
+    const res = await fetchRetry(`${BASE}/bundles`, { timeout: 12_000 });
+    if (!res.ok) return [];
+    const all = (await res.json()).data ?? [];
+    return Array.isArray(all) ? all.map(b => normalizeStoreItem(b, 'bundle')).filter(x => x.id) : [];
+  } catch (err) {
+    console.error('Upshot API: getStoreBundles() failed:', err.message);
+    return [];
+  }
+}
+
 /**
  * Get a user's season rank and XP from the Upshot leaderboard.
  * Returns { rank, effectiveXP, winningCardPoints, setCompletionPoints, otherRankPoints, totalParticipants, seasonEnd } or null.

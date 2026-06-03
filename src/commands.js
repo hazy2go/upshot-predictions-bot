@@ -108,6 +108,17 @@ export const commands = [
         .setDescription('Post the current Lucky Shots and their status to the channel')),
 
   new SlashCommandBuilder()
+    .setName('store')
+    .setDescription('Upshot store (packs & bundles) announcements (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addSubcommand(sub =>
+      sub.setName('check')
+        .setDescription('Run a store check now — announce any newly-listed packs/bundles'))
+    .addSubcommand(sub =>
+      sub.setName('list')
+        .setDescription('Post available + upcoming packs/bundles and remaining stock to the channel')),
+
+  new SlashCommandBuilder()
     .setName('refresh')
     .setDescription('Re-sync prediction embeds to show updated buttons (admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
@@ -185,6 +196,16 @@ export const commands = [
         .addChannelOption(opt =>
           opt.setName('channel')
             .setDescription('The contests announcement channel')
+            .addChannelTypes(ChannelType.GuildText)
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('store-channel')
+        .setDescription('Set the channel for new pack/bundle store announcements')
+        .addChannelOption(opt =>
+          opt.setName('channel')
+            .setDescription('The store announcement channel')
             .addChannelTypes(ChannelType.GuildText)
             .setRequired(true)
         )

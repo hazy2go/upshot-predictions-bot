@@ -377,6 +377,16 @@ export function setRaffleWatchState(guildId, state) {
   db.prepare("INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)").run(`raffles_watch_${guildId}`, JSON.stringify(state));
 }
 
+// Store watcher state — { _v, [itemId]: { status, announcedListed } }; null until seeded.
+export function getStoreWatchState(guildId) {
+  const row = db.prepare("SELECT value FROM bot_state WHERE key = ?").get(`store_watch_${guildId}`);
+  return row?.value ? JSON.parse(row.value) : null;
+}
+
+export function setStoreWatchState(guildId, state) {
+  db.prepare("INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)").run(`store_watch_${guildId}`, JSON.stringify(state));
+}
+
 /**
  * Find predictions stuck in 'awaiting_images' state longer than the timeout.
  * Used on bot startup to recover from restarts during image upload windows.
