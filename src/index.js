@@ -28,6 +28,7 @@ import {
   getProfileByWallet, getProfileByUrl, getAllUsers, getDbPath,
   upsertCommunityVote, getCommunityVoteSummary,
   getPendingVerificationPredictions, getUnratedVerifiedPredictions,
+  getEventWatchState, setEventWatchState,
 } from './database.js';
 
 import { rateWithAI } from './nim.js';
@@ -38,6 +39,7 @@ import {
   buildPredictionPanel, buildHelpPage,
   buildContestOverview, buildContestLineupPage,
   buildCardPicker, buildCardPickerEmpty, buildCardDetail,
+  buildEventLive, buildEventResolved, buildEventList,
 } from './components.js';
 
 import { commands } from './commands.js';
@@ -52,6 +54,7 @@ import {
   getCardDetails, checkCardOwnership, checkCardResolution,
   getSeasonRank, getUserContestLineups, getPredictableCards,
   getUserProfile, getUserPacks, transferPack, refreshUpshotAccessToken,
+  getEvents,
 } from './api.js';
 
 // ── Client ──────────────────────────────────────────────────
@@ -258,6 +261,10 @@ function extractTokenFromInput(input) {
 
 function getLeaderboardChannelId(guildId) {
   return cfg(guildId, 'leaderboard_channel', 'LEADERBOARD_CHANNEL_ID');
+}
+
+function getEventsChannelId(guildId) {
+  return cfg(guildId, 'events_channel', 'EVENTS_CHANNEL_ID');
 }
 
 function getAdminRoleId(guildId) {
@@ -1642,6 +1649,11 @@ async function handleSetup(interaction) {
       setConfig(guildId, 'leaderboard_channel', channel.id);
       return interaction.reply({ content: `✅ Leaderboard channel set to <#${channel.id}>`, flags: ['Ephemeral'] });
     }
+    case 'events-channel': {
+      const channel = interaction.options.getChannel('channel', true);
+      setConfig(guildId, 'events_channel', channel.id);
+      return interaction.reply({ content: `✅ Events channel set to <#${channel.id}>. New live events and results will be announced there (first sync seeds silently — no backlog spam).`, flags: ['Ephemeral'] });
+    }
     case 'admin-role': {
       const role = interaction.options.getRole('role', true);
       setConfig(guildId, 'admin_role', role.id);
@@ -2979,6 +2991,111 @@ function scheduleNextResolve() {
   console.log(`Auto-resolve: Next check at ${nextResolveCheck.toISOString()}`);
 }
 
+// ── Event watcher ────────────────────────────────────────────
+//
+// Polls Upshot's /events hourly and announces, in the configured events channel:
+//   • a NEW event going live  ("🎯 New Event Live — …, ends …")
+//   • an event being RESOLVED ("🏁 Event Resolved — winner: …")
+// State (which events we've already announced) is persisted per guild in
+// bot_state, so a restart never re-announces. On the very first run for a guild
+// the existing backlog is seeded SILENTLY — members only get pinged about
+// changes from then on. The same engine should fit Lucky Shots by swapping the
+// API source once that endpoint is known.
+
+const EVENT_WATCH_INTERVAL = 60 * 60 * 1000; // 60 min
+let eventWatchTimer = null;
+
+// Run one event-watch pass. Returns a summary; posts to the events channel
+// unless `announce` is false. `force` re-announces nothing — it only controls
+// whether we post (used so /events check behaves like the scheduled run).
+async function runEventWatch(guildId, { announce = true } = {}) {
+  const events = await getEvents();
+  if (!events.length) return { ok: false, total: 0, newLive: 0, resolved: 0, seeded: false };
+
+  const prev = getEventWatchState(guildId);
+  const firstRun = prev === null;
+  const state = prev || {};
+  const channelId = getEventsChannelId(guildId);
+  const channel = announce && !firstRun && channelId ? await safeGetChannel(channelId) : null;
+
+  let newLive = 0;
+  let resolved = 0;
+
+  for (const event of events) {
+    const seen = state[event.id];
+
+    // Brand-new event we've never recorded.
+    if (!seen) {
+      state[event.id] = { status: event.status, announcedLive: false, announcedResolved: false };
+      if (!firstRun && event.status === 'ACTIVE' && channel) {
+        await channel.send(buildEventLive(event)).then(() => { newLive++; })
+          .catch(e => console.error(`Event watch: live announce failed for ${event.id}:`, e.message));
+        state[event.id].announcedLive = true;
+      }
+      // On first run we just record current status (seed) — no announcement.
+      continue;
+    }
+
+    // Known event that has just transitioned to RESOLVED.
+    if (event.status === 'RESOLVED' && !seen.announcedResolved) {
+      if (channel) {
+        const winnerName = event.outcomes?.find(o => o.id === event.winningOutcomeId)?.name || null;
+        await channel.send(buildEventResolved(event, winnerName)).then(() => { resolved++; })
+          .catch(e => console.error(`Event watch: resolve announce failed for ${event.id}:`, e.message));
+      }
+      seen.announcedResolved = true;
+    }
+    seen.status = event.status;
+  }
+
+  setEventWatchState(guildId, state);
+  if (firstRun) {
+    console.log(`Event watch: seeded ${events.length} existing event(s) silently for ${guildId}`);
+  } else if (newLive || resolved) {
+    console.log(`Event watch: announced ${newLive} new live, ${resolved} resolved`);
+  }
+  return { ok: true, total: events.length, newLive, resolved, seeded: firstRun };
+}
+
+async function safeRunEventWatch() {
+  const guildId = process.env.GUILD_ID;
+  if (guildId) {
+    try {
+      await runEventWatch(guildId);
+    } catch (err) {
+      console.error('Event watch: fatal error:', err.message);
+    }
+  }
+  eventWatchTimer = setTimeout(safeRunEventWatch, EVENT_WATCH_INTERVAL);
+}
+
+// Admin /events command: `check` runs a watch pass now (announces to the events
+// channel), `list` shows the current events privately.
+async function handleEventsCommand(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admins only.', flags: ['Ephemeral'] });
+  }
+  const sub = interaction.options.getSubcommand();
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  if (sub === 'list') {
+    const events = await getEvents();
+    return interaction.editReply(buildEventList(events));
+  }
+
+  // sub === 'check'
+  const r = await runEventWatch(interaction.guildId, { announce: true });
+  if (!r.ok) {
+    return interaction.editReply({ content: '⚠️ Couldn\'t reach the Upshot events API just now — try again in a moment.' });
+  }
+  if (r.seeded) {
+    return interaction.editReply({ content: `✅ First sync done — seeded **${r.total}** existing event(s) silently. From now on new live events and results will post to the events channel.` });
+  }
+  const channelSet = !!getEventsChannelId(interaction.guildId);
+  const note = channelSet ? '' : '\n-# ⚠️ No events channel set — run `/setup events-channel` so announcements have somewhere to post.';
+  return interaction.editReply({ content: `✅ Checked **${r.total}** event(s) — announced **${r.newLive}** new live, **${r.resolved}** resolved.${note}` });
+}
+
 // ── Tier roles (cumulative top-10 leaderboard tiers) ─────────
 //
 // Each month a user finishes top 10 they earn one tier. Tiers are cumulative
@@ -3124,6 +3241,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'upshotrank': return await handleUpshotRank(interaction);
         case 'pastleaderboard': return await handlePastLeaderboard(interaction);
         case 'mycontests': return await handleMyContests(interaction);
+        case 'events': return await handleEventsCommand(interaction);
         case 'refresh': return await handleRefreshCommand(interaction);
         case 'resolve': return await handleResolveCommand(interaction);
         case 'leaderboard': return await handleLeaderboardCommand(interaction);
@@ -3229,6 +3347,11 @@ client.once(Events.ClientReady, async () => {
   // Start tier rollover timer (first run after 2 minutes, then every 6h).
   tierTimer = setTimeout(safeRunTierRollover, 120_000);
   console.log(`   Tier rollover: first check in 2 minutes, then every 6h`);
+
+  // Start the Upshot event watcher (first run after 90s, then every 60 min).
+  // The first run seeds the existing event backlog silently.
+  eventWatchTimer = setTimeout(safeRunEventWatch, 90_000);
+  console.log(`   Event watch: first check in 90s, then every 60min`);
 
   // Keep the Upshot token fresh hands-off: the access token lives ~15h and the
   // refresh token is a rotating 7-day sliding window, so a check every 6h keeps

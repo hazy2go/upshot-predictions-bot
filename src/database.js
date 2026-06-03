@@ -353,6 +353,19 @@ export function removePanel(guildId, messageId) {
   db.prepare("INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)").run(`panels_${guildId}`, JSON.stringify(panels));
 }
 
+// ── Event watcher state (which Upshot events we've already announced) ──
+// Stored per guild as a JSON map: { [eventId]: { status, announcedLive,
+// announcedResolved } }. Returns null when never initialized — the watcher uses
+// that to seed silently on first run instead of announcing the whole backlog.
+export function getEventWatchState(guildId) {
+  const row = db.prepare("SELECT value FROM bot_state WHERE key = ?").get(`events_watch_${guildId}`);
+  return row?.value ? JSON.parse(row.value) : null;
+}
+
+export function setEventWatchState(guildId, state) {
+  db.prepare("INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)").run(`events_watch_${guildId}`, JSON.stringify(state));
+}
+
 /**
  * Find predictions stuck in 'awaiting_images' state longer than the timeout.
  * Used on bot startup to recover from restarts during image upload windows.

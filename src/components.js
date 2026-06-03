@@ -199,6 +199,88 @@ export function buildCardDetail(card, { taken = null } = {}) {
   };
 }
 
+// ── Upshot event announcements (live / resolved) ────────────
+//
+// Posted to the configured events channel by the event watcher. `event` is the
+// normalized shape from api.getEvents(): { id, name, description, image, status,
+// kind, eventDate, outcomes, winningOutcomeId, ... }.
+
+const EVENT_URL = (id) => `https://upshot.cards/events/${id}`;
+
+// Format an ISO timestamp as a Discord dynamic time tag, or null if unusable.
+// Far-future placeholder dates (Upshot uses 2069/2027 for "no fixed deadline")
+// are treated as no deadline so we don't announce a nonsense end time.
+function eventEndTag(eventDate) {
+  if (!eventDate) return null;
+  const ms = Date.parse(eventDate);
+  if (!Number.isFinite(ms)) return null;
+  if (new Date(ms).getUTCFullYear() >= 2027) return null; // placeholder, not a real deadline
+  return `<t:${Math.floor(ms / 1000)}:F> (<t:${Math.floor(ms / 1000)}:R>)`;
+}
+
+function eventImage(image) {
+  return image && /^https?:\/\//.test(image) ? image : null;
+}
+
+export function buildEventLive(event) {
+  const children = [];
+  children.push(text('## 🎯 New Event Live'));
+  children.push(text(`### ${(event.name || 'Upshot event').replace(/[\r\n]+/g, ' ')}`));
+
+  const img = eventImage(event.image);
+  if (img) children.push({ type: CT.MediaGallery, items: [{ media: { url: img } }] });
+
+  if (event.description) children.push(text(event.description.slice(0, 600)));
+
+  const meta = [];
+  const end = eventEndTag(event.eventDate);
+  if (end) meta.push(`🕒 **Ends:** ${end}`);
+  if (event.outcomes?.length) meta.push(`🎲 **Outcomes:** ${event.outcomes.length}`);
+  if (meta.length) { children.push(separator()); children.push(text(meta.join('\n'))); }
+
+  children.push(actionRow(linkButton(EVENT_URL(event.id), '🔗 View on Upshot')));
+
+  return { components: [container(Colors.Hit, children)], flags: 1 << 15 };
+}
+
+export function buildEventResolved(event, winnerName) {
+  const children = [];
+  children.push(text('## 🏁 Event Resolved'));
+  children.push(text(`### ${(event.name || 'Upshot event').replace(/[\r\n]+/g, ' ')}`));
+
+  const img = eventImage(event.image);
+  if (img) children.push({ type: CT.MediaGallery, items: [{ media: { url: img } }] });
+
+  children.push(separator());
+  children.push(text(winnerName
+    ? `🏆 **Winning outcome:** ${winnerName}`
+    : '✅ This event has been resolved.'));
+
+  children.push(actionRow(linkButton(EVENT_URL(event.id), '🔗 View on Upshot')));
+
+  return { components: [container(Colors.Leaderboard, children)], flags: 1 << 15 };
+}
+
+// Compact ephemeral list of current events for the admin `/events list` command.
+export function buildEventList(events) {
+  const children = [];
+  children.push(text(`## 🎯 Upshot Events (${events.length})`));
+  if (!events.length) {
+    children.push(text('-# No events returned by the API right now.'));
+  } else {
+    const lines = events.slice(0, 40).map(e => {
+      const dot = e.status === 'RESOLVED' ? '🏁' : '🟢';
+      const win = e.status === 'RESOLVED' && e.winningOutcomeId
+        ? ` — 🏆 ${e.outcomes?.find(o => o.id === e.winningOutcomeId)?.name || 'resolved'}`
+        : '';
+      return `${dot} **${(e.name || e.id).slice(0, 80)}** \`${e.status || '?'}\`${win}`;
+    });
+    children.push(text(lines.join('\n').slice(0, 3800)));
+    if (events.length > 40) children.push(text(`-# …and ${events.length - 40} more`));
+  }
+  return { components: [container(Colors.Stats, children)], flags: (1 << 15) | (1 << 6) };
+}
+
 export function buildCardPickerEmpty() {
   return {
     components: [

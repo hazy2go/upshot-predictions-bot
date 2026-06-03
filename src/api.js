@@ -552,6 +552,44 @@ export async function checkCardResolution(cardId) {
 }
 
 /**
+ * List Upshot events (the things shown across the site — "F1 AU GP", "MrBeast
+ * Hits 500M", etc). Read-only, best-effort: returns [] on any failure.
+ *   GET /events  → { data: [{ id, name, status, eventDate, kind, outcomes, ... }] }
+ * Returns a normalized array:
+ *   { id, name, description, image, status, kind, eventDate, prizePool,
+ *     winningOutcomeId, resolvedAt, outcomes: [{ id, name }] }
+ * `status` is 'ACTIVE' while open and 'RESOLVED' once decided. The winning
+ * outcome name is resolved by matching winningOutcomeId against outcomes[].
+ * Used by the event watcher to announce new live events and their results; the
+ * same shape should fit Lucky Shots once that endpoint is known.
+ */
+export async function getEvents() {
+  try {
+    const res = await fetchRetry(`${BASE}/events`, { timeout: 12_000 });
+    if (!res.ok) return [];
+    const json = await res.json();
+    const all = json.data ?? json;
+    if (!Array.isArray(all)) return [];
+    return all.map(e => ({
+      id: e.id,
+      name: e.name,
+      description: e.description || null,
+      image: e.image || null,
+      status: e.status || null,
+      kind: e.kind || null,
+      eventDate: e.eventDate || null,
+      prizePool: e.prizePool || null,
+      winningOutcomeId: e.winningOutcomeId || null,
+      resolvedAt: e.resolvedAt || null,
+      outcomes: Array.isArray(e.outcomes) ? e.outcomes.map(o => ({ id: o.id, name: o.name })) : [],
+    })).filter(e => e.id);
+  } catch (err) {
+    console.error('Upshot API: getEvents() failed:', err.message);
+    return [];
+  }
+}
+
+/**
  * Get a user's season rank and XP from the Upshot leaderboard.
  * Returns { rank, effectiveXP, winningCardPoints, setCompletionPoints, otherRankPoints, totalParticipants, seasonEnd } or null.
  */
