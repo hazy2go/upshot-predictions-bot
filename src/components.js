@@ -455,12 +455,13 @@ export function buildStoreListed(item) {
 
 // Public list of available (ACTIVE) + upcoming (COMING_SOON) packs & bundles with
 // remaining stock, for `/store list`. `items` is packs+bundles combined.
-// Sold-out items are excluded — an ACTIVE pack with remaining:0 is effectively
-// sold out, so we only show those with stock left (remaining > 0, or unknown).
+// Hide ACTIVE packs that are sold out (remaining:0 — Upshot keeps them ACTIVE),
+// but always keep COMING_SOON ones: they're upcoming, not sold out, so a 0/empty
+// stock there just means "not on sale yet" (and we never label them sold out).
 export function buildStoreList(items) {
   const order = { ACTIVE: 0, COMING_SOON: 1 };
   const shown = items
-    .filter(i => (i.status === 'ACTIVE' || i.status === 'COMING_SOON') && i.remaining !== 0)
+    .filter(i => (i.status === 'ACTIVE' && i.remaining !== 0) || i.status === 'COMING_SOON')
     .sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
 
   const children = [];
