@@ -47,7 +47,6 @@ export const Points = {
 
 // Prediction statuses
 export const Status = {
-  AwaitingImages: 'awaiting_images',
   PendingVerification: 'pending_verification',
   PendingReview: 'pending_review',
   Rated: 'rated',
@@ -57,12 +56,6 @@ export const Status = {
 
 // Default categories (used if none configured via /setup)
 export const DefaultCategories = ['DeFi', 'NFTs', 'L1-L2', 'Gaming', 'Macro'];
-
-// MessageFlags for Components v2
-export const MESSAGE_FLAGS = {
-  IsComponentsV2: 1 << 15,   // 32768
-  Ephemeral: 1 << 6,          // 64
-};
 
 export function starPoints(stars) {
   return [0, Points.Star1, Points.Star2, Points.Star3][stars] || 0;

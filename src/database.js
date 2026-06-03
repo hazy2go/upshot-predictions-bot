@@ -185,12 +185,6 @@ export function deletePrediction(id) {
   return db.prepare('DELETE FROM predictions WHERE id = ?').run(id);
 }
 
-export function getUserPredictions(authorId, monthKey) {
-  const rows = db.prepare(
-    'SELECT * FROM predictions WHERE author_id = ? AND month_key = ? ORDER BY created_at DESC'
-  ).all(authorId, monthKey);
-  return rows.map(r => ({ ...r, images: JSON.parse(r.images) }));
-}
 
 export function countUserDailyPredictions(authorId) {
   const today = new Date().toISOString().split('T')[0];
@@ -233,13 +227,6 @@ export function getUserTier(discordId) {
   return row?.n ?? 0;
 }
 
-// The months a user has been awarded (most recent first) — for /mystats etc.
-export function getTierAwardMonths(discordId) {
-  return db.prepare(
-    'SELECT month_key, rank FROM tier_awards WHERE discord_id = ? ORDER BY month_key DESC'
-  ).all(discordId);
-}
-
 export function hasUnresolvedPredictionForCard(cardId) {
   const row = db.prepare(
     "SELECT id, author_id, title, embed_message_id FROM predictions WHERE card_id = ? AND outcome IS NULL LIMIT 1"
@@ -274,13 +261,6 @@ export function getUserMonthScoredPredictions(authorId, monthKey) {
     WHERE author_id = ? AND month_key = ? AND star_rating IS NOT NULL
     ORDER BY total_points DESC, id DESC
   `).all(authorId, monthKey);
-}
-
-export function getPendingPredictions() {
-  const rows = db.prepare(
-    "SELECT * FROM predictions WHERE status IN ('pending_verification', 'pending_review', 'rated') ORDER BY created_at ASC"
-  ).all();
-  return rows.map(r => ({ ...r, images: JSON.parse(r.images) }));
 }
 
 export function getPendingVerificationPredictions() {
@@ -388,25 +368,6 @@ export function getStoreWatchState(guildId) {
 
 export function setStoreWatchState(guildId, state) {
   db.prepare("INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)").run(`store_watch_${guildId}`, JSON.stringify(state));
-}
-
-/**
- * Find predictions stuck in 'awaiting_images' state longer than the timeout.
- * Used on bot startup to recover from restarts during image upload windows.
- */
-export function getAwaitingImagePredictions(timeoutMs) {
-  const cutoff = new Date(Date.now() - timeoutMs).toISOString();
-  const rows = db.prepare(
-    "SELECT * FROM predictions WHERE status = 'awaiting_images' AND created_at < ?"
-  ).all(cutoff);
-  return rows.map(r => ({ ...r, images: JSON.parse(r.images) }));
-}
-
-/**
- * Mark a prediction as no longer awaiting images (used for timeout recovery).
- */
-export function markImageTimeout(id) {
-  db.prepare("UPDATE predictions SET status = 'pending_verification' WHERE id = ? AND status = 'awaiting_images'").run(id);
 }
 
 // ── Config (DB-backed, overrides .env) ──────────────────────
