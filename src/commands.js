@@ -86,15 +86,15 @@ export const commands = [
     .setDescription('View your active contest lineups and card IDs'),
 
   new SlashCommandBuilder()
-    .setName('events')
-    .setDescription('Upshot event announcements (admin only)')
+    .setName('contests')
+    .setDescription('Upshot contest announcements (admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .addSubcommand(sub =>
       sub.setName('check')
-        .setDescription('Run an event check now — announce any new live or newly-resolved events'))
+        .setDescription('Run a contest check now — announce any new live or newly-completed contests'))
     .addSubcommand(sub =>
       sub.setName('list')
-        .setDescription('List current Upshot events and their status (private)')),
+        .setDescription('Post the current live contests to the channel')),
 
   new SlashCommandBuilder()
     .setName('luckyshots')
@@ -180,11 +180,11 @@ export const commands = [
         )
     )
     .addSubcommand(sub =>
-      sub.setName('events-channel')
-        .setDescription('Set the channel for Upshot event live/resolved announcements')
+      sub.setName('contests-channel')
+        .setDescription('Set the channel for contest new/results announcements')
         .addChannelOption(opt =>
           opt.setName('channel')
-            .setDescription('The events announcement channel')
+            .setDescription('The contests announcement channel')
             .addChannelTypes(ChannelType.GuildText)
             .setRequired(true)
         )

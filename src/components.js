@@ -199,22 +199,20 @@ export function buildCardDetail(card, { taken = null } = {}) {
   };
 }
 
-// ── Upshot event announcements (live / resolved) ────────────
+// ── Contest announcements (new / results) ───────────────────
 //
-// Posted to the configured events channel by the event watcher. `event` is the
-// normalized shape from api.getEvents(): { id, name, description, image, status,
-// kind, eventDate, outcomes, winningOutcomeId, ... }.
+// Posted to the configured contests channel by the contest watcher. `contest` is
+// the normalized shape from api.getContests(): { id, name, description, image,
+// status, startDate, endDate, prizePool, prizeType, lineupCount }.
 
-const EVENT_URL = (id) => `https://upshot.cards/events/${id}`;
+const CONTEST_URL = (id) => `https://upshot.cards/contests/${id}`;
+const MEDAL = ['🥇', '🥈', '🥉'];
 
-// Format an ISO timestamp as a Discord dynamic time tag, or null if unusable.
-// Far-future placeholder dates (Upshot uses 2069/2027 for "no fixed deadline")
-// are treated as no deadline so we don't announce a nonsense end time.
-function eventEndTag(eventDate) {
-  if (!eventDate) return null;
-  const ms = Date.parse(eventDate);
+// ISO timestamp → Discord dynamic time tag, or null if unparseable.
+function timeTag(iso) {
+  if (!iso) return null;
+  const ms = Date.parse(iso);
   if (!Number.isFinite(ms)) return null;
-  if (new Date(ms).getUTCFullYear() >= 2027) return null; // placeholder, not a real deadline
   return `<t:${Math.floor(ms / 1000)}:F> (<t:${Math.floor(ms / 1000)}:R>)`;
 }
 
@@ -222,61 +220,75 @@ function eventImage(image) {
   return image && /^https?:\/\//.test(image) ? image : null;
 }
 
-export function buildEventLive(event) {
-  const children = [];
-  children.push(text('## 🎯 New Event Live'));
-  children.push(text(`### ${(event.name || 'Upshot event').replace(/[\r\n]+/g, ' ')}`));
+// Format a micro-unit prize pool ("1250000000" → "1,250") or null.
+function prizeText(contest) {
+  if (contest.prizePool == null) return null;
+  const n = Number(contest.prizePool);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const amount = (n / 1_000_000).toLocaleString('en-US', { maximumFractionDigits: 0 });
+  return contest.prizeType ? `${amount} ${contest.prizeType}` : amount;
+}
 
-  const img = eventImage(event.image);
+export function buildContestLive(contest) {
+  const children = [];
+  children.push(text('## 🏆 New Contest Live'));
+  children.push(text(`### ${(contest.name || 'Upshot contest').replace(/[\r\n]+/g, ' ')}`));
+
+  const img = eventImage(contest.image);
   if (img) children.push({ type: CT.MediaGallery, items: [{ media: { url: img } }] });
 
-  if (event.description) children.push(text(event.description.slice(0, 600)));
+  if (contest.description) children.push(text(contest.description.slice(0, 600)));
 
   const meta = [];
-  const end = eventEndTag(event.eventDate);
+  const prize = prizeText(contest);
+  if (prize) meta.push(`💰 **Prize pool:** ${prize}`);
+  const end = timeTag(contest.endDate);
   if (end) meta.push(`🕒 **Ends:** ${end}`);
-  if (event.outcomes?.length) meta.push(`🎲 **Outcomes:** ${event.outcomes.length}`);
   if (meta.length) { children.push(separator()); children.push(text(meta.join('\n'))); }
 
-  children.push(actionRow(linkButton(EVENT_URL(event.id), '🔗 View on Upshot')));
+  children.push(text('-# Build your lineup before it closes!'));
+  children.push(actionRow(linkButton(CONTEST_URL(contest.id), '🎮 Enter on Upshot')));
 
   return { components: [container(Colors.Hit, children)], flags: 1 << 15 };
 }
 
-export function buildEventResolved(event, winnerName) {
+// `top` is [{ rank, username, score }] from api.getContestTop().
+export function buildContestResults(contest, top) {
   const children = [];
-  children.push(text('## 🏁 Event Resolved'));
-  children.push(text(`### ${(event.name || 'Upshot event').replace(/[\r\n]+/g, ' ')}`));
+  children.push(text('## 🏁 Contest Over'));
+  children.push(text(`### ${(contest.name || 'Upshot contest').replace(/[\r\n]+/g, ' ')}`));
 
-  const img = eventImage(event.image);
+  const img = eventImage(contest.image);
   if (img) children.push({ type: CT.MediaGallery, items: [{ media: { url: img } }] });
 
   children.push(separator());
-  children.push(text(winnerName
-    ? `🏆 **Winning outcome:** ${winnerName}`
-    : '✅ This event has been resolved.'));
-
-  children.push(actionRow(linkButton(EVENT_URL(event.id), '🔗 View on Upshot')));
+  if (top?.length) {
+    children.push(text('**🏆 Top 3**'));
+    const lines = top.slice(0, 3).map((e, i) =>
+      `${MEDAL[i] || `#${e.rank}`} **${e.username || 'unknown'}** — ${(e.score / 1_000_000).toFixed(2)} pts`);
+    children.push(text(lines.join('\n')));
+  } else {
+    children.push(text('✅ This contest has ended.'));
+  }
+  children.push(actionRow(linkButton(CONTEST_URL(contest.id), '🔗 View on Upshot')));
 
   return { components: [container(Colors.Leaderboard, children)], flags: 1 << 15 };
 }
 
-// Compact ephemeral list of current events for the admin `/events list` command.
-export function buildEventList(events) {
+// Public list of LIVE contests for the admin `/contests list` command.
+export function buildContestList(contests) {
   const children = [];
-  children.push(text(`## 🎯 Upshot Events (${events.length})`));
-  if (!events.length) {
-    children.push(text('-# No events returned by the API right now.'));
+  children.push(text(`## 🏆 Live Contests (${contests.length})`));
+  if (!contests.length) {
+    children.push(text('-# No live contests right now.'));
   } else {
-    const lines = events.slice(0, 40).map(e => {
-      const dot = e.status === 'RESOLVED' ? '🏁' : '🟢';
-      const win = e.status === 'RESOLVED' && e.winningOutcomeId
-        ? ` — 🏆 ${e.outcomes?.find(o => o.id === e.winningOutcomeId)?.name || 'resolved'}`
-        : '';
-      return `${dot} **${(e.name || e.id).slice(0, 80)}** \`${e.status || '?'}\`${win}`;
+    const lines = contests.slice(0, 40).map(c => {
+      const prize = prizeText(c);
+      const ends = c.endDate && Number.isFinite(Date.parse(c.endDate)) ? ` · ends <t:${Math.floor(Date.parse(c.endDate) / 1000)}:R>` : '';
+      return `🟢 **${(c.name || c.id).slice(0, 70)}**${prize ? ` · 💰 ${prize}` : ''}${ends}`;
     });
     children.push(text(lines.join('\n').slice(0, 3800)));
-    if (events.length > 40) children.push(text(`-# …and ${events.length - 40} more`));
+    if (contests.length > 40) children.push(text(`-# …and ${contests.length - 40} more`));
   }
   return { components: [container(Colors.Stats, children)], flags: 1 << 15 };
 }
@@ -341,22 +353,40 @@ export function buildRaffleWinner(raffle, winner) {
   return { components: [container(Colors.Leaderboard, children)], flags: 1 << 15 };
 }
 
-// Public list of current raffles for the admin `/luckyshots list` command.
-export function buildRaffleList(raffles) {
-  const order = { LIVE: 0, READY: 1, ENDED: 2, DRAWN: 3 };
-  const sorted = [...raffles].sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
+// Public list of LIVE + upcoming (READY) raffles for `/luckyshots list`. For
+// each LIVE raffle it shows the top-3 ticket holders. `topByRaffle` is a Map of
+// raffleId → [{ rank, username, tickets, chance }] from api.getRaffleTop().
+export function buildRaffleList(raffles, topByRaffle = new Map()) {
+  // Only LIVE and READY — never ENDED/DRAWN.
+  const order = { LIVE: 0, READY: 1 };
+  const shown = raffles.filter(r => r.status === 'LIVE' || r.status === 'READY')
+    .sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
+
   const children = [];
-  children.push(text(`## 🎰 Lucky Shots (${raffles.length})`));
-  if (!raffles.length) {
-    children.push(text('-# No raffles returned by the API right now.'));
-  } else {
-    const dot = { LIVE: '🟢', READY: '🔜', ENDED: '⏳', DRAWN: '🏆' };
-    const lines = sorted.slice(0, 40).map(r => {
-      const when = r.endDate && Number.isFinite(Date.parse(r.endDate)) ? ` · ends <t:${Math.floor(Date.parse(r.endDate) / 1000)}:R>` : '';
-      return `${dot[r.status] || '•'} **${(r.name || r.id).slice(0, 70)}** \`${r.status || '?'}\`${r.status === 'LIVE' || r.status === 'READY' ? when : ''}`;
-    });
-    children.push(text(lines.join('\n').slice(0, 3800)));
-    if (sorted.length > 40) children.push(text(`-# …and ${sorted.length - 40} more`));
+  children.push(text(`## 🎰 Lucky Shots (${shown.length} live/upcoming)`));
+  if (!shown.length) {
+    children.push(text('-# No live or upcoming Lucky Shots right now.'));
+    return { components: [container(Colors.Stats, children)], flags: 1 << 15 };
+  }
+
+  for (const r of shown) {
+    children.push(separator());
+    const dot = r.status === 'LIVE' ? '🟢' : '🔜';
+    const ends = r.endDate && Number.isFinite(Date.parse(r.endDate)) ? ` · ends <t:${Math.floor(Date.parse(r.endDate) / 1000)}:R>` : '';
+    children.push(text(`${dot} **${(r.name || r.id).slice(0, 80)}** \`${r.status}\`${ends}`));
+
+    if (r.status === 'LIVE') {
+      const top = topByRaffle.get(r.id) || [];
+      if (top.length) {
+        const lines = top.slice(0, 3).map((e, i) => {
+          const chance = e.chance != null ? ` · ${(e.chance * 100).toFixed(1)}%` : '';
+          return `${MEDAL[i] || `#${e.rank}`} **${e.username || 'unknown'}** — ${e.tickets.toLocaleString('en-US')} 🎟${chance}`;
+        });
+        children.push(text(lines.join('\n')));
+      } else {
+        children.push(text('-# No tickets yet.'));
+      }
+    }
   }
   return { components: [container(Colors.Stats, children)], flags: 1 << 15 };
 }

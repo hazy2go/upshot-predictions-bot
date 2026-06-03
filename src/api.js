@@ -552,39 +552,57 @@ export async function checkCardResolution(cardId) {
 }
 
 /**
- * List Upshot events (the things shown across the site — "F1 AU GP", "MrBeast
- * Hits 500M", etc). Read-only, best-effort: returns [] on any failure.
- *   GET /events  → { data: [{ id, name, status, eventDate, kind, outcomes, ... }] }
- * Returns a normalized array:
- *   { id, name, description, image, status, kind, eventDate, prizePool,
- *     winningOutcomeId, resolvedAt, outcomes: [{ id, name }] }
- * `status` is 'ACTIVE' while open and 'RESOLVED' once decided. The winning
- * outcome name is resolved by matching winningOutcomeId against outcomes[].
- * Used by the event watcher to announce new live events and their results; the
- * same shape should fit Lucky Shots once that endpoint is known.
+ * List Upshot contests. Read-only, best-effort: returns [] on any failure.
+ *   GET /contests → { data: [{ id, name, status, startDate, endDate, prizePool, ... }] }
+ * The ?status filter is unreliable upstream, so we fetch all and the caller
+ * filters client-side. `status` is 'LIVE' while running and 'COMPLETED' once
+ * settled. Normalized array:
+ *   { id, name, description, image, status, startDate, endDate, prizePool,
+ *     prizeType, lineupCount }
+ * Used by the contest watcher to announce new contests and their top-3 results.
  */
-export async function getEvents() {
+export async function getContests() {
   try {
-    const res = await fetchRetry(`${BASE}/events`, { timeout: 12_000 });
+    const res = await fetchRetry(`${BASE}/contests`, { timeout: 12_000 });
     if (!res.ok) return [];
     const json = await res.json();
     const all = json.data ?? json;
     if (!Array.isArray(all)) return [];
-    return all.map(e => ({
-      id: e.id,
-      name: e.name,
-      description: e.description || null,
-      image: e.image || null,
-      status: e.status || null,
-      kind: e.kind || null,
-      eventDate: e.eventDate || null,
-      prizePool: e.prizePool || null,
-      winningOutcomeId: e.winningOutcomeId || null,
-      resolvedAt: e.resolvedAt || null,
-      outcomes: Array.isArray(e.outcomes) ? e.outcomes.map(o => ({ id: o.id, name: o.name })) : [],
-    })).filter(e => e.id);
+    return all.map(c => ({
+      id: c.id,
+      name: c.name,
+      description: c.description || null,
+      image: c.image || null,
+      status: c.status || null,
+      startDate: c.startDate || null,
+      endDate: c.endDate || null,
+      prizePool: c.prizePool ?? null,
+      prizeType: c.prizeType || null,
+      lineupCount: c.lineupCount ?? null,
+    })).filter(c => c.id);
   } catch (err) {
-    console.error('Upshot API: getEvents() failed:', err.message);
+    console.error('Upshot API: getContests() failed:', err.message);
+    return [];
+  }
+}
+
+/**
+ * Top-N standings for a contest. Reuses the cached standings fetch.
+ * Returns [{ rank, username, walletAddress, score }] (score is the raw
+ * micro-unit integer; format with /1e6 for display). Best-effort [].
+ */
+export async function getContestTop(contestId, n = 3) {
+  try {
+    const data = await getContestStandings(contestId);
+    const standings = data?.standings || [];
+    return standings.slice(0, n).map((e, i) => ({
+      rank: e.rank ?? i + 1,
+      username: e.user?.username || e.user?.displayName || null,
+      walletAddress: e.user?.walletAddress || null,
+      score: parseInt(e.currentScore || '0', 10),
+    }));
+  } catch (err) {
+    console.error(`Upshot API: getContestTop(${contestId}) failed:`, err.message);
     return [];
   }
 }
@@ -655,6 +673,37 @@ export async function getRaffleDetail(raffleId) {
   } catch (err) {
     console.error(`Upshot API: getRaffleDetail(${raffleId}) failed:`, err.message);
     return null;
+  }
+}
+
+/**
+ * Top-N ticket holders ("Live Leaderboard") for a raffle.
+ *   GET /raffles/{id}/standings → [{ ticketCount, user: { username, ... } }]
+ * The list is already sorted by ticketCount desc. Returns
+ *   [{ rank, username, tickets, chance }]
+ * where tickets is the human count (ticketCount / 1e6) and chance is the share
+ * of totalTickets (0–1), if totalTickets is provided. Best-effort [].
+ */
+export async function getRaffleTop(raffleId, n = 3, totalTickets = null) {
+  try {
+    const res = await fetchRetry(`${RAFFLE_BASE}/raffles/${raffleId}/standings`, { timeout: 12_000 });
+    if (!res.ok) return [];
+    const json = await res.json();
+    const arr = json.data ?? json;
+    if (!Array.isArray(arr)) return [];
+    const total = totalTickets != null ? Number(totalTickets) : null;
+    return arr.slice(0, n).map((e, i) => {
+      const raw = Number(e.ticketCount || 0);
+      return {
+        rank: i + 1,
+        username: e.user?.username || e.user?.displayName || null,
+        tickets: Math.round(raw / 1_000_000),
+        chance: total && total > 0 ? raw / total : null,
+      };
+    });
+  } catch (err) {
+    console.error(`Upshot API: getRaffleTop(${raffleId}) failed:`, err.message);
+    return [];
   }
 }
 
