@@ -123,11 +123,16 @@ export function buildCardPicker(cards, { page = 0 } = {}) {
   if (totalPages > 1) {
     children.push(separator());
     children.push(text(`-# Page ${idx + 1} of ${totalPages} · showing cards ${start + 1}–${start + pageCards.length}`));
+    // custom_id is `mycards_page:<targetPage>:<role>`. The role suffix keeps all
+    // four ids unique even when targets coincide (e.g. on page 1, First and Prev
+    // both point to page 0; near the end, Next and Last both point to the last
+    // page) — Discord rejects the whole message if two custom_ids match. The
+    // handler reads split(':')[1] as the page, so the suffix is inert there.
     children.push(actionRow(
-      button('mycards_page:0', '« First', ButtonStyle.Secondary, { disabled: idx === 0 }),
-      button(`mycards_page:${idx - 1}`, '← Prev', ButtonStyle.Secondary, { disabled: idx === 0 }),
-      button(`mycards_page:${idx + 1}`, 'Next →', ButtonStyle.Secondary, { disabled: idx >= totalPages - 1 }),
-      button(`mycards_page:${totalPages - 1}`, 'Last »', ButtonStyle.Secondary, { disabled: idx >= totalPages - 1 }),
+      button('mycards_page:0:first', '« First', ButtonStyle.Secondary, { disabled: idx === 0 }),
+      button(`mycards_page:${idx - 1}:prev`, '← Prev', ButtonStyle.Secondary, { disabled: idx === 0 }),
+      button(`mycards_page:${idx + 1}:next`, 'Next →', ButtonStyle.Secondary, { disabled: idx >= totalPages - 1 }),
+      button(`mycards_page:${totalPages - 1}:last`, 'Last »', ButtonStyle.Secondary, { disabled: idx >= totalPages - 1 }),
     ));
   }
 

@@ -9,6 +9,19 @@ const BASE = 'https://api-mainnet.upshotcards.net/api/v1';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Browser-like headers for read requests. A bare Node fetch (no User-Agent, no
+// Origin) is an easy bot signal — Upshot sits behind Bunny Shield, which can
+// tarpit/drop those connections (they hang until our AbortSignal fires, showing
+// up as "operation aborted due to timeout"). Sending the same headers the web
+// app does makes server-side reads look like a real client. Can be overridden
+// per call; the write endpoints set their own Origin explicitly.
+const READ_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept': 'application/json',
+  'Origin': process.env.UPSHOT_APP_URL || 'https://upshot.cards',
+  'Referer': (process.env.UPSHOT_APP_URL || 'https://upshot.cards') + '/',
+};
+
 /**
  * GET with retries on transient failures — network/timeout errors, HTTP 429,
  * and 5xx responses. Creates a fresh timeout per attempt and backs off
@@ -24,11 +37,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * already struggling — turning a transient blip into a self-inflicted flood.
  * Use only for idempotent GETs.
  */
-async function fetchRetry(url, { timeout = 10_000, retries = 2 } = {}) {
+async function fetchRetry(url, { timeout = 10_000, retries = 2, headers } = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(timeout) });
+      const res = await fetch(url, {
+        signal: AbortSignal.timeout(timeout),
+        headers: { ...READ_HEADERS, ...headers },
+      });
       if ((res.status === 429 || res.status >= 500) && attempt < retries) {
         const retryAfter = Number(res.headers.get('retry-after'));
         const wait = Number.isFinite(retryAfter) && retryAfter > 0
@@ -167,13 +183,13 @@ export function extractCardId(input) {
 const cardDetailsCache = new Map(); // cardId -> { at, value }
 const CARD_DETAILS_TTL = 30 * 60 * 1000;
 
-export async function getCardDetails(cardId, { retries = 3, fresh = false } = {}) {
+export async function getCardDetails(cardId, { retries = 3, fresh = false, timeout = 15_000 } = {}) {
   const cached = cardDetailsCache.get(cardId);
   if (!fresh && cached && Date.now() - cached.at < CARD_DETAILS_TTL) {
     return cached.value;
   }
   try {
-    const res = await fetchRetry(`${BASE}/cards/${cardId}?include=event,supply`, { timeout: 15_000, retries });
+    const res = await fetchRetry(`${BASE}/cards/${cardId}?include=event,supply`, { timeout, retries });
     if (!res.ok) return null;
     const json = await res.json();
     const card = json.data;
@@ -490,7 +506,11 @@ export async function getPredictableCards(walletAddress) {
 export async function checkCardResolution(cardId) {
   try {
     // Resolution detection must use live event status, not a cached snapshot.
-    const card = await getCardDetails(cardId, { fresh: true });
+    // Fail fast (1 retry, 10s): the auto-resolve sweep runs sequentially over
+    // every open prediction, so the default 3 retries × 15s would let a single
+    // hung/tarpitted card stall the whole batch for ~60s. A card that can't be
+    // reached now is simply rechecked on the next 12h sweep.
+    const card = await getCardDetails(cardId, { fresh: true, retries: 1, timeout: 10_000 });
     if (!card) return { resolved: false, won: null, error: 'card_not_found' };
 
     if (card.eventStatus !== 'RESOLVED') {
