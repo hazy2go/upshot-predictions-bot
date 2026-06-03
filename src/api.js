@@ -416,26 +416,36 @@ function eventDeadlinePassed(details) {
 }
 
 /**
- * Enrich cards with event details and drop any whose deadline has already
- * passed. Runs lookups in bounded concurrent batches — a large wallet can be
- * dozens of cards, so we cap concurrency (not 1-at-a-time: serial chunks of 4
- * were the single biggest chunk of My Cards' cold latency) and use a single
- * retry per card (cached details — including contest cards already resolved by
- * getUserContestLineups — mean repeat opens cost nothing). Cards whose lookup
- * fails are kept (the submit flow rejects expired stragglers as a backstop).
- * Also upgrades each card's name with the canonical one.
+ * Drop any card whose event deadline has already passed. Cards that carry an
+ * embedded `event` (everything from wallet balances) are filtered inline with
+ * NO network call — critical for large wallets (hundreds/thousands of cards;
+ * fetching each would take minutes and trip the API shield). Only cards WITHOUT
+ * an embedded event (contest-lineup cards) fall back to a bounded getCardDetails
+ * lookup. Cards whose lookup fails are kept (the submit flow rejects expired
+ * stragglers as a backstop). Returns { id, name, inContest } entries.
  */
 async function filterOutExpiredCards(cards) {
   const out = [];
+  const needFetch = [];
+
+  for (const c of cards) {
+    if (c.event) {
+      if (!eventDeadlinePassed({ resolvedAt: c.event.resolvedAt, eventDate: c.event.eventDate })) {
+        out.push({ id: c.id, name: c.name, inContest: c.inContest });
+      }
+    } else {
+      needFetch.push(c);
+    }
+  }
+
   const CHUNK = 12;
-  for (let i = 0; i < cards.length; i += CHUNK) {
-    const chunk = cards.slice(i, i + CHUNK);
+  for (let i = 0; i < needFetch.length; i += CHUNK) {
+    const chunk = needFetch.slice(i, i + CHUNK);
     const results = await Promise.allSettled(chunk.map(c => getCardDetails(c.id, { retries: 1 })));
     for (let j = 0; j < chunk.length; j++) {
       const details = results[j].status === 'fulfilled' ? results[j].value : null;
       if (eventDeadlinePassed(details)) continue;
-      if (details?.name) chunk[j].name = details.name;
-      out.push(chunk[j]);
+      out.push({ id: chunk[j].id, name: details?.name || chunk[j].name, inContest: chunk[j].inContest });
     }
   }
   return out;
@@ -456,6 +466,47 @@ async function filterOutExpiredCards(cards) {
 const predictableCardsCache = new Map(); // wallet -> { at, value }
 const PREDICTABLE_CARDS_TTL = 3 * 60 * 1000;
 
+// The unfiltered /cards/balances/{wallet} endpoint is PAGINATED — meta:
+// { total, lastPage, currentPage, perPage }. perPage caps at 100 (200+ returns
+// empty), and there's no owned-only filter. We must page through ALL of it or a
+// large wallet silently loses every card past page 1 (the "My Cards doesn't
+// show my card" bug — a 2,393-entry wallet only ever surfaced its first 20).
+// Returns [cardId, entry] pairs across every page. Bounded concurrency keeps us
+// from firing 100+ requests at the shield at once.
+const BALANCES_PER_PAGE = 100;
+const BALANCES_MAX_PAGES = 60; // safety cap (~6000 entries); log if a wallet exceeds it
+
+async function fetchAllBalancePairs(walletAddress) {
+  const pairsOf = (data) => Array.isArray(data)
+    ? data.map(e => [e?.cardId || e?.card?.id, e])
+    : Object.entries(data || {});
+
+  const page = (p) => fetchRetry(`${BASE}/cards/balances/${walletAddress}?page=${p}&perPage=${BALANCES_PER_PAGE}`, { timeout: 15_000 });
+
+  const first = await page(1);
+  if (!first.ok) return [];
+  const firstJson = await first.json();
+  const out = pairsOf(firstJson.data ?? firstJson);
+
+  let lastPage = firstJson.meta?.lastPage || 1;
+  if (lastPage > BALANCES_MAX_PAGES) {
+    console.warn(`Upshot API: ${walletAddress} has ${firstJson.meta?.total} balance entries (${lastPage} pages); capping at ${BALANCES_MAX_PAGES}.`);
+    lastPage = BALANCES_MAX_PAGES;
+  }
+
+  // Pages 2..lastPage in small concurrent batches.
+  const CHUNK = 6;
+  for (let start = 2; start <= lastPage; start += CHUNK) {
+    const batch = [];
+    for (let p = start; p < start + CHUNK && p <= lastPage; p++) batch.push(p);
+    const results = await Promise.allSettled(batch.map(p => page(p).then(r => r.ok ? r.json() : null)));
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value) out.push(...pairsOf(r.value.data ?? r.value));
+    }
+  }
+  return out;
+}
+
 export async function getPredictableCards(walletAddress) {
   const cached = predictableCardsCache.get(walletAddress);
   if (cached && Date.now() - cached.at < PREDICTABLE_CARDS_TTL) {
@@ -464,26 +515,19 @@ export async function getPredictableCards(walletAddress) {
 
   const byId = new Map();
 
-  // 1. Wallet balances (all cards, no cardId filter).
+  // 1. Wallet balances — ALL pages (the endpoint is paginated; see above). The
+  // balances payload embeds each card's event, so we capture it here and the
+  // deadline filter can use it directly — no per-card detail fetch (a large
+  // wallet is hundreds/thousands of cards; fetching each would take minutes and
+  // hammer the API).
   try {
-    const res = await fetchRetry(`${BASE}/cards/balances/${walletAddress}`, { timeout: 15_000 });
-    if (res.ok) {
-      const json = await res.json();
-      const data = json.data ?? json;
-
-      // Normalize into [cardId, entry] pairs. The filtered endpoint returns an
-      // object keyed by cardId; defend against an array shape too.
-      const pairs = Array.isArray(data)
-        ? data.map(e => [e?.cardId || e?.card?.id, e])
-        : Object.entries(data || {});
-
-      for (const [cardId, entry] of pairs) {
-        if (!cardId || !entry) continue;
-        const claimed = parseInt(entry.claimedQuantity || '0', 10);
-        const unclaimed = parseInt(entry.unclaimedQuantity || '0', 10);
-        if (claimed + unclaimed <= 0) continue;
-        byId.set(cardId, { id: cardId, name: entry.card?.name || cardId, inContest: false });
-      }
+    for (const [cardId, entry] of await fetchAllBalancePairs(walletAddress)) {
+      if (!cardId || !entry) continue;
+      const claimed = parseInt(entry.claimedQuantity || '0', 10);
+      const unclaimed = parseInt(entry.unclaimedQuantity || '0', 10);
+      if (claimed + unclaimed <= 0) continue;
+      const event = entry.card?.event || entry.card?.outcome?.event || null;
+      byId.set(cardId, { id: cardId, name: entry.card?.name || cardId, inContest: false, event });
     }
   } catch (err) {
     console.error(`Upshot API: getPredictableCards balances(${walletAddress}) failed:`, err.message);
