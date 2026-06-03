@@ -89,7 +89,7 @@ export const CARDS_PER_PAGE = 25;
  * cards: [{ id, name, inContest }] — already filtered (no taken cards).
  * Pick a card to open its detail view; predictions are made from there.
  */
-export function buildCardPicker(cards, { page = 0 } = {}) {
+export function buildCardPicker(cards, { page = 0, query = null } = {}) {
   const totalPages = Math.max(1, Math.ceil(cards.length / CARDS_PER_PAGE));
   const idx = Math.max(0, Math.min(page, totalPages - 1));
   const start = idx * CARDS_PER_PAGE;
@@ -98,8 +98,23 @@ export function buildCardPicker(cards, { page = 0 } = {}) {
   const children = [];
 
   children.push(text('## 📇 Your Predictable Cards'));
-  children.push(text(`-# Pick a card to see its details, then predict. Cards already in an open prediction are hidden. (**${cards.length}** card${cards.length === 1 ? '' : 's'})`));
+  if (query) {
+    children.push(text(`-# 🔍 Search: **${query}** — ${cards.length} match${cards.length === 1 ? '' : 'es'}. Cards in an open prediction are hidden.`));
+  } else {
+    children.push(text(`-# Pick a card to see its details, then predict. Cards already in an open prediction are hidden. (**${cards.length}** card${cards.length === 1 ? '' : 's'})`));
+  }
   children.push(separator());
+
+  // No matches (e.g. a search that found nothing) — a StringSelect with 0
+  // options is rejected by Discord, so show a message + actions instead.
+  if (cards.length === 0) {
+    children.push(text(query ? `No cards match **${query}**.` : 'No cards to show.'));
+    children.push(actionRow(
+      button('mycards_search', '🔍 Search again', ButtonStyle.Primary),
+      ...(query ? [button('mycards_search_clear', '✖ Show all', ButtonStyle.Secondary)] : []),
+    ));
+    return { components: [container(Colors.Leaderboard, children)], flags: (1 << 15) | (1 << 6) };
+  }
 
   const options = pageCards.map(c => ({
     label: c.name.length > 100 ? c.name.slice(0, 97) + '...' : c.name,
@@ -136,6 +151,13 @@ export function buildCardPicker(cards, { page = 0 } = {}) {
       button(`mycards_page:${totalPages - 1}:last`, 'Last »', ButtonStyle.Secondary, { disabled: idx >= totalPages - 1 }),
     ));
   }
+
+  // Search controls: search always available; clear only shown while filtering.
+  children.push(separator());
+  children.push(actionRow(
+    button('mycards_search', '🔍 Search', ButtonStyle.Primary),
+    ...(query ? [button('mycards_search_clear', '✖ Show all', ButtonStyle.Secondary)] : []),
+  ));
 
   return {
     components: [container(Colors.Leaderboard, children)],

@@ -1232,6 +1232,14 @@ function scheduleCacheEvict(cache, tag, userId, ms = 10 * 60 * 1000) {
   cacheEvictTimers.set(key, handle);
 }
 
+// The cards currently shown in the picker = the full available list filtered by
+// the active search query (case-insensitive name match), or all of them.
+function pickerView(cached) {
+  if (!cached?.cards) return [];
+  const q = cached.query?.trim().toLowerCase();
+  return q ? cached.cards.filter(c => (c.name || '').toLowerCase().includes(q)) : cached.cards;
+}
+
 async function handleCardPicker(interaction) {
   const profile = getUpshotProfile(interaction.user.id);
   if (!profile?.wallet_address) {
@@ -1256,7 +1264,7 @@ async function handleCardPicker(interaction) {
     return interaction.editReply(buildCardPickerEmpty());
   }
 
-  cardPickerCache.set(interaction.user.id, { cards: available, page: 0 });
+  cardPickerCache.set(interaction.user.id, { cards: available, page: 0, query: null });
   scheduleCacheEvict(cardPickerCache, 'picker', interaction.user.id);
 
   return interaction.editReply(buildCardPicker(available, { page: 0 }));
@@ -1270,7 +1278,48 @@ async function handleCardPage(interaction, page) {
     return handleCardPicker(interaction);
   }
   cached.page = page;
-  return interaction.update(buildCardPicker(cached.cards, { page }));
+  return interaction.update(buildCardPicker(pickerView(cached), { page, query: cached.query }));
+}
+
+// 🔍 Search button → modal asking for a card-name query.
+async function handleMyCardSearch(interaction) {
+  const modal = new ModalBuilder()
+    .setCustomId('mycards_search_modal')
+    .setTitle('Search Your Cards');
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('query')
+        .setLabel('Card name')
+        .setPlaceholder('e.g. Monaco, World Cup, Leclerc')
+        .setStyle(TextInputStyle.Short)
+        .setMaxLength(100)
+        .setRequired(true),
+    ),
+  );
+  return interaction.showModal(modal);
+}
+
+// Search modal submit → filter the cached card list and re-render the picker.
+async function handleMyCardSearchSubmit(interaction) {
+  const cached = cardPickerCache.get(interaction.user.id);
+  if (!cached?.cards?.length) {
+    return handleCardPicker(interaction); // cache expired — rebuild (full list)
+  }
+  cached.query = interaction.fields.getTextInputValue('query')?.trim() || null;
+  cached.page = 0;
+  return interaction.update(buildCardPicker(pickerView(cached), { page: 0, query: cached.query }));
+}
+
+// ✖ Show all → drop the search filter.
+async function handleMyCardSearchClear(interaction) {
+  const cached = cardPickerCache.get(interaction.user.id);
+  if (!cached?.cards?.length) {
+    return handleCardPicker(interaction);
+  }
+  cached.query = null;
+  cached.page = 0;
+  return interaction.update(buildCardPicker(cached.cards, { page: 0 }));
 }
 
 // My Cards select → show the card detail view (image, marketplace URL, card ID)
@@ -1334,7 +1383,7 @@ async function handleCardDetailBack(interaction) {
   const view = cardViewCache.get(interaction.user.id);
   const page = view?.page ?? cached.page ?? 0;
   cached.page = page;
-  return interaction.update(buildCardPicker(cached.cards, { page }));
+  return interaction.update(buildCardPicker(pickerView(cached), { page, query: cached.query }));
 }
 
 // Detail view → Predict: open the prediction modal for the viewed card.
@@ -2557,6 +2606,14 @@ async function handleButton(interaction) {
     return handleCardPage(interaction, Number.isNaN(page) ? 0 : page);
   }
 
+  // My Cards search
+  if (interaction.customId === 'mycards_search') {
+    return handleMyCardSearch(interaction);
+  }
+  if (interaction.customId === 'mycards_search_clear') {
+    return handleMyCardSearchClear(interaction);
+  }
+
   // Card detail view actions
   if (interaction.customId === 'carddetail_back') {
     return handleCardDetailBack(interaction);
@@ -3639,6 +3696,9 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isModalSubmit()) {
       if (interaction.customId === 'link_profile_modal') {
         return await handleLinkProfileModalSubmit(interaction);
+      }
+      if (interaction.customId === 'mycards_search_modal') {
+        return await handleMyCardSearchSubmit(interaction);
       }
       if (interaction.customId === 'predict_url_modal') {
         return await handlePredictUrlModalSubmit(interaction);
