@@ -278,7 +278,87 @@ export function buildEventList(events) {
     children.push(text(lines.join('\n').slice(0, 3800)));
     if (events.length > 40) children.push(text(`-# …and ${events.length - 40} more`));
   }
-  return { components: [container(Colors.Stats, children)], flags: (1 << 15) | (1 << 6) };
+  return { components: [container(Colors.Stats, children)], flags: 1 << 15 };
+}
+
+// ── Lucky Shots (raffles) announcements ─────────────────────
+//
+// `raffle` is the normalized shape from api.getRaffles(): { id, name,
+// description, image, startDate, endDate, status, rewardType, totalTickets, ... }
+
+const RAFFLE_URL = (id) => `https://upshot.cards/lucky-shots/${id}`;
+
+function raffleReward(raffle) {
+  const qty = raffle.rewards?.reduce((n, r) => n + (Number(r.quantity) || 0), 0) || 0;
+  const type = (raffle.rewardType || '').toLowerCase();
+  if (qty && type) return `${qty} ${type}`;
+  if (raffle.rewardType) return raffle.rewardType;
+  return null;
+}
+
+export function buildRaffleLive(raffle) {
+  const children = [];
+  children.push(text('## 🎰 Lucky Shot Live'));
+  children.push(text(`### ${(raffle.name || 'Lucky Shot').replace(/[\r\n]+/g, ' ')}`));
+
+  const img = eventImage(raffle.image);
+  if (img) children.push({ type: CT.MediaGallery, items: [{ media: { url: img } }] });
+
+  if (raffle.description) children.push(text(raffle.description.slice(0, 500)));
+
+  const meta = [];
+  const reward = raffleReward(raffle);
+  if (reward) meta.push(`🎁 **Prize:** ${reward}`);
+  const endMs = raffle.endDate ? Date.parse(raffle.endDate) : NaN;
+  if (Number.isFinite(endMs)) meta.push(`🕒 **Ends:** <t:${Math.floor(endMs / 1000)}:F> (<t:${Math.floor(endMs / 1000)}:R>)`);
+  if (meta.length) { children.push(separator()); children.push(text(meta.join('\n'))); }
+
+  children.push(text('-# Grab your shot before it closes!'));
+  children.push(actionRow(linkButton(RAFFLE_URL(raffle.id), '🎟 Enter on Upshot')));
+
+  return { components: [container(Colors.Hit, children)], flags: 1 << 15 };
+}
+
+export function buildRaffleWinner(raffle, winner) {
+  const children = [];
+  children.push(text('## 🏆 Lucky Shot Winner'));
+  children.push(text(`### ${(raffle.name || 'Lucky Shot').replace(/[\r\n]+/g, ' ')}`));
+
+  const img = eventImage(raffle.image);
+  if (img) children.push({ type: CT.MediaGallery, items: [{ media: { url: img } }] });
+
+  children.push(separator());
+  if (winner?.username || winner?.walletAddress) {
+    const reward = raffleReward(raffle);
+    const handle = winner.username ? `**${winner.username}**` : 'a lucky member';
+    const wallet = winner.walletAddress ? `\n\`${winner.walletAddress}\`` : '';
+    children.push(text(`🎉 Congratulations to ${handle}${reward ? ` — winner of **${reward}**` : ''}!${wallet}`));
+  } else {
+    children.push(text('✅ This Lucky Shot has been drawn.'));
+  }
+  children.push(actionRow(linkButton(RAFFLE_URL(raffle.id), '🔗 View on Upshot')));
+
+  return { components: [container(Colors.Leaderboard, children)], flags: 1 << 15 };
+}
+
+// Public list of current raffles for the admin `/luckyshots list` command.
+export function buildRaffleList(raffles) {
+  const order = { LIVE: 0, READY: 1, ENDED: 2, DRAWN: 3 };
+  const sorted = [...raffles].sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
+  const children = [];
+  children.push(text(`## 🎰 Lucky Shots (${raffles.length})`));
+  if (!raffles.length) {
+    children.push(text('-# No raffles returned by the API right now.'));
+  } else {
+    const dot = { LIVE: '🟢', READY: '🔜', ENDED: '⏳', DRAWN: '🏆' };
+    const lines = sorted.slice(0, 40).map(r => {
+      const when = r.endDate && Number.isFinite(Date.parse(r.endDate)) ? ` · ends <t:${Math.floor(Date.parse(r.endDate) / 1000)}:R>` : '';
+      return `${dot[r.status] || '•'} **${(r.name || r.id).slice(0, 70)}** \`${r.status || '?'}\`${r.status === 'LIVE' || r.status === 'READY' ? when : ''}`;
+    });
+    children.push(text(lines.join('\n').slice(0, 3800)));
+    if (sorted.length > 40) children.push(text(`-# …and ${sorted.length - 40} more`));
+  }
+  return { components: [container(Colors.Stats, children)], flags: 1 << 15 };
 }
 
 export function buildCardPickerEmpty() {

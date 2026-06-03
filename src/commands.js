@@ -97,6 +97,17 @@ export const commands = [
         .setDescription('List current Upshot events and their status (private)')),
 
   new SlashCommandBuilder()
+    .setName('luckyshots')
+    .setDescription('Upshot Lucky Shots (raffle) announcements (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addSubcommand(sub =>
+      sub.setName('check')
+        .setDescription('Run a Lucky Shots check now — announce new live raffles and winners'))
+    .addSubcommand(sub =>
+      sub.setName('list')
+        .setDescription('Post the current Lucky Shots and their status to the channel')),
+
+  new SlashCommandBuilder()
     .setName('refresh')
     .setDescription('Re-sync prediction embeds to show updated buttons (admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
@@ -174,6 +185,16 @@ export const commands = [
         .addChannelOption(opt =>
           opt.setName('channel')
             .setDescription('The events announcement channel')
+            .addChannelTypes(ChannelType.GuildText)
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('luckyshots-channel')
+        .setDescription('Set the channel for Lucky Shots (raffle) live/winner announcements')
+        .addChannelOption(opt =>
+          opt.setName('channel')
+            .setDescription('The Lucky Shots announcement channel')
             .addChannelTypes(ChannelType.GuildText)
             .setRequired(true)
         )

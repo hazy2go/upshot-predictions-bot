@@ -366,6 +366,17 @@ export function setEventWatchState(guildId, state) {
   db.prepare("INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)").run(`events_watch_${guildId}`, JSON.stringify(state));
 }
 
+// Lucky Shots (raffle) watcher state — same shape/semantics as the event watcher.
+// { [raffleId]: { status, announcedLive, announcedDrawn } }; null until seeded.
+export function getRaffleWatchState(guildId) {
+  const row = db.prepare("SELECT value FROM bot_state WHERE key = ?").get(`raffles_watch_${guildId}`);
+  return row?.value ? JSON.parse(row.value) : null;
+}
+
+export function setRaffleWatchState(guildId, state) {
+  db.prepare("INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)").run(`raffles_watch_${guildId}`, JSON.stringify(state));
+}
+
 /**
  * Find predictions stuck in 'awaiting_images' state longer than the timeout.
  * Used on bot startup to recover from restarts during image upload windows.

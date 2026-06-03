@@ -29,6 +29,7 @@ import {
   upsertCommunityVote, getCommunityVoteSummary,
   getPendingVerificationPredictions, getUnratedVerifiedPredictions,
   getEventWatchState, setEventWatchState,
+  getRaffleWatchState, setRaffleWatchState,
 } from './database.js';
 
 import { rateWithAI } from './nim.js';
@@ -40,6 +41,7 @@ import {
   buildContestOverview, buildContestLineupPage,
   buildCardPicker, buildCardPickerEmpty, buildCardDetail,
   buildEventLive, buildEventResolved, buildEventList,
+  buildRaffleLive, buildRaffleWinner, buildRaffleList,
 } from './components.js';
 
 import { commands } from './commands.js';
@@ -54,7 +56,7 @@ import {
   getCardDetails, checkCardOwnership, checkCardResolution,
   getSeasonRank, getUserContestLineups, getPredictableCards,
   getUserProfile, getUserPacks, transferPack, refreshUpshotAccessToken,
-  getEvents,
+  getEvents, getRaffles, getRaffleDetail,
 } from './api.js';
 
 // ── Client ──────────────────────────────────────────────────
@@ -265,6 +267,10 @@ function getLeaderboardChannelId(guildId) {
 
 function getEventsChannelId(guildId) {
   return cfg(guildId, 'events_channel', 'EVENTS_CHANNEL_ID');
+}
+
+function getLuckyShotsChannelId(guildId) {
+  return cfg(guildId, 'luckyshots_channel', 'LUCKYSHOTS_CHANNEL_ID');
 }
 
 function getAdminRoleId(guildId) {
@@ -1653,6 +1659,11 @@ async function handleSetup(interaction) {
       const channel = interaction.options.getChannel('channel', true);
       setConfig(guildId, 'events_channel', channel.id);
       return interaction.reply({ content: `✅ Events channel set to <#${channel.id}>. New live events and results will be announced there (first sync seeds silently — no backlog spam).`, flags: ['Ephemeral'] });
+    }
+    case 'luckyshots-channel': {
+      const channel = interaction.options.getChannel('channel', true);
+      setConfig(guildId, 'luckyshots_channel', channel.id);
+      return interaction.reply({ content: `✅ Lucky Shots channel set to <#${channel.id}>. New live raffles and winners will be announced there (first sync seeds silently).`, flags: ['Ephemeral'] });
     }
     case 'admin-role': {
       const role = interaction.options.getRole('role', true);
@@ -3070,13 +3081,14 @@ async function safeRunEventWatch() {
 }
 
 // Admin /events command: `check` runs a watch pass now (announces to the events
-// channel), `list` shows the current events privately.
+// channel), `list` posts the current events publicly to the channel.
 async function handleEventsCommand(interaction) {
   if (!isAdmin(interaction.member)) {
     return interaction.reply({ content: '❌ Admins only.', flags: ['Ephemeral'] });
   }
   const sub = interaction.options.getSubcommand();
-  await interaction.deferReply({ flags: ['Ephemeral'] });
+  // `list` posts publicly to the channel; `check` is private admin feedback.
+  await interaction.deferReply(sub === 'list' ? {} : { flags: ['Ephemeral'] });
 
   if (sub === 'list') {
     const events = await getEvents();
@@ -3094,6 +3106,120 @@ async function handleEventsCommand(interaction) {
   const channelSet = !!getEventsChannelId(interaction.guildId);
   const note = channelSet ? '' : '\n-# ⚠️ No events channel set — run `/setup events-channel` so announcements have somewhere to post.';
   return interaction.editReply({ content: `✅ Checked **${r.total}** event(s) — announced **${r.newLive}** new live, **${r.resolved}** resolved.${note}` });
+}
+
+// ── Lucky Shots (raffle) watcher ─────────────────────────────
+//
+// Polls Upshot's /raffles endpoint and announces, in the configured Lucky Shots
+// channel, when a raffle goes LIVE ("🎰 Lucky Shot Live — ends …") and when it's
+// DRAWN ("🏆 Winner — @user"). The DRAWN list holds ~20 historical raffles, so a
+// winner is announced ONLY for a raffle whose live→drawn transition we actually
+// witnessed — a previously-unseen raffle that's already DRAWN is seeded silently
+// (it may just be rotating into the list, not freshly won). First run for a
+// guild seeds the whole backlog silently. Mirrors the event watcher.
+
+const RAFFLE_WATCH_INTERVAL = 30 * 60 * 1000; // 30 min — Lucky Shots are time-sensitive
+let raffleWatchTimer = null;
+
+async function runRaffleWatch(guildId, { announce = true } = {}) {
+  // Pull the statuses we care about and merge (a raffle appears under one).
+  const lists = await Promise.all([getRaffles('READY'), getRaffles('LIVE'), getRaffles('ENDED'), getRaffles('DRAWN')]);
+  const byId = new Map();
+  for (const list of lists) for (const r of list) if (!byId.has(r.id)) byId.set(r.id, r);
+  const raffles = [...byId.values()];
+  if (!raffles.length) return { ok: false, total: 0, live: 0, winners: 0, seeded: false };
+
+  const prev = getRaffleWatchState(guildId);
+  const firstRun = prev === null;
+  const state = prev || {};
+  const channelId = getLuckyShotsChannelId(guildId);
+  const channel = announce && !firstRun && channelId ? await safeGetChannel(channelId) : null;
+
+  let live = 0;
+  let winners = 0;
+
+  for (const raffle of raffles) {
+    const isNew = !state[raffle.id];
+    if (isNew) {
+      // Seed flags so we never announce the CURRENT state, only future
+      // transitions: suppress live unless it's a genuinely-new LIVE raffle on a
+      // normal run; always suppress winners for raffles first seen already DRAWN.
+      state[raffle.id] = {
+        status: raffle.status,
+        announcedLive: raffle.status === 'ENDED' || raffle.status === 'DRAWN' || (firstRun && raffle.status === 'LIVE'),
+        announcedDrawn: raffle.status === 'DRAWN',
+      };
+    }
+    const seen = state[raffle.id];
+
+    if (raffle.status === 'LIVE' && !seen.announcedLive) {
+      if (channel) {
+        await channel.send(buildRaffleLive(raffle)).then(() => { live++; })
+          .catch(e => console.error(`Lucky Shots: live announce failed for ${raffle.id}:`, e.message));
+      }
+      seen.announcedLive = true;
+    }
+
+    if (raffle.status === 'DRAWN' && !seen.announcedDrawn) {
+      if (channel) {
+        const detail = await getRaffleDetail(raffle.id);
+        await channel.send(buildRaffleWinner(raffle, detail?.winner || null)).then(() => { winners++; })
+          .catch(e => console.error(`Lucky Shots: winner announce failed for ${raffle.id}:`, e.message));
+      }
+      seen.announcedDrawn = true;
+    }
+
+    seen.status = raffle.status;
+  }
+
+  setRaffleWatchState(guildId, state);
+  if (firstRun) {
+    console.log(`Lucky Shots: seeded ${raffles.length} raffle(s) silently for ${guildId}`);
+  } else if (live || winners) {
+    console.log(`Lucky Shots: announced ${live} live, ${winners} winner(s)`);
+  }
+  return { ok: true, total: raffles.length, live, winners, seeded: firstRun };
+}
+
+async function safeRunRaffleWatch() {
+  const guildId = process.env.GUILD_ID;
+  if (guildId) {
+    try {
+      await runRaffleWatch(guildId);
+    } catch (err) {
+      console.error('Lucky Shots: fatal error:', err.message);
+    }
+  }
+  raffleWatchTimer = setTimeout(safeRunRaffleWatch, RAFFLE_WATCH_INTERVAL);
+}
+
+// Admin /luckyshots command: `check` runs a watch pass now, `list` posts the
+// current raffles publicly to the channel.
+async function handleLuckyShotsCommand(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admins only.', flags: ['Ephemeral'] });
+  }
+  const sub = interaction.options.getSubcommand();
+  await interaction.deferReply(sub === 'list' ? {} : { flags: ['Ephemeral'] });
+
+  if (sub === 'list') {
+    const raffles = [...new Map((await Promise.all(
+      ['READY', 'LIVE', 'ENDED', 'DRAWN'].map(s => getRaffles(s))
+    )).flat().map(r => [r.id, r])).values()];
+    return interaction.editReply(buildRaffleList(raffles));
+  }
+
+  // sub === 'check'
+  const r = await runRaffleWatch(interaction.guildId, { announce: true });
+  if (!r.ok) {
+    return interaction.editReply({ content: '⚠️ Couldn\'t reach the Upshot raffles API just now. If this persists on the Pi, the shield is blocking it — set `UPSHOT_RAFFLE_BASE` to the sniper proxy.' });
+  }
+  if (r.seeded) {
+    return interaction.editReply({ content: `✅ First sync done — seeded **${r.total}** raffle(s) silently. From now on new live Lucky Shots and winners will post to the channel.` });
+  }
+  const channelSet = !!getLuckyShotsChannelId(interaction.guildId);
+  const note = channelSet ? '' : '\n-# ⚠️ No Lucky Shots channel set — run `/setup luckyshots-channel`.';
+  return interaction.editReply({ content: `✅ Checked **${r.total}** raffle(s) — announced **${r.live}** live, **${r.winners}** winner(s).${note}` });
 }
 
 // ── Tier roles (cumulative top-10 leaderboard tiers) ─────────
@@ -3242,6 +3368,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'pastleaderboard': return await handlePastLeaderboard(interaction);
         case 'mycontests': return await handleMyContests(interaction);
         case 'events': return await handleEventsCommand(interaction);
+        case 'luckyshots': return await handleLuckyShotsCommand(interaction);
         case 'refresh': return await handleRefreshCommand(interaction);
         case 'resolve': return await handleResolveCommand(interaction);
         case 'leaderboard': return await handleLeaderboardCommand(interaction);
@@ -3352,6 +3479,10 @@ client.once(Events.ClientReady, async () => {
   // The first run seeds the existing event backlog silently.
   eventWatchTimer = setTimeout(safeRunEventWatch, 90_000);
   console.log(`   Event watch: first check in 90s, then every 60min`);
+
+  // Start the Lucky Shots (raffle) watcher (first run after 2 min, then 30 min).
+  raffleWatchTimer = setTimeout(safeRunRaffleWatch, 120_000);
+  console.log(`   Lucky Shots watch: first check in 2 min, then every 30min`);
 
   // Keep the Upshot token fresh hands-off: the access token lives ~15h and the
   // refresh token is a rotating 7-day sliding window, so a check every 6h keeps
