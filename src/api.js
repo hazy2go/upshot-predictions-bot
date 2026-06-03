@@ -12,18 +12,29 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /**
  * GET with retries on transient failures — network/timeout errors, HTTP 429,
  * and 5xx responses. Creates a fresh timeout per attempt and backs off
- * exponentially with jitter (≈250ms, 500ms, 1s, capped at 2s). Non-transient
- * responses (e.g. 404) are returned immediately for the caller to handle; if
- * every attempt throws, the last error is rethrown so the existing try/catch
- * blocks degrade gracefully. Use only for idempotent GETs.
+ * exponentially with jitter (≈250ms, 500ms, capped at 2s). When the server
+ * sends a Retry-After header on a 429, that wins (capped at 5s) so we don't
+ * hammer a rate-limited API. Non-transient responses (e.g. 404) are returned
+ * immediately for the caller to handle; if every attempt throws, the last error
+ * is rethrown so the existing try/catch blocks degrade gracefully.
+ *
+ * Default retries kept low (2) on purpose: these GETs fan out widely (a My
+ * Cards open touches dozens of cards + every live contest), and an aggressive
+ * retry count multiplies request volume against the API exactly when it's
+ * already struggling — turning a transient blip into a self-inflicted flood.
+ * Use only for idempotent GETs.
  */
-async function fetchRetry(url, { timeout = 10_000, retries = 3 } = {}) {
+async function fetchRetry(url, { timeout = 10_000, retries = 2 } = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(timeout) });
       if ((res.status === 429 || res.status >= 500) && attempt < retries) {
-        await sleep(Math.min(2000, 250 * 2 ** attempt) + Math.random() * 100);
+        const retryAfter = Number(res.headers.get('retry-after'));
+        const wait = Number.isFinite(retryAfter) && retryAfter > 0
+          ? Math.min(5000, retryAfter * 1000)
+          : Math.min(2000, 250 * 2 ** attempt) + Math.random() * 100;
+        await sleep(wait);
         continue;
       }
       return res;
@@ -34,6 +45,71 @@ async function fetchRetry(url, { timeout = 10_000, retries = 3 } = {}) {
     }
   }
   throw lastErr;
+}
+
+// ── Live-contest data caches (shared across ALL users) ───────────────────────
+//
+// The LIVE-contest list and each contest's standings are GLOBAL — identical for
+// every member. Yet every cold "My Cards" tap (checkCardInContests +
+// getUserContestLineups → getPredictableCards) used to re-fetch the full list
+// and every contest's standings from scratch. With N members tapping at once,
+// that's N × (1 + #liveContests) requests in a burst — enough to trip Upshot's
+// rate limiting, which made fetchRetry back off and retry, which slowed things
+// down for everyone. A short TTL plus in-flight de-duplication collapses a
+// concurrent stampede into a single shared fetch.
+const LIVE_CONTESTS_TTL = 60_000;
+const STANDINGS_TTL = 60_000;
+let _liveContests = null;            // { at, value: contest[] }
+let _liveContestsInFlight = null;    // Promise<contest[]>
+const _standingsCache = new Map();   // contestId -> { at, value: {standings,totalLineups} }
+const _standingsInFlight = new Map(); // contestId -> Promise
+
+// Live contests, deduped and cached. Returns [] on failure (never throws).
+async function getLiveContests() {
+  if (_liveContests && Date.now() - _liveContests.at < LIVE_CONTESTS_TTL) {
+    return _liveContests.value;
+  }
+  if (_liveContestsInFlight) return _liveContestsInFlight;
+  _liveContestsInFlight = (async () => {
+    // NOTE: ?status=LIVE upstream filter is unreliable — returns only a subset
+    // of LIVE contests. Fetch all and filter client-side.
+    const res = await fetchRetry(`${BASE}/contests`, { timeout: 10_000 });
+    if (!res.ok) return [];
+    const json = await res.json();
+    const all = json.data || json;
+    return Array.isArray(all) ? all.filter(c => c.status === 'LIVE') : [];
+  })().catch((err) => {
+    console.error('Upshot API: getLiveContests failed:', err.message);
+    return [];
+  });
+  try {
+    const value = await _liveContestsInFlight;
+    if (value.length) _liveContests = { at: Date.now(), value };
+    return value;
+  } finally {
+    _liveContestsInFlight = null;
+  }
+}
+
+// One contest's standings, deduped and cached. Returns null on failure.
+async function getContestStandings(contestId) {
+  const cached = _standingsCache.get(contestId);
+  if (cached && Date.now() - cached.at < STANDINGS_TTL) return cached.value;
+  if (_standingsInFlight.has(contestId)) return _standingsInFlight.get(contestId);
+  const p = (async () => {
+    const sRes = await fetchRetry(`${BASE}/contests/${contestId}/standings`, { timeout: 15_000 });
+    if (!sRes.ok) return null;
+    const sJson = await sRes.json();
+    return { standings: sJson.data?.standings || [], totalLineups: sJson.data?.totalLineups || 0 };
+  })().catch(() => null);
+  _standingsInFlight.set(contestId, p);
+  try {
+    const value = await p;
+    if (value) _standingsCache.set(contestId, { at: Date.now(), value });
+    return value;
+  } finally {
+    _standingsInFlight.delete(contestId);
+  }
 }
 
 /**
@@ -177,38 +253,27 @@ export async function checkCardOwnership(walletAddress, cardId) {
  */
 async function checkCardInContests(walletAddress, cardId) {
   try {
-    // NOTE: ?status=LIVE upstream filter is unreliable — returns only a subset
-    // of LIVE contests. Fetch all and filter client-side.
-    const res = await fetchRetry(`${BASE}/contests`, { timeout: 10_000 });
-    if (!res.ok) return false;
-    const json = await res.json();
-    const all = json.data || json;
-    if (!Array.isArray(all)) return false;
-    const contests = all.filter(c => c.status === 'LIVE');
+    const contests = await getLiveContests();
+    if (!contests.length) return false;
 
     const lowerWallet = walletAddress.toLowerCase();
 
-    // Check each live contest's standings
-    for (const contest of contests) {
-      try {
-        const sRes = await fetchRetry(`${BASE}/contests/${contest.id}/standings`, { timeout: 10_000 });
-        if (!sRes.ok) continue;
-        const sJson = await sRes.json();
-        const standings = sJson.data?.standings || [];
-
-        for (const entry of standings) {
-          if (entry.user?.walletAddress?.toLowerCase() === lowerWallet) {
-            if (entry.lineup?.cardIds?.includes(cardId)) {
-              return true;
-            }
+    // Scan all live contests' standings in parallel (shared cache makes repeat
+    // scans free) and stop as soon as the card turns up in the user's lineup.
+    const found = await Promise.allSettled(
+      contests.map(async (contest) => {
+        const data = await getContestStandings(contest.id);
+        for (const entry of (data?.standings || [])) {
+          if (entry.user?.walletAddress?.toLowerCase() === lowerWallet
+              && entry.lineup?.cardIds?.includes(cardId)) {
+            return true;
           }
         }
-      } catch {
-        continue; // skip this contest on error
-      }
-    }
+        return false;
+      })
+    );
 
-    return false;
+    return found.some(r => r.status === 'fulfilled' && r.value);
   } catch (err) {
     console.error(`Upshot API: checkCardInContests failed:`, err.message);
     return false;
@@ -221,22 +286,17 @@ async function checkCardInContests(walletAddress, cardId) {
  */
 export async function getUserContestLineups(walletAddress) {
   try {
-    const res = await fetchRetry(`${BASE}/contests`, { timeout: 10_000 });
-    if (!res.ok) return [];
-    const json = await res.json();
-    const all = json.data || json;
-    if (!Array.isArray(all)) return [];
-    const contests = all.filter(c => c.status === 'LIVE');
+    const contests = await getLiveContests();
+    if (!contests.length) return [];
 
     const lowerWallet = walletAddress.toLowerCase();
 
-    // Fetch all contest standings in parallel
+    // Fetch all contest standings in parallel (shared cache + in-flight dedup).
     const standingsResults = await Promise.allSettled(
       contests.map(async (contest) => {
-        const sRes = await fetchRetry(`${BASE}/contests/${contest.id}/standings`, { timeout: 15_000 });
-        if (!sRes.ok) return null;
-        const sJson = await sRes.json();
-        return { contest, standings: sJson.data?.standings || [], totalLineups: sJson.data?.totalLineups || 0 };
+        const data = await getContestStandings(contest.id);
+        if (!data) return null;
+        return { contest, standings: data.standings, totalLineups: data.totalLineups };
       })
     );
 
@@ -258,16 +318,14 @@ export async function getUserContestLineups(walletAddress) {
 
     if (allEntries.length === 0) return [];
 
-    // Fetch all card names in parallel (batch)
+    // Resolve card names via getCardDetails so the lookups land in the shared
+    // card cache — the deadline filter (filterOutExpiredCards) then reuses them
+    // instead of fetching every contest card a second time.
     const cardNames = new Map();
     const cardFetches = await Promise.allSettled(
       [...allCardIds].map(async (cardId) => {
-        const cRes = await fetchRetry(`${BASE}/cards/${cardId}`, { timeout: 10_000 });
-        if (cRes.ok) {
-          const name = (await cRes.json()).data?.name || cardId;
-          return { cardId, name };
-        }
-        return { cardId, name: cardId };
+        const details = await getCardDetails(cardId, { retries: 1 });
+        return { cardId, name: details?.name || cardId };
       })
     );
     for (const r of cardFetches) {
@@ -318,15 +376,17 @@ function eventDeadlinePassed(details) {
 
 /**
  * Enrich cards with event details and drop any whose deadline has already
- * passed. Runs lookups in small concurrent batches to stay gentle on the API —
- * a large wallet can be dozens of cards, so we cap concurrency and use a single
- * retry per card (cached details mean repeat opens cost nothing). Cards whose
- * lookup fails are kept (the submit flow rejects expired stragglers as a
- * backstop). Also upgrades each card's name with the canonical one.
+ * passed. Runs lookups in bounded concurrent batches — a large wallet can be
+ * dozens of cards, so we cap concurrency (not 1-at-a-time: serial chunks of 4
+ * were the single biggest chunk of My Cards' cold latency) and use a single
+ * retry per card (cached details — including contest cards already resolved by
+ * getUserContestLineups — mean repeat opens cost nothing). Cards whose lookup
+ * fails are kept (the submit flow rejects expired stragglers as a backstop).
+ * Also upgrades each card's name with the canonical one.
  */
 async function filterOutExpiredCards(cards) {
   const out = [];
-  const CHUNK = 4;
+  const CHUNK = 12;
   for (let i = 0; i < cards.length; i += CHUNK) {
     const chunk = cards.slice(i, i + CHUNK);
     const results = await Promise.allSettled(chunk.map(c => getCardDetails(c.id, { retries: 1 })));
