@@ -505,6 +505,10 @@ const PREDICTABLE_CARDS_TTL = 3 * 60 * 1000;
 const BALANCES_PER_PAGE = 100;
 const BALANCES_MAX_PAGES = 60; // safety cap (~6000 entries); log if a wallet exceeds it
 
+// Returns { pairs, complete }. `complete` is false if page 1 failed or any
+// later page errored — callers use it to avoid CACHING a partial list (which
+// would otherwise pin "fewer cards than you own" for the whole TTL). A capped
+// (too-many-pages) wallet still counts as complete: we intentionally stop there.
 async function fetchAllBalancePairs(walletAddress) {
   const pairsOf = (data) => Array.isArray(data)
     ? data.map(e => [e?.cardId || e?.card?.id, e])
@@ -513,9 +517,10 @@ async function fetchAllBalancePairs(walletAddress) {
   const page = (p) => fetchRetry(`${BASE}/cards/balances/${walletAddress}?page=${p}&perPage=${BALANCES_PER_PAGE}`, { timeout: 15_000 });
 
   const first = await page(1);
-  if (!first.ok) return [];
+  if (!first.ok) return { pairs: [], complete: false };
   const firstJson = await first.json();
   const out = pairsOf(firstJson.data ?? firstJson);
+  let complete = true;
 
   let lastPage = firstJson.meta?.lastPage || 1;
   if (lastPage > BALANCES_MAX_PAGES) {
@@ -531,9 +536,10 @@ async function fetchAllBalancePairs(walletAddress) {
     const results = await Promise.allSettled(batch.map(p => page(p).then(r => r.ok ? r.json() : null)));
     for (const r of results) {
       if (r.status === 'fulfilled' && r.value) out.push(...pairsOf(r.value.data ?? r.value));
+      else complete = false; // a page failed — result is partial, don't cache it
     }
   }
-  return out;
+  return { pairs: out, complete };
 }
 
 // Aggregate collection stats for a wallet from its (paginated) balances. Uses
@@ -551,8 +557,11 @@ export async function getCardStats(walletAddress) {
   if (cached && Date.now() - cached.at < CARD_STATS_TTL) return cached.value;
 
   const s = { totalCards: 0, totalCopies: 0, active: 0, resolved: 0, winning: 0, lost: 0 };
+  let complete;
   try {
-    for (const [cardId, entry] of await fetchAllBalancePairs(walletAddress)) {
+    const res = await fetchAllBalancePairs(walletAddress);
+    complete = res.complete;
+    for (const [cardId, entry] of res.pairs) {
       if (!cardId || !entry) continue;
       const claimed = parseInt(entry.claimedQuantity || '0', 10);
       const unc = parseInt(entry.unclaimedQuantity || '0', 10);
@@ -574,7 +583,11 @@ export async function getCardStats(walletAddress) {
     console.error(`Upshot API: getCardStats(${walletAddress}) failed:`, err.message);
     return null;
   }
-  cacheSet(cardStatsCache, walletAddress, { at: Date.now(), value: s }, 1000);
+  // Don't cache a partial fetch (a failed page) or a zero result (likely a
+  // transient miss) — either would pin wrong numbers for the TTL.
+  if (complete && s.totalCards > 0) {
+    cacheSet(cardStatsCache, walletAddress, { at: Date.now(), value: s }, 1000);
+  }
   return s;
 }
 
@@ -585,6 +598,7 @@ export async function getPredictableCards(walletAddress) {
   }
 
   const byId = new Map();
+  let balancesComplete = true;
 
   // 1. Wallet balances — ALL pages (the endpoint is paginated; see above). The
   // balances payload embeds each card's event, so we capture it here and the
@@ -592,7 +606,9 @@ export async function getPredictableCards(walletAddress) {
   // wallet is hundreds/thousands of cards; fetching each would take minutes and
   // hammer the API).
   try {
-    for (const [cardId, entry] of await fetchAllBalancePairs(walletAddress)) {
+    const res = await fetchAllBalancePairs(walletAddress);
+    balancesComplete = res.complete;
+    for (const [cardId, entry] of res.pairs) {
       if (!cardId || !entry) continue;
       const claimed = parseInt(entry.claimedQuantity || '0', 10);
       const unclaimed = parseInt(entry.unclaimedQuantity || '0', 10);
@@ -601,6 +617,7 @@ export async function getPredictableCards(walletAddress) {
       byId.set(cardId, { id: cardId, name: entry.card?.name || cardId, inContest: false, event });
     }
   } catch (err) {
+    balancesComplete = false;
     console.error(`Upshot API: getPredictableCards balances(${walletAddress}) failed:`, err.message);
   }
 
@@ -628,9 +645,10 @@ export async function getPredictableCards(walletAddress) {
     result = [...byId.values()];
   }
 
-  // Cache only useful results — don't pin an empty list (likely a transient API
-  // failure) for the full TTL and lock the user out of their cards.
-  if (result.length > 0) {
+  // Cache only useful, COMPLETE results — don't pin an empty list (likely a
+  // transient API failure) or a partial one (a failed balance page) for the full
+  // TTL, which would hide cards the user actually owns.
+  if (result.length > 0 && balancesComplete) {
     cacheSet(predictableCardsCache, walletAddress, { at: Date.now(), value: result }, 1000);
   }
   return result;
