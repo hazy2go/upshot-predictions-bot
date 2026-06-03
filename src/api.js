@@ -7,6 +7,35 @@
 
 const BASE = 'https://api-mainnet.upshotcards.net/api/v1';
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * GET with retries on transient failures — network/timeout errors, HTTP 429,
+ * and 5xx responses. Creates a fresh timeout per attempt and backs off
+ * exponentially with jitter (≈250ms, 500ms, 1s, capped at 2s). Non-transient
+ * responses (e.g. 404) are returned immediately for the caller to handle; if
+ * every attempt throws, the last error is rethrown so the existing try/catch
+ * blocks degrade gracefully. Use only for idempotent GETs.
+ */
+async function fetchRetry(url, { timeout = 10_000, retries = 3 } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(timeout) });
+      if ((res.status === 429 || res.status >= 500) && attempt < retries) {
+        await sleep(Math.min(2000, 250 * 2 ** attempt) + Math.random() * 100);
+        continue;
+      }
+      return res;
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= retries) break;
+      await sleep(Math.min(2000, 250 * 2 ** attempt) + Math.random() * 100);
+    }
+  }
+  throw lastErr;
+}
+
 /**
  * Extract wallet address (0x...) from an Upshot profile URL.
  * Supports formats:
@@ -51,9 +80,7 @@ export function extractCardId(input) {
  */
 export async function getCardDetails(cardId) {
   try {
-    const res = await fetch(`${BASE}/cards/${cardId}?include=event,supply`, {
-      signal: AbortSignal.timeout(10_000),
-    });
+    const res = await fetchRetry(`${BASE}/cards/${cardId}?include=event,supply`, { timeout: 10_000 });
     if (!res.ok) return null;
     const json = await res.json();
     const card = json.data;
@@ -90,9 +117,7 @@ export async function getCardDetails(cardId) {
  */
 export async function checkCardOwnership(walletAddress, cardId) {
   try {
-    const res = await fetch(`${BASE}/cards/balances/${walletAddress}?cardId=${cardId}`, {
-      signal: AbortSignal.timeout(10_000),
-    });
+    const res = await fetchRetry(`${BASE}/cards/balances/${walletAddress}?cardId=${cardId}`, { timeout: 10_000 });
     if (!res.ok) return { owned: false, quantity: 0, winning: false, card: null };
     const json = await res.json();
     const data = json.data;
@@ -135,9 +160,7 @@ async function checkCardInContests(walletAddress, cardId) {
   try {
     // NOTE: ?status=LIVE upstream filter is unreliable — returns only a subset
     // of LIVE contests. Fetch all and filter client-side.
-    const res = await fetch(`${BASE}/contests`, {
-      signal: AbortSignal.timeout(10_000),
-    });
+    const res = await fetchRetry(`${BASE}/contests`, { timeout: 10_000 });
     if (!res.ok) return false;
     const json = await res.json();
     const all = json.data || json;
@@ -149,9 +172,7 @@ async function checkCardInContests(walletAddress, cardId) {
     // Check each live contest's standings
     for (const contest of contests) {
       try {
-        const sRes = await fetch(`${BASE}/contests/${contest.id}/standings`, {
-          signal: AbortSignal.timeout(10_000),
-        });
+        const sRes = await fetchRetry(`${BASE}/contests/${contest.id}/standings`, { timeout: 10_000 });
         if (!sRes.ok) continue;
         const sJson = await sRes.json();
         const standings = sJson.data?.standings || [];
@@ -181,7 +202,7 @@ async function checkCardInContests(walletAddress, cardId) {
  */
 export async function getUserContestLineups(walletAddress) {
   try {
-    const res = await fetch(`${BASE}/contests`, { signal: AbortSignal.timeout(10_000) });
+    const res = await fetchRetry(`${BASE}/contests`, { timeout: 10_000 });
     if (!res.ok) return [];
     const json = await res.json();
     const all = json.data || json;
@@ -193,7 +214,7 @@ export async function getUserContestLineups(walletAddress) {
     // Fetch all contest standings in parallel
     const standingsResults = await Promise.allSettled(
       contests.map(async (contest) => {
-        const sRes = await fetch(`${BASE}/contests/${contest.id}/standings`, { signal: AbortSignal.timeout(15_000) });
+        const sRes = await fetchRetry(`${BASE}/contests/${contest.id}/standings`, { timeout: 15_000 });
         if (!sRes.ok) return null;
         const sJson = await sRes.json();
         return { contest, standings: sJson.data?.standings || [], totalLineups: sJson.data?.totalLineups || 0 };
@@ -222,7 +243,7 @@ export async function getUserContestLineups(walletAddress) {
     const cardNames = new Map();
     const cardFetches = await Promise.allSettled(
       [...allCardIds].map(async (cardId) => {
-        const cRes = await fetch(`${BASE}/cards/${cardId}`, { signal: AbortSignal.timeout(10_000) });
+        const cRes = await fetchRetry(`${BASE}/cards/${cardId}`, { timeout: 10_000 });
         if (cRes.ok) {
           const name = (await cRes.json()).data?.name || cardId;
           return { cardId, name };
@@ -310,9 +331,7 @@ export async function getPredictableCards(walletAddress) {
 
   // 1. Wallet balances (all cards, no cardId filter).
   try {
-    const res = await fetch(`${BASE}/cards/balances/${walletAddress}`, {
-      signal: AbortSignal.timeout(15_000),
-    });
+    const res = await fetchRetry(`${BASE}/cards/balances/${walletAddress}`, { timeout: 15_000 });
     if (res.ok) {
       const json = await res.json();
       const data = json.data ?? json;
@@ -390,7 +409,7 @@ export async function checkCardResolution(cardId) {
 export async function getSeasonRank(walletAddress) {
   try {
     // 1. Get current season
-    const seasonsRes = await fetch(`${BASE}/seasons`, { signal: AbortSignal.timeout(10_000) });
+    const seasonsRes = await fetchRetry(`${BASE}/seasons`, { timeout: 10_000 });
     if (!seasonsRes.ok) return null;
     const seasonsJson = await seasonsRes.json();
     const seasons = seasonsJson.data || [];
@@ -398,14 +417,14 @@ export async function getSeasonRank(walletAddress) {
     const season = seasons[0]; // most recent season
 
     // 2. Get userId from wallet
-    const userRes = await fetch(`${BASE}/users/${walletAddress}`, { signal: AbortSignal.timeout(10_000) });
+    const userRes = await fetchRetry(`${BASE}/users/${walletAddress}`, { timeout: 10_000 });
     if (!userRes.ok) return null;
     const userJson = await userRes.json();
     const userId = userJson.data?.id;
     if (!userId) return null;
 
     // 3. Get season rank for user
-    const rankRes = await fetch(`${BASE}/seasons/${season.id}/users/${userId}`, { signal: AbortSignal.timeout(10_000) });
+    const rankRes = await fetchRetry(`${BASE}/seasons/${season.id}/users/${userId}`, { timeout: 10_000 });
     if (!rankRes.ok) return null;
     const rankJson = await rankRes.json();
     const data = rankJson.data;
@@ -434,9 +453,7 @@ export async function getSeasonRank(walletAddress) {
  */
 export async function getUserProfile(walletAddress) {
   try {
-    const res = await fetch(`${BASE}/users/${walletAddress}`, {
-      signal: AbortSignal.timeout(10_000),
-    });
+    const res = await fetchRetry(`${BASE}/users/${walletAddress}`, { timeout: 10_000 });
     if (!res.ok) return null;
     const json = await res.json();
     return json.data || null;
@@ -535,9 +552,7 @@ export async function refreshUpshotAccessToken(refreshToken) {
  */
 export async function getUserPacks(walletAddress) {
   try {
-    const res = await fetch(`${BASE}/packs/balances/${walletAddress}`, {
-      signal: AbortSignal.timeout(10_000),
-    });
+    const res = await fetchRetry(`${BASE}/packs/balances/${walletAddress}`, { timeout: 10_000 });
     if (!res.ok) return [];
     const json = await res.json();
     const data = json.data ?? {};

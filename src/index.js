@@ -1191,21 +1191,10 @@ async function handleCardPicker(interaction) {
     return showLinkProfileModal(interaction);
   }
 
-  // Fail fast on the same limits the submit flow enforces.
-  const maxDaily = getMaxDaily(interaction.guildId);
-  if (countUserDailyPredictions(interaction.user.id) >= maxDaily) {
-    return interaction.reply({
-      content: `❌ You've reached the daily limit of **${maxDaily}** predictions. Try again tomorrow.`,
-      flags: ['Ephemeral'],
-    });
-  }
-  const maxOpen = getMaxOpen(interaction.guildId);
-  if (countUserUnresolved(interaction.user.id) >= maxOpen) {
-    return interaction.reply({
-      content: `❌ You have the max of **${maxOpen}** open predictions. Wait for some to resolve before submitting more.`,
-      flags: ['Ephemeral'],
-    });
-  }
+  // Browsing is always allowed — members can look up their cards and copy
+  // marketplace links even after hitting their daily/open limits. The
+  // daily/open caps are enforced when they actually press Predict
+  // (see showPredictModal), so the limit message lands on the action, not here.
 
   await interaction.deferReply({ flags: ['Ephemeral'] });
 
