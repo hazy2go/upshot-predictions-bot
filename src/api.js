@@ -9,6 +9,26 @@ const BASE = 'https://api-mainnet.upshotcards.net/api/v1';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Global concurrency limiter for ALL Upshot requests. My Cards (and the
+// watchers) fan out a lot — paginated balances + every live contest's standings
+// + per-card lookups — and firing them all at once makes Upshot's shield reset
+// the connections ("fetch failed" / ECONNRESET), which on the Pi turned My Cards
+// into 0 cards. Funnelling every request through a small semaphore caps how many
+// hit the network simultaneously, no matter how many callers fan out, so a burst
+// becomes a smooth queue instead of a flood. Tunable via UPSHOT_MAX_CONCURRENCY.
+const MAX_CONCURRENCY = Math.max(1, parseInt(process.env.UPSHOT_MAX_CONCURRENCY || '4', 10));
+let _inFlight = 0;
+const _waiters = [];
+function acquireSlot() {
+  if (_inFlight < MAX_CONCURRENCY) { _inFlight++; return Promise.resolve(); }
+  return new Promise((resolve) => _waiters.push(resolve));
+}
+function releaseSlot() {
+  const next = _waiters.shift();
+  if (next) next(); // hand the slot directly to the next waiter (count stays put)
+  else _inFlight--;
+}
+
 // Bounded cache set: the bot is a long-running process, so a plain Map keyed by
 // card id / wallet / contest grows without limit (TTL governs whether a hit is
 // *used*, never frees the entry). cacheSet evicts the oldest entry once the map
@@ -52,10 +72,16 @@ async function fetchRetry(url, { timeout = 10_000, retries = 2, headers } = {}) 
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(url, {
-        signal: AbortSignal.timeout(timeout),
-        headers: { ...READ_HEADERS, ...headers },
-      });
+      await acquireSlot();
+      let res;
+      try {
+        res = await fetch(url, {
+          signal: AbortSignal.timeout(timeout),
+          headers: { ...READ_HEADERS, ...headers },
+        });
+      } finally {
+        releaseSlot();
+      }
       if ((res.status === 429 || res.status >= 500) && attempt < retries) {
         const retryAfter = Number(res.headers.get('retry-after'));
         const wait = Number.isFinite(retryAfter) && retryAfter > 0
