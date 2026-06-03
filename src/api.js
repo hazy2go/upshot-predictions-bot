@@ -507,6 +507,47 @@ async function fetchAllBalancePairs(walletAddress) {
   return out;
 }
 
+// Aggregate collection stats for a wallet from its (paginated) balances. Uses
+// the embedded event on each card, so no per-card fetches. Returns:
+//   { totalCards, totalCopies, active, resolved, winning, lost, unclaimed }
+// totalCards = distinct cards held (qty>0); totalCopies = sum of all copies.
+// Cached briefly so repeated /mystats taps don't re-page a large wallet.
+const cardStatsCache = new Map(); // wallet -> { at, value }
+const CARD_STATS_TTL = 2 * 60 * 1000;
+
+export async function getCardStats(walletAddress) {
+  const cached = cardStatsCache.get(walletAddress);
+  if (cached && Date.now() - cached.at < CARD_STATS_TTL) return cached.value;
+
+  const s = { totalCards: 0, totalCopies: 0, active: 0, resolved: 0, winning: 0, lost: 0, unclaimed: 0 };
+  try {
+    for (const [cardId, entry] of await fetchAllBalancePairs(walletAddress)) {
+      if (!cardId || !entry) continue;
+      const claimed = parseInt(entry.claimedQuantity || '0', 10);
+      const unc = parseInt(entry.unclaimedQuantity || '0', 10);
+      const qty = claimed + unc;
+      if (qty <= 0) continue;
+      s.totalCards++;
+      s.totalCopies += qty;
+      if (unc > 0) s.unclaimed += unc;
+      const ev = entry.card?.event || entry.card?.outcome?.event || null;
+      if (ev?.status === 'RESOLVED') {
+        s.resolved++;
+        const outcomeId = entry.card?.outcomeId;
+        const won = outcomeId && ev.winningOutcomeId ? outcomeId === ev.winningOutcomeId : !!entry.winning;
+        if (won) s.winning++; else s.lost++;
+      } else if (ev?.status === 'ACTIVE') {
+        s.active++;
+      }
+    }
+  } catch (err) {
+    console.error(`Upshot API: getCardStats(${walletAddress}) failed:`, err.message);
+    return null;
+  }
+  cacheSet(cardStatsCache, walletAddress, { at: Date.now(), value: s }, 1000);
+  return s;
+}
+
 export async function getPredictableCards(walletAddress) {
   const cached = predictableCardsCache.get(walletAddress);
   if (cached && Date.now() - cached.at < PREDICTABLE_CARDS_TTL) {

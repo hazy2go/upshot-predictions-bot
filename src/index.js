@@ -56,7 +56,7 @@ import {
 import {
   extractWallet, extractCardId,
   getCardDetails, checkCardOwnership, checkCardResolution,
-  getSeasonRank, getUserContestLineups, getPredictableCards,
+  getSeasonRank, getUserContestLineups, getPredictableCards, getCardStats,
   getUserProfile, getUserPacks, transferPack, refreshUpshotAccessToken,
   getContests, getContestTop, getRaffles, getRaffleDetail, getRaffleTop,
   getStorePacks, getStoreBundles,
@@ -781,8 +781,18 @@ async function handleMyStats(interaction) {
   const stats = getUserStats(interaction.user.id, monthKey);
   const scored = getUserMonthScoredPredictions(interaction.user.id, monthKey);
   const tier = getUserTier(interaction.user.id);
-  const payload = buildStatsCard(stats, interaction.user.id, currentMonthLabel(), scored, tier);
-  await interaction.reply({ ...payload, flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral });
+
+  // Card collection stats come from the linked wallet's balances (paginated, can
+  // take a moment for large wallets), so defer and edit. No wallet → skip them.
+  const profile = getUpshotProfile(interaction.user.id);
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+  let cardStats = null;
+  if (profile?.wallet_address) {
+    cardStats = await getCardStats(profile.wallet_address).catch(() => null);
+  }
+
+  const payload = buildStatsCard(stats, interaction.user.id, currentMonthLabel(), scored, tier, cardStats);
+  await interaction.editReply(payload);
 }
 
 async function handleUpshotRank(interaction) {

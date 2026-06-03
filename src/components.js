@@ -977,11 +977,27 @@ export function buildLeaderboard(entries, monthLabel, options = {}) {
 
 // ── Personal stats ───────────────────────────────────────────
 
-export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = [], tier = 0) {
+export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = [], tier = 0, cardStats = null) {
   const children = [];
 
   children.push(text(`## 📊 Your Stats — ${monthLabel}`));
   children.push(separator());
+
+  // Upshot card collection (from wallet balances) — shown when the profile is
+  // linked and the API responded.
+  if (cardStats) {
+    const c = cardStats;
+    const copies = c.totalCopies !== c.totalCards ? ` (${c.totalCopies.toLocaleString('en-US')} copies)` : '';
+    const cardWinRate = c.resolved > 0 ? Math.round((c.winning / c.resolved) * 100) : 0;
+    children.push(text('**🃏 Card Collection**'));
+    children.push(text([
+      `**Total cards:** ${c.totalCards.toLocaleString('en-US')}${copies}`,
+      `**🟢 Active:** ${c.active.toLocaleString('en-US')}`,
+      `**🏆 Winning:** ${c.winning.toLocaleString('en-US')}  ·  **🔴 Lost:** ${c.lost.toLocaleString('en-US')}  (${cardWinRate}% of ${c.resolved.toLocaleString('en-US')} resolved)`,
+      c.unclaimed > 0 ? `**🎁 Unclaimed:** ${c.unclaimed.toLocaleString('en-US')}` : null,
+    ].filter(Boolean).join('\n')));
+    children.push(separator());
+  }
 
   const hitRate = stats.resolved > 0 ? Math.round((stats.hits / stats.resolved) * 100) : 0;
   const avgRating = stats.avg_rating ? stats.avg_rating.toFixed(1) : '—';
