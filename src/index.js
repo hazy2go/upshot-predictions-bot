@@ -2859,12 +2859,23 @@ async function runAutoResolve() {
 
   console.log(`Auto-resolve: Checking ${predictions.length} prediction(s)...`);
   let resolved = 0;
-  let errors = 0;
+  let gone = 0;        // card genuinely 404s — won't ever resolve via the API
+  let transient = 0;   // couldn't reach the API this sweep — retried next time
+  let errors = 0;      // unexpected failures in our own resolve logic
 
   for (const prediction of predictions) {
     try {
       const result = await checkCardResolution(prediction.card_id);
 
+      if (result.error === 'card_not_found') {
+        gone++;
+        console.warn(`Auto-resolve: #${prediction.id} card no longer exists on Upshot (${prediction.card_id})`);
+        continue;
+      }
+      if (result.error === 'fetch_failed') {
+        transient++; // transient (timeout/rate-limit/5xx) — recheck next sweep, not an error
+        continue;
+      }
       if (result.error) {
         errors++;
         console.error(`Auto-resolve: Error checking #${prediction.id}:`, result.error);
@@ -2876,18 +2887,22 @@ async function runAutoResolve() {
       const outcome = result.won ? 'hit' : 'fail';
       const status = outcome === 'hit' ? Status.Hit : Status.Fail;
 
+      // Commit the resolution first — this is the source of truth. A failure in
+      // the embed sync / admin ping below must NOT reclassify an already-resolved
+      // prediction as an error, so those are individually guarded.
       updatePrediction(prediction.id, { outcome, status, resolved_by: 'auto' });
       recalculatePoints(prediction.id);
-
-      await syncPredictionEmbeds(prediction.id, guildId);
       resolved++;
+
+      await syncPredictionEmbeds(prediction.id, guildId).catch((e) =>
+        console.error(`Auto-resolve: embed sync failed for #${prediction.id}:`, e.message));
 
       const updatedPred = getPrediction(prediction.id);
       const emoji = outcome === 'hit' ? '🟢' : '🔴';
       const id = String(prediction.id).padStart(4, '0');
       await notifyAdmin(guildId,
         `${emoji} **Auto-resolved #${id}** — **${outcome}** (${updatedPred.total_points} pts) · <@${prediction.author_id}>`
-      );
+      ).catch(() => {});
     } catch (err) {
       errors++;
       console.error(`Auto-resolve: Unexpected error on #${prediction.id}:`, err.message);
@@ -2901,8 +2916,14 @@ async function runAutoResolve() {
     await refreshLeaderboard(guildId).catch(() => {});
   }
 
-  const summary = `🤖 **Auto-resolve complete** — ${resolved} resolved, ${errors} error(s), ${predictions.length - resolved - errors} still active`;
-  console.log(`Auto-resolve: ${resolved} resolved, ${errors} errors`);
+  const stillActive = predictions.length - resolved - gone;
+  const extra = [
+    gone ? `${gone} card(s) gone` : null,
+    transient ? `${transient} unreachable (will retry)` : null,
+    errors ? `${errors} error(s)` : null,
+  ].filter(Boolean).join(', ');
+  const summary = `🤖 **Auto-resolve complete** — ${resolved} resolved, ${stillActive} still active${extra ? ` · ${extra}` : ''}`;
+  console.log(`Auto-resolve: ${resolved} resolved, ${gone} gone, ${transient} transient, ${errors} errors`);
   await notifyAdmin(guildId, summary);
 }
 
