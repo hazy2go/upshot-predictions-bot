@@ -455,9 +455,12 @@ export function buildStoreListed(item) {
 
 // Public list of available (ACTIVE) + upcoming (COMING_SOON) packs & bundles with
 // remaining stock, for `/store list`. `items` is packs+bundles combined.
+// Sold-out items are excluded — an ACTIVE pack with remaining:0 is effectively
+// sold out, so we only show those with stock left (remaining > 0, or unknown).
 export function buildStoreList(items) {
   const order = { ACTIVE: 0, COMING_SOON: 1 };
-  const shown = items.filter(i => i.status === 'ACTIVE' || i.status === 'COMING_SOON')
+  const shown = items
+    .filter(i => (i.status === 'ACTIVE' || i.status === 'COMING_SOON') && i.remaining !== 0)
     .sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
 
   const children = [];
@@ -471,9 +474,7 @@ export function buildStoreList(items) {
     const tag = i.kind === 'bundle' ? '🎁' : '📦';
     const soon = i.status === 'COMING_SOON' ? ' 🔜' : '';
     const price = storePrice(i);
-    const rem = i.remaining != null
-      ? (i.remaining > 0 ? `${i.remaining.toLocaleString('en-US')} left` : 'sold out')
-      : '';
+    const rem = i.remaining != null && i.remaining > 0 ? `${i.remaining.toLocaleString('en-US')} left` : '';
     const bits = [price, rem].filter(Boolean).join(' · ');
     return `${tag} **${(i.name || i.id).slice(0, 70)}**${soon}${bits ? ` — ${bits}` : ''}`;
   };
