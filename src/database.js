@@ -353,17 +353,17 @@ export function removePanel(guildId, messageId) {
   db.prepare("INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)").run(`panels_${guildId}`, JSON.stringify(panels));
 }
 
-// ── Event watcher state (which Upshot events we've already announced) ──
-// Stored per guild as a JSON map: { [eventId]: { status, announcedLive,
-// announcedResolved } }. Returns null when never initialized — the watcher uses
-// that to seed silently on first run instead of announcing the whole backlog.
-export function getEventWatchState(guildId) {
-  const row = db.prepare("SELECT value FROM bot_state WHERE key = ?").get(`events_watch_${guildId}`);
+// ── Contest watcher state (which contests we've already announced) ──
+// Stored per guild as a JSON map: { _v, [contestId]: { status, announcedLive,
+// announcedDone } }. Returns null when never initialized — the watcher uses that
+// to seed silently on first run instead of announcing the whole backlog.
+export function getContestWatchState(guildId) {
+  const row = db.prepare("SELECT value FROM bot_state WHERE key = ?").get(`contests_watch_${guildId}`);
   return row?.value ? JSON.parse(row.value) : null;
 }
 
-export function setEventWatchState(guildId, state) {
-  db.prepare("INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)").run(`events_watch_${guildId}`, JSON.stringify(state));
+export function setContestWatchState(guildId, state) {
+  db.prepare("INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)").run(`contests_watch_${guildId}`, JSON.stringify(state));
 }
 
 // Lucky Shots (raffle) watcher state — same shape/semantics as the event watcher.

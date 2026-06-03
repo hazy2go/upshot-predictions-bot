@@ -28,7 +28,7 @@ import {
   getProfileByWallet, getProfileByUrl, getAllUsers, getDbPath,
   upsertCommunityVote, getCommunityVoteSummary,
   getPendingVerificationPredictions, getUnratedVerifiedPredictions,
-  getEventWatchState, setEventWatchState,
+  getContestWatchState, setContestWatchState,
   getRaffleWatchState, setRaffleWatchState,
 } from './database.js';
 
@@ -40,7 +40,7 @@ import {
   buildPredictionPanel, buildHelpPage,
   buildContestOverview, buildContestLineupPage,
   buildCardPicker, buildCardPickerEmpty, buildCardDetail,
-  buildEventLive, buildEventResolved, buildEventList,
+  buildContestLive, buildContestResults, buildContestList,
   buildRaffleLive, buildRaffleWinner, buildRaffleList,
 } from './components.js';
 
@@ -56,7 +56,7 @@ import {
   getCardDetails, checkCardOwnership, checkCardResolution,
   getSeasonRank, getUserContestLineups, getPredictableCards,
   getUserProfile, getUserPacks, transferPack, refreshUpshotAccessToken,
-  getEvents, getRaffles, getRaffleDetail,
+  getContests, getContestTop, getRaffles, getRaffleDetail, getRaffleTop,
 } from './api.js';
 
 // ── Client ──────────────────────────────────────────────────
@@ -265,8 +265,8 @@ function getLeaderboardChannelId(guildId) {
   return cfg(guildId, 'leaderboard_channel', 'LEADERBOARD_CHANNEL_ID');
 }
 
-function getEventsChannelId(guildId) {
-  return cfg(guildId, 'events_channel', 'EVENTS_CHANNEL_ID');
+function getContestsChannelId(guildId) {
+  return cfg(guildId, 'contests_channel', 'CONTESTS_CHANNEL_ID');
 }
 
 function getLuckyShotsChannelId(guildId) {
@@ -1655,10 +1655,10 @@ async function handleSetup(interaction) {
       setConfig(guildId, 'leaderboard_channel', channel.id);
       return interaction.reply({ content: `✅ Leaderboard channel set to <#${channel.id}>`, flags: ['Ephemeral'] });
     }
-    case 'events-channel': {
+    case 'contests-channel': {
       const channel = interaction.options.getChannel('channel', true);
-      setConfig(guildId, 'events_channel', channel.id);
-      return interaction.reply({ content: `✅ Events channel set to <#${channel.id}>. New live events and results will be announced there (first sync seeds silently — no backlog spam).`, flags: ['Ephemeral'] });
+      setConfig(guildId, 'contests_channel', channel.id);
+      return interaction.reply({ content: `✅ Contests channel set to <#${channel.id}>. New contests and their top-3 results will be announced there (first sync seeds silently — no backlog spam).`, flags: ['Ephemeral'] });
     }
     case 'luckyshots-channel': {
       const channel = interaction.options.getChannel('channel', true);
@@ -3002,133 +3002,120 @@ function scheduleNextResolve() {
   console.log(`Auto-resolve: Next check at ${nextResolveCheck.toISOString()}`);
 }
 
-// ── Event watcher ────────────────────────────────────────────
+// ── Contest watcher ──────────────────────────────────────────
 //
-// Polls Upshot's /events hourly and announces, in the configured events channel:
-//   • a NEW event going live  ("🎯 New Event Live — …, ends …")
-//   • an event being RESOLVED ("🏁 Event Resolved — winner: …")
-// State (which events we've already announced) is persisted per guild in
-// bot_state, so a restart never re-announces. On the very first run for a guild
-// the existing backlog is seeded SILENTLY — members only get pinged about
-// changes from then on. The same engine should fit Lucky Shots by swapping the
-// API source once that endpoint is known.
+// Polls Upshot's /contests hourly and announces, in the configured contests
+// channel:
+//   • a NEW contest going live ("🏆 New Contest Live — …, ends …")
+//   • a contest finishing       ("🏁 Contest Over — top 3: 🥇 … 🥈 … 🥉 …")
+// State is persisted per guild in bot_state so a restart never re-announces; the
+// first run seeds the existing backlog SILENTLY. Contests go LIVE → COMPLETED.
 
-const EVENT_WATCH_INTERVAL = 60 * 60 * 1000; // 60 min
-let eventWatchTimer = null;
+const CONTEST_WATCH_INTERVAL = 60 * 60 * 1000; // 60 min
+const CONTEST_SEED_V = 1;
+let contestWatchTimer = null;
 
-// Seed-state schema version. Bump to force a silent re-seed: v1 seeded
-// already-RESOLVED events with announcedResolved:false, which made them
-// re-announce on the next poll as if freshly resolved (the SpaceX "Ticker Day"
-// bug). v2 marks already-resolved events as announced at seed time, so only a
-// genuine ACTIVE→RESOLVED transition we witness gets announced. The version bump
-// makes existing buggy state on the Pi self-heal on the next run.
-const EVENT_SEED_V = 2;
-
-// Flags when SEEDING an event (firstRun/reseed): everything currently present is
-// pre-existing, so suppress every "live" announcement; only allow a future
-// resolve to fire (announcedResolved stays false while it's still ACTIVE).
-function eventSeedFlags(status) {
-  return { status, announcedLive: true, announcedResolved: status === 'RESOLVED' };
+// Flags when SEEDING a contest (firstRun/reseed): everything present is
+// pre-existing → suppress its current state; only future transitions fire.
+function contestSeedFlags(status) {
+  return { status, announcedLive: true, announcedDone: status === 'COMPLETED' };
 }
-// Flags for a GENUINELY-NEW event seen after seeding: announce it if it's newly
-// ACTIVE; an event first seen already RESOLVED is suppressed (we didn't witness
-// the transition — avoids announcing an old event rotating into the list).
-function eventNewFlags(status) {
-  return { status, announcedLive: status !== 'ACTIVE', announcedResolved: status === 'RESOLVED' };
+// Flags for a GENUINELY-NEW contest seen after seeding: a new LIVE contest is
+// announced; one first seen already COMPLETED is suppressed (didn't witness it).
+function contestNewFlags(status) {
+  return { status, announcedLive: status !== 'LIVE', announcedDone: status === 'COMPLETED' };
 }
 
-async function runEventWatch(guildId, { announce = true } = {}) {
-  const events = await getEvents();
-  if (!events.length) return { ok: false, total: 0, newLive: 0, resolved: 0, seeded: false };
+async function runContestWatch(guildId, { announce = true } = {}) {
+  const contests = await getContests();
+  if (!contests.length) return { ok: false, total: 0, newLive: 0, done: 0, seeded: false };
 
-  const prev = getEventWatchState(guildId);
-  // Treat a missing state OR an out-of-date seed version as "seed silently".
-  const seeding = !prev || prev._v !== EVENT_SEED_V;
+  const prev = getContestWatchState(guildId);
+  const seeding = !prev || prev._v !== CONTEST_SEED_V;
 
   if (seeding) {
-    const state = { _v: EVENT_SEED_V };
-    for (const event of events) state[event.id] = eventSeedFlags(event.status);
-    setEventWatchState(guildId, state);
-    console.log(`Event watch: seeded ${events.length} event(s) silently for ${guildId} (v${EVENT_SEED_V})`);
-    return { ok: true, total: events.length, newLive: 0, resolved: 0, seeded: true };
+    const state = { _v: CONTEST_SEED_V };
+    for (const c of contests) state[c.id] = contestSeedFlags(c.status);
+    setContestWatchState(guildId, state);
+    console.log(`Contest watch: seeded ${contests.length} contest(s) silently for ${guildId} (v${CONTEST_SEED_V})`);
+    return { ok: true, total: contests.length, newLive: 0, done: 0, seeded: true };
   }
 
   const state = prev;
-  const channelId = getEventsChannelId(guildId);
+  const channelId = getContestsChannelId(guildId);
   const channel = announce && channelId ? await safeGetChannel(channelId) : null;
-  const liveIds = new Set(events.map(e => e.id));
+  const liveIds = new Set(contests.map(c => c.id));
 
   let newLive = 0;
-  let resolved = 0;
+  let done = 0;
 
-  for (const event of events) {
-    if (!state[event.id]) state[event.id] = eventNewFlags(event.status); // genuinely new since last seed
-    const seen = state[event.id];
+  for (const contest of contests) {
+    if (!state[contest.id]) state[contest.id] = contestNewFlags(contest.status);
+    const seen = state[contest.id];
 
-    if (event.status === 'ACTIVE' && !seen.announcedLive) {
+    if (contest.status === 'LIVE' && !seen.announcedLive) {
       if (channel) {
-        await channel.send(buildEventLive(event)).then(() => { newLive++; })
-          .catch(e => console.error(`Event watch: live announce failed for ${event.id}:`, e.message));
+        await channel.send(buildContestLive(contest)).then(() => { newLive++; })
+          .catch(e => console.error(`Contest watch: live announce failed for ${contest.id}:`, e.message));
       }
       seen.announcedLive = true;
     }
-    if (event.status === 'RESOLVED' && !seen.announcedResolved) {
+    if (contest.status === 'COMPLETED' && !seen.announcedDone) {
       if (channel) {
-        const winnerName = event.outcomes?.find(o => o.id === event.winningOutcomeId)?.name || null;
-        await channel.send(buildEventResolved(event, winnerName)).then(() => { resolved++; })
-          .catch(e => console.error(`Event watch: resolve announce failed for ${event.id}:`, e.message));
+        const top = await getContestTop(contest.id, 3);
+        await channel.send(buildContestResults(contest, top)).then(() => { done++; })
+          .catch(e => console.error(`Contest watch: results announce failed for ${contest.id}:`, e.message));
       }
-      seen.announcedResolved = true;
+      seen.announcedDone = true;
     }
-    seen.status = event.status;
+    seen.status = contest.status;
   }
 
-  // Prune events that have dropped off the API list so state doesn't grow forever.
+  // Prune contests that have dropped off the API list so state can't grow forever.
   for (const id of Object.keys(state)) if (id !== '_v' && !liveIds.has(id)) delete state[id];
 
-  setEventWatchState(guildId, state);
-  if (newLive || resolved) console.log(`Event watch: announced ${newLive} new live, ${resolved} resolved`);
-  return { ok: true, total: events.length, newLive, resolved, seeded: false };
+  setContestWatchState(guildId, state);
+  if (newLive || done) console.log(`Contest watch: announced ${newLive} new live, ${done} completed`);
+  return { ok: true, total: contests.length, newLive, done, seeded: false };
 }
 
-async function safeRunEventWatch() {
+async function safeRunContestWatch() {
   const guildId = process.env.GUILD_ID;
   if (guildId) {
     try {
-      await runEventWatch(guildId);
+      await runContestWatch(guildId);
     } catch (err) {
-      console.error('Event watch: fatal error:', err.message);
+      console.error('Contest watch: fatal error:', err.message);
     }
   }
-  eventWatchTimer = setTimeout(safeRunEventWatch, EVENT_WATCH_INTERVAL);
+  contestWatchTimer = setTimeout(safeRunContestWatch, CONTEST_WATCH_INTERVAL);
 }
 
-// Admin /events command: `check` runs a watch pass now (announces to the events
-// channel), `list` posts the current events publicly to the channel.
-async function handleEventsCommand(interaction) {
+// Admin /contests command: `check` runs a watch pass now, `list` posts the
+// current LIVE contests publicly to the channel.
+async function handleContestsCommand(interaction) {
   if (!isAdmin(interaction.member)) {
     return interaction.reply({ content: '❌ Admins only.', flags: ['Ephemeral'] });
   }
   const sub = interaction.options.getSubcommand();
-  // `list` posts publicly to the channel; `check` is private admin feedback.
   await interaction.deferReply(sub === 'list' ? {} : { flags: ['Ephemeral'] });
 
   if (sub === 'list') {
-    const events = await getEvents();
-    return interaction.editReply(buildEventList(events));
+    const live = (await getContests()).filter(c => c.status === 'LIVE');
+    return interaction.editReply(buildContestList(live));
   }
 
   // sub === 'check'
-  const r = await runEventWatch(interaction.guildId, { announce: true });
+  const r = await runContestWatch(interaction.guildId, { announce: true });
   if (!r.ok) {
-    return interaction.editReply({ content: '⚠️ Couldn\'t reach the Upshot events API just now — try again in a moment.' });
+    return interaction.editReply({ content: '⚠️ Couldn\'t reach the Upshot contests API just now — try again in a moment.' });
   }
   if (r.seeded) {
-    return interaction.editReply({ content: `✅ First sync done — seeded **${r.total}** existing event(s) silently. From now on new live events and results will post to the events channel.` });
+    return interaction.editReply({ content: `✅ First sync done — seeded **${r.total}** contest(s) silently. From now on new contests and results will post to the channel.` });
   }
-  const channelSet = !!getEventsChannelId(interaction.guildId);
-  const note = channelSet ? '' : '\n-# ⚠️ No events channel set — run `/setup events-channel` so announcements have somewhere to post.';
-  return interaction.editReply({ content: `✅ Checked **${r.total}** event(s) — announced **${r.newLive}** new live, **${r.resolved}** resolved.${note}` });
+  const channelSet = !!getContestsChannelId(interaction.guildId);
+  const note = channelSet ? '' : '\n-# ⚠️ No contests channel set — run `/setup contests-channel`.';
+  return interaction.editReply({ content: `✅ Checked **${r.total}** contest(s) — announced **${r.newLive}** new live, **${r.done}** completed.${note}` });
 }
 
 // ── Lucky Shots (raffle) watcher ─────────────────────────────
@@ -3247,10 +3234,16 @@ async function handleLuckyShotsCommand(interaction) {
   await interaction.deferReply(sub === 'list' ? {} : { flags: ['Ephemeral'] });
 
   if (sub === 'list') {
+    // Only LIVE + upcoming (READY) — never ENDED/DRAWN.
     const raffles = [...new Map((await Promise.all(
-      ['READY', 'LIVE', 'ENDED', 'DRAWN'].map(s => getRaffles(s))
+      ['READY', 'LIVE'].map(s => getRaffles(s))
     )).flat().map(r => [r.id, r])).values()];
-    return interaction.editReply(buildRaffleList(raffles));
+    // For each LIVE raffle, pull its top-3 ticket holders (with chance %).
+    const topByRaffle = new Map();
+    await Promise.all(raffles.filter(r => r.status === 'LIVE').map(async (r) => {
+      topByRaffle.set(r.id, await getRaffleTop(r.id, 3, r.totalTickets));
+    }));
+    return interaction.editReply(buildRaffleList(raffles, topByRaffle));
   }
 
   // sub === 'check'
@@ -3411,7 +3404,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'upshotrank': return await handleUpshotRank(interaction);
         case 'pastleaderboard': return await handlePastLeaderboard(interaction);
         case 'mycontests': return await handleMyContests(interaction);
-        case 'events': return await handleEventsCommand(interaction);
+        case 'contests': return await handleContestsCommand(interaction);
         case 'luckyshots': return await handleLuckyShotsCommand(interaction);
         case 'refresh': return await handleRefreshCommand(interaction);
         case 'resolve': return await handleResolveCommand(interaction);
@@ -3519,10 +3512,10 @@ client.once(Events.ClientReady, async () => {
   tierTimer = setTimeout(safeRunTierRollover, 120_000);
   console.log(`   Tier rollover: first check in 2 minutes, then every 6h`);
 
-  // Start the Upshot event watcher (first run after 90s, then every 60 min).
-  // The first run seeds the existing event backlog silently.
-  eventWatchTimer = setTimeout(safeRunEventWatch, 90_000);
-  console.log(`   Event watch: first check in 90s, then every 60min`);
+  // Start the contest watcher (first run after 90s, then every 60 min).
+  // The first run seeds the existing contest backlog silently.
+  contestWatchTimer = setTimeout(safeRunContestWatch, 90_000);
+  console.log(`   Contest watch: first check in 90s, then every 60min`);
 
   // Start the Lucky Shots (raffle) watcher (first run after 2 min, then 30 min).
   raffleWatchTimer = setTimeout(safeRunRaffleWatch, 120_000);
