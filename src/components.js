@@ -67,6 +67,7 @@ export function buildPredictionPanel(title, description, imageUrl) {
   children.push(text('-# Everything you need is one tap away — no commands to memorize.'));
   children.push(actionRow(
     button('hub_mycards', '📇 My Cards', ButtonStyle.Success),
+    button('panel_predict_url', '🔗 Predict by URL', ButtonStyle.Primary),
     button('hub_mystats', '📊 My Stats', ButtonStyle.Secondary),
     button('panel_help:0', '❓ How It Works', ButtonStyle.Secondary),
   ));
