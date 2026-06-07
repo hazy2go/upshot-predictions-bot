@@ -69,6 +69,10 @@ export const commands = [
     .setDescription('View your personal prediction stats for this month'),
 
   new SlashCommandBuilder()
+    .setName('cancel-prediction')
+    .setDescription('Cancel one of your open predictions whose deadline is more than 30 days away'),
+
+  new SlashCommandBuilder()
     .setName('upshotrank')
     .setDescription('View your Upshot season rank and XP'),
 
