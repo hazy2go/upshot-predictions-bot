@@ -1994,11 +1994,29 @@ async function handleSetup(interaction) {
         })
         : ['• None'];
 
+      // Open predictions whose deadline falls in a future month don't appear in
+      // the monthly scoring list, but still occupy an open slot — list them so
+      // the open counter always reconciles with what's on screen.
+      const futureOpen = openPredictions.filter(p => p.month_key !== monthKey);
+      const futureOpenLines = futureOpen.length > 0
+        ? [
+          '',
+          `**Open in Future Months (${futureOpen.length})**`,
+          ...futureOpen.map(p => {
+            const id = String(p.id).padStart(4, '0');
+            const stars = '⭐'.repeat(p.star_rating || 0);
+            const shortTitle = p.title.length > 70 ? `${p.title.slice(0, 67)}...` : p.title;
+            return `⏳ #${id} ${stars} — ${shortTitle} (due ${p.deadline})`;
+          }),
+        ]
+        : [];
+
       const messageChunks = chunkLines([
         ...summaryLines,
         '',
         `**Scoring Predictions This Month (${scored.length})**`,
         ...scoredLines,
+        ...futureOpenLines,
         '',
         '**Open Prediction List**',
         ...openLines,
