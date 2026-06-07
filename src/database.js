@@ -290,6 +290,13 @@ export function getUserOpenPredictions(authorId) {
   return rows.map(r => ({ ...r, images: JSON.parse(r.images) }));
 }
 
+export function getUserUnresolvedPredictions(authorId) {
+  const rows = db.prepare(
+    "SELECT * FROM predictions WHERE author_id = ? AND outcome IS NULL ORDER BY deadline ASC"
+  ).all(authorId);
+  return rows.map(r => ({ ...r, images: JSON.parse(r.images) }));
+}
+
 export function getUnresolvedRatedPredictions() {
   const rows = db.prepare(
     "SELECT * FROM predictions WHERE status = 'rated' AND outcome IS NULL AND card_id IS NOT NULL ORDER BY created_at ASC"

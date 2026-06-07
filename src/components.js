@@ -1197,6 +1197,53 @@ export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = []
   };
 }
 
+// ── User self-cancel (deadline > 30 days away) ───────────────
+
+export function buildCancelPicker(predictions, minDays) {
+  const options = predictions.slice(0, 25).map(p => ({
+    label: `#${String(p.id).padStart(4, '0')} — ${p.title.slice(0, 80)}`,
+    description: `Deadline: ${p.deadline}`,
+    value: String(p.id),
+  }));
+  return {
+    components: [
+      container(Colors.Pending, [
+        text('**🗑 Cancel a Prediction**'),
+        text(`Only open predictions with a deadline more than ${minDays} days away can be cancelled. Cancelling permanently removes the prediction and its public post.`),
+        {
+          type: CT.ActionRow,
+          components: [{
+            type: CT.StringSelect,
+            custom_id: 'cancel_pred_select',
+            placeholder: 'Select a prediction to cancel',
+            min_values: 1,
+            max_values: 1,
+            options,
+          }],
+        },
+      ]),
+    ],
+    flags: (1 << 15) | (1 << 6),
+  };
+}
+
+export function buildUserCancelConfirm(prediction) {
+  const id = String(prediction.id).padStart(4, '0');
+  return {
+    components: [
+      container(Colors.Fail, [
+        text(`**⚠️ Cancel #${id} — ${prediction.title}?**`),
+        text(`Deadline: ${prediction.deadline}\nThis permanently removes the prediction and deletes its public post. This cannot be undone.`),
+        actionRow(
+          button(`user_cancel_confirm:${prediction.id}`, 'Yes, Cancel It', ButtonStyle.Danger),
+          button(`user_cancel_abort:${prediction.id}`, 'Keep It', ButtonStyle.Secondary),
+        ),
+      ]),
+    ],
+    flags: (1 << 15) | (1 << 6),
+  };
+}
+
 // ── Delete confirmation ──────────────────────────────────────
 
 export function buildDeleteConfirm(predictionId) {

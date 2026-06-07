@@ -23,7 +23,7 @@ import {
   getCategories, addCategory, removeCategory,
   resetUser, resetAllUsers, deleteLastPrediction,
   deleteUserProfile, deleteAllProfiles,
-  countUserUnresolved, getUserOpenPredictions, hasUnresolvedPredictionForCard,
+  countUserUnresolved, getUserOpenPredictions, getUserUnresolvedPredictions, hasUnresolvedPredictionForCard,
   getUnresolvedRatedPredictions, getResolvedCount, getUnresolvedCount,
   getProfileByWallet, getProfileByUrl, getAllUsers, getDbPath,
   upsertCommunityVote, getCommunityVoteSummary,
@@ -38,6 +38,7 @@ import { rateWithAI } from './nim.js';
 import {
   buildPredictionCard, buildAdminCard,
   buildLeaderboard, buildStatsCard, buildDeleteConfirm,
+  buildCancelPicker, buildUserCancelConfirm,
   buildPredictionPanel, buildHelpPage,
   buildContestOverview, buildContestLineupPage,
   buildCardPicker, buildCardPickerEmpty, buildCardDetail,
@@ -2768,6 +2769,13 @@ async function handleButton(interaction) {
       return handleDeleteButton(interaction, predictionId);
     case 'confirm_delete':
       return handleConfirmDelete(interaction, predictionId);
+    case 'user_cancel_confirm':
+      return handleUserCancelConfirm(interaction, predictionId);
+    case 'user_cancel_abort':
+      return interaction.reply({
+        content: '👍 Kept — your prediction was not cancelled.',
+        flags: ['Ephemeral'],
+      });
     case 'cancel_delete':
       return interaction.reply({
         content: '❌ Deletion cancelled.',
@@ -3045,6 +3053,31 @@ async function handleDeleteButton(interaction, predictionId) {
   await interaction.reply(buildDeleteConfirm(predictionId));
 }
 
+// Delete a prediction's public + admin embeds (best-effort).
+async function deletePredictionMessages(guildId, prediction) {
+  if (prediction.embed_message_id) {
+    const channelId = getPredictionsChannelId(guildId);
+    if (channelId) {
+      const channel = await safeGetChannel(channelId);
+      if (channel) {
+        const msg = await safeGetMessage(channel, prediction.embed_message_id);
+        if (msg) { try { await msg.delete(); } catch { /* ok */ } }
+      }
+    }
+  }
+
+  if (prediction.admin_message_id) {
+    const channelId = getAdminChannelId(guildId);
+    if (channelId) {
+      const channel = await safeGetChannel(channelId);
+      if (channel) {
+        const msg = await safeGetMessage(channel, prediction.admin_message_id);
+        if (msg) { try { await msg.delete(); } catch { /* ok */ } }
+      }
+    }
+  }
+}
+
 async function handleConfirmDelete(interaction, predictionId) {
   if (!isAdmin(interaction.member)) {
     return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
@@ -3055,29 +3088,7 @@ async function handleConfirmDelete(interaction, predictionId) {
     return interaction.reply({ content: '❌ Already deleted.', flags: ['Ephemeral'] });
   }
 
-  // Delete public embed
-  if (prediction.embed_message_id) {
-    const channelId = getPredictionsChannelId(interaction.guildId);
-    if (channelId) {
-      const channel = await safeGetChannel(channelId);
-      if (channel) {
-        const msg = await safeGetMessage(channel, prediction.embed_message_id);
-        if (msg) { try { await msg.delete(); } catch { /* ok */ } }
-      }
-    }
-  }
-
-  // Delete admin embed
-  if (prediction.admin_message_id) {
-    const channelId = getAdminChannelId(interaction.guildId);
-    if (channelId) {
-      const channel = await safeGetChannel(channelId);
-      if (channel) {
-        const msg = await safeGetMessage(channel, prediction.admin_message_id);
-        if (msg) { try { await msg.delete(); } catch { /* ok */ } }
-      }
-    }
-  }
+  await deletePredictionMessages(interaction.guildId, prediction);
 
   deletePrediction(predictionId);
   await refreshLeaderboard(interaction.guildId).catch(() => {});
@@ -3085,6 +3096,65 @@ async function handleConfirmDelete(interaction, predictionId) {
   await interaction.reply({
     content: `🗑 Prediction **#${String(predictionId).padStart(4, '0')}** deleted.`,
     flags: ['Ephemeral'],
+  });
+}
+
+// ── User self-cancel (deadline > 30 days away) ───────────────
+
+const CANCEL_MIN_DAYS = 30;
+
+function isCancellable(prediction) {
+  if (prediction.outcome !== null) return false;
+  const deadlineMs = new Date(`${prediction.deadline}T00:00:00Z`).getTime();
+  return deadlineMs - Date.now() > CANCEL_MIN_DAYS * 24 * 60 * 60 * 1000;
+}
+
+async function handleCancelPrediction(interaction) {
+  const eligible = getUserUnresolvedPredictions(interaction.user.id).filter(isCancellable);
+  if (eligible.length === 0) {
+    return interaction.reply({
+      content: `❌ You have no cancellable predictions. Only open predictions with a deadline more than ${CANCEL_MIN_DAYS} days away can be cancelled.`,
+      flags: ['Ephemeral'],
+    });
+  }
+  return interaction.reply(buildCancelPicker(eligible, CANCEL_MIN_DAYS));
+}
+
+async function handleCancelSelect(interaction) {
+  const prediction = getPrediction(parseInt(interaction.values[0], 10));
+  if (!prediction || prediction.author_id !== interaction.user.id || !isCancellable(prediction)) {
+    return interaction.reply({ content: '❌ This prediction can no longer be cancelled.', flags: ['Ephemeral'] });
+  }
+  return interaction.update(buildUserCancelConfirm(prediction));
+}
+
+async function handleUserCancelConfirm(interaction, predictionId) {
+  const prediction = getPrediction(predictionId);
+  if (!prediction) {
+    return interaction.reply({ content: '❌ Already deleted.', flags: ['Ephemeral'] });
+  }
+  if (prediction.author_id !== interaction.user.id) {
+    return interaction.reply({ content: '❌ You can only cancel your own predictions.', flags: ['Ephemeral'] });
+  }
+  if (!isCancellable(prediction)) {
+    return interaction.reply({
+      content: `❌ This prediction can no longer be cancelled — the deadline must be more than ${CANCEL_MIN_DAYS} days away and the prediction unresolved.`,
+      flags: ['Ephemeral'],
+    });
+  }
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  await deletePredictionMessages(interaction.guildId, prediction);
+  deletePrediction(prediction.id);
+  await refreshLeaderboard(interaction.guildId).catch(() => {});
+  notifyAdmin(
+    interaction.guildId,
+    `🗑 <@${interaction.user.id}> cancelled their prediction **#${formatId(prediction.id)} — ${prediction.title}** (deadline ${prediction.deadline}).`
+  ).catch(() => {});
+
+  await interaction.editReply({
+    content: `🗑 Prediction **#${formatId(prediction.id)} — ${prediction.title}** cancelled.`,
   });
 }
 
@@ -3846,6 +3916,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'edit-panel': return await handleEditPanel(interaction);
         case 'link-upshot': return await handleLinkUpshot(interaction);
         case 'mystats': return await handleMyStats(interaction);
+        case 'cancel-prediction': return await handleCancelPrediction(interaction);
         case 'upshotrank': return await handleUpshotRank(interaction);
         case 'pastleaderboard': return await handlePastLeaderboard(interaction);
         case 'mycontests': return await handleMyContests(interaction);
@@ -3905,6 +3976,9 @@ client.on(Events.InteractionCreate, async interaction => {
       }
       if (interaction.customId === 'admin_configure') {
         return await handleAdminConfigure(interaction);
+      }
+      if (interaction.customId === 'cancel_pred_select') {
+        return await handleCancelSelect(interaction);
       }
     }
 
