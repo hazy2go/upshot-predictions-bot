@@ -783,6 +783,9 @@ async function handleMyStats(interaction) {
   const stats = getUserStats(interaction.user.id, monthKey);
   const scored = getUserMonthScoredPredictions(interaction.user.id, monthKey);
   const tier = getUserTier(interaction.user.id);
+  // Open predictions whose deadline falls in a future month don't show up in the
+  // monthly scoring list — surface them so the open slots reconcile on screen.
+  const futureOpen = getUserOpenPredictions(interaction.user.id).filter(p => p.month_key !== monthKey);
 
   // Card collection stats come from the linked wallet's balances (paginated, can
   // take a moment for large wallets), so defer and edit. No wallet → skip them.
@@ -793,7 +796,7 @@ async function handleMyStats(interaction) {
     cardStats = await getCardStats(profile.wallet_address).catch(() => null);
   }
 
-  const payload = buildStatsCard(stats, interaction.user.id, currentMonthLabel(), scored, tier, cardStats);
+  const payload = buildStatsCard(stats, interaction.user.id, currentMonthLabel(), scored, tier, cardStats, futureOpen);
   await interaction.editReply(payload);
 }
 

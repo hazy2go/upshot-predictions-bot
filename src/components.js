@@ -1135,7 +1135,7 @@ export function buildLeaderboard(entries, monthLabel, options = {}) {
 
 // ── Personal stats ───────────────────────────────────────────
 
-export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = [], tier = 0, cardStats = null) {
+export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = [], tier = 0, cardStats = null, futureOpen = []) {
   const children = [];
 
   children.push(text(`## 📊 Your Stats — ${monthLabel}`));
@@ -1185,6 +1185,21 @@ export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = []
     children.push(text(lines.join('\n')));
     if (scoredPredictions.length > 15) {
       children.push(text(`-# +${scoredPredictions.length - 15} more`));
+    }
+  }
+
+  if (futureOpen.length > 0) {
+    children.push(separator());
+    children.push(text(`**Open in Future Months (${futureOpen.length})**`));
+    const lines = futureOpen.slice(0, 15).map(p => {
+      const id = String(p.id).padStart(4, '0');
+      const stars = '⭐'.repeat(p.star_rating || 0);
+      const titleSnip = p.title.length > 55 ? p.title.slice(0, 55) + '…' : p.title;
+      return `⏳ \`#${id}\` ${stars} — ${titleSnip} (due ${p.deadline})`;
+    });
+    children.push(text(lines.join('\n')));
+    if (futureOpen.length > 15) {
+      children.push(text(`-# +${futureOpen.length - 15} more`));
     }
   }
 
