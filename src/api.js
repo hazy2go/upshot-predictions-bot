@@ -925,6 +925,19 @@ export async function getRaffleTop(raffleId, n = 3, totalTickets = null) {
 function normalizeStoreItem(raw, kind) {
   const priceRaw = raw.effectivePrice ?? raw.finalPrice ?? raw.pricePerPack ?? raw.basePrice;
   const price = priceRaw != null && Number.isFinite(Number(priceRaw)) ? Number(priceRaw) / 1_000_000 : null;
+
+  // Supply: Upshot exposes no explicit "initial drop size", only supply.{minted,
+  // burned} + remainingStock. minted = sold-but-unopened (live pack tokens),
+  // burned = opened (token destroyed, cards revealed), remainingStock = still on
+  // sale. So sold = minted + burned, and the initial drop = sold + remaining.
+  // (Derived total lands on clean round numbers, confirming the model.) Bundles
+  // carry no supply object, so these stay null there.
+  const minted = raw.supply?.minted != null ? Number(raw.supply.minted) : null;
+  const burned = raw.supply?.burned != null ? Number(raw.supply.burned) : null;
+  const remaining = raw.remainingStock ?? null;
+  const sold = minted != null && burned != null ? minted + burned : null;
+  const initialSupply = sold != null && remaining != null ? sold + remaining : null;
+
   return {
     id: raw.id,
     kind, // 'pack' | 'bundle'
@@ -936,7 +949,11 @@ function normalizeStoreItem(raw, kind) {
     currency: raw.priceCurrency || 'CASH',
     cardQuantity: raw.cardQuantity ?? null,   // packs
     totalPacks: raw.totalPacks ?? null,        // bundles
-    remaining: raw.remainingStock ?? null,
+    remaining,
+    minted,                                    // sold but unopened
+    burned,                                    // opened
+    sold,                                      // minted + burned
+    initialSupply,                             // sold + remaining (full drop)
     releaseDate: raw.releaseDate || null,
   };
 }
