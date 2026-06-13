@@ -2969,6 +2969,9 @@ async function handleCheckResolve(interaction, predictionId) {
   const previousOutcome = prediction.outcome;
   const result = await checkCardResolution(prediction.card_id);
 
+  if (result.error === 'no_winning_outcome') {
+    return interaction.editReply({ content: '⏳ Event is marked resolved on Upshot but the winning outcome isn\'t published yet — try again shortly.' });
+  }
   if (result.error) {
     return interaction.editReply({ content: `⚠️ API error: ${result.error}` });
   }
@@ -3220,8 +3223,10 @@ async function runAutoResolve() {
         console.warn(`Auto-resolve: #${prediction.id} card no longer exists on Upshot (${prediction.card_id})`);
         continue;
       }
-      if (result.error === 'fetch_failed') {
-        transient++; // transient (timeout/rate-limit/5xx) — recheck next sweep, not an error
+      if (result.error === 'fetch_failed' || result.error === 'no_winning_outcome') {
+        // transient (timeout/rate-limit/5xx), or event flipped to RESOLVED before
+        // its winner was published — recheck next sweep, don't mark a wrong loss.
+        transient++;
         continue;
       }
       if (result.error) {

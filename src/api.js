@@ -747,6 +747,13 @@ export async function checkCardResolution(cardId) {
   if (card.eventStatus !== 'RESOLVED') {
     return { resolved: false, won: null };
   }
+  // Guard: RESOLVED but no winning outcome yet (or a void/partial resolution).
+  // Don't fall through — outcomeId === undefined would mark EVERY card a loss,
+  // silently failing predictions that may have won. Leave it unresolved so the
+  // next sweep (or a human) settles it once the winner is actually published.
+  if (!card.winningOutcomeId) {
+    return { resolved: false, won: null, error: 'no_winning_outcome' };
+  }
   const won = card.outcomeId === card.winningOutcomeId;
   return { resolved: true, won };
 }
