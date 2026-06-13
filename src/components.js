@@ -428,6 +428,15 @@ function storePrice(item) {
   return `${amount} ${item.currency || 'CASH'}`;
 }
 
+// "X / Y" (remaining of the initial drop) when the drop size is known, else "X".
+// initialSupply is derived (sold + remaining); bundles carry no supply so it's
+// null there and we just show remaining. null-safe → returns null if no stock.
+function storeStock(item) {
+  if (item.remaining == null) return null;
+  const rem = item.remaining.toLocaleString('en-US');
+  return item.initialSupply ? `${rem} / ${item.initialSupply.toLocaleString('en-US')}` : rem;
+}
+
 export function buildStoreListed(item) {
   const isBundle = item.kind === 'bundle';
   const children = [];
@@ -444,7 +453,9 @@ export function buildStoreListed(item) {
   if (price) meta.push(`💵 **Price:** ${price}`);
   if (isBundle && item.totalPacks != null) meta.push(`📦 **Packs:** ${item.totalPacks}`);
   if (!isBundle && item.cardQuantity != null) meta.push(`🃏 **Cards per pack:** ${item.cardQuantity}`);
-  if (item.remaining != null) meta.push(`📊 **Remaining:** ${item.remaining.toLocaleString('en-US')}`);
+  const stock = storeStock(item);
+  if (item.status !== 'COMING_SOON' && stock) meta.push(`📊 **Remaining:** ${stock}`);
+  if (item.sold != null && item.sold > 0) meta.push(`🛒 **Sold:** ${item.sold.toLocaleString('en-US')}`);
   if (item.status === 'COMING_SOON') meta.push('🔜 **Coming soon**');
   if (meta.length) { children.push(separator()); children.push(text(meta.join('\n'))); }
 
@@ -475,7 +486,7 @@ export function buildStoreList(items) {
     const tag = i.kind === 'bundle' ? '🎁' : '📦';
     const soon = i.status === 'COMING_SOON' ? ' 🔜' : '';
     const price = storePrice(i);
-    const rem = i.remaining != null && i.remaining > 0 ? `${i.remaining.toLocaleString('en-US')} left` : '';
+    const rem = i.remaining != null && i.remaining > 0 ? `${storeStock(i)} left` : '';
     const bits = [price, rem].filter(Boolean).join(' · ');
     return `${tag} **${(i.name || i.id).slice(0, 70)}**${soon}${bits ? ` — ${bits}` : ''}`;
   };
