@@ -117,6 +117,44 @@ let _liveContestsInFlight = null;    // Promise<contest[]>
 const _standingsCache = new Map();   // contestId -> { at, value: {standings,totalLineups} }
 const _standingsInFlight = new Map(); // contestId -> Promise
 
+// The /contests endpoint is PAGINATED — meta: { total, lastPage, currentPage,
+// perPage }, perPage defaulting to 20. Fetching only page 1 silently drops every
+// contest past the first 20: a card entered in a LIVE contest on page 2+ then
+// reads as "not owned" (checkCardInContests never scans that contest — the "bot
+// says I don't own my card but I do" bug), and the contest watcher never sees
+// those contests to announce them. A high perPage collapses it to one request
+// (the endpoint honors perPage≥100, unlike /cards/balances which caps at 100);
+// we still page through lastPage in case that cap behavior ever changes.
+// Returns [] on a page-1 failure. Bounded concurrency keeps us off the shield.
+const CONTESTS_PER_PAGE = 200;
+const CONTESTS_MAX_PAGES = 25; // safety cap (~5000 contests); log if exceeded
+async function fetchAllContests() {
+  const page = (p) => fetchRetry(`${BASE}/contests?page=${p}&perPage=${CONTESTS_PER_PAGE}`, { timeout: 12_000 });
+  const arrOf = (json) => Array.isArray(json?.data ?? json) ? (json.data ?? json) : [];
+
+  const first = await page(1);
+  if (!first.ok) return [];
+  const firstJson = await first.json();
+  const out = [...arrOf(firstJson)];
+
+  let lastPage = firstJson.meta?.lastPage || 1;
+  if (lastPage > CONTESTS_MAX_PAGES) {
+    console.warn(`Upshot API: ${firstJson.meta?.total} contests (${lastPage} pages); capping at ${CONTESTS_MAX_PAGES}.`);
+    lastPage = CONTESTS_MAX_PAGES;
+  }
+
+  const CHUNK = 5;
+  for (let start = 2; start <= lastPage; start += CHUNK) {
+    const batch = [];
+    for (let p = start; p < start + CHUNK && p <= lastPage; p++) batch.push(p);
+    const results = await Promise.allSettled(batch.map(p => page(p).then(r => r.ok ? r.json() : null)));
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value) out.push(...arrOf(r.value));
+    }
+  }
+  return out;
+}
+
 // Live contests, deduped and cached. Returns [] on failure (never throws).
 async function getLiveContests() {
   if (_liveContests && Date.now() - _liveContests.at < LIVE_CONTESTS_TTL) {
@@ -125,12 +163,9 @@ async function getLiveContests() {
   if (_liveContestsInFlight) return _liveContestsInFlight;
   _liveContestsInFlight = (async () => {
     // NOTE: ?status=LIVE upstream filter is unreliable — returns only a subset
-    // of LIVE contests. Fetch all and filter client-side.
-    const res = await fetchRetry(`${BASE}/contests`, { timeout: 10_000 });
-    if (!res.ok) return [];
-    const json = await res.json();
-    const all = json.data || json;
-    return Array.isArray(all) ? all.filter(c => c.status === 'LIVE') : [];
+    // of LIVE contests. Fetch all (paginated) and filter client-side.
+    const all = await fetchAllContests();
+    return all.filter(c => c.status === 'LIVE');
   })().catch((err) => {
     console.error('Upshot API: getLiveContests failed:', err.message);
     return [];
@@ -696,10 +731,9 @@ export async function checkCardResolution(cardId) {
  */
 export async function getContests() {
   try {
-    const res = await fetchRetry(`${BASE}/contests`, { timeout: 12_000 });
-    if (!res.ok) return [];
-    const json = await res.json();
-    const all = json.data ?? json;
+    // Paginated upstream — page through all of it (see fetchAllContests), or the
+    // watcher never announces contests/results that land past the first page.
+    const all = await fetchAllContests();
     if (!Array.isArray(all)) return [];
     return all.map(c => ({
       id: c.id,
