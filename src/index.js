@@ -3565,10 +3565,19 @@ async function handleLuckyShotsCommand(interaction) {
 // so a pack and bundle can never collide.
 
 const STORE_WATCH_INTERVAL = 60 * 60 * 1000; // 60 min
-const STORE_SEED_V = 1;
+// v2: STORE_VISIBLE now excludes sold-out ACTIVE packs. /packs is paginated, so
+// the watcher sees the full back-catalogue (incl. long-sold-out ACTIVE packs
+// Upshot never flips to SOLD_OUT); a re-seed silently rebuilds per-guild state so
+// those don't get mis-announced as new listings.
+const STORE_SEED_V = 2;
 let storeWatchTimer = null;
 
-const STORE_VISIBLE = (status) => status === 'ACTIVE' || status === 'COMING_SOON';
+// "Listable" = on sale now WITH stock, or upcoming. A sold-out ACTIVE pack
+// (remaining 0 — Upshot leaves these ACTIVE rather than flipping to SOLD_OUT)
+// must never be announced. COMING_SOON is always listable: 0 stock there means
+// "not on sale yet", not sold out. Mirrors the /store list filter in components.js.
+const STORE_VISIBLE = (item) =>
+  (item.status === 'ACTIVE' && item.remaining !== 0) || item.status === 'COMING_SOON';
 
 async function getStoreItems() {
   const [packs, bundles] = await Promise.all([getStorePacks(), getStoreBundles()]);
@@ -3603,7 +3612,7 @@ async function runStoreWatch(guildId, { announce = true } = {}) {
     const seen = state[k];
 
     // Mark announced only on a successful send (see contest watcher note).
-    if (STORE_VISIBLE(item.status) && !seen.announcedListed && channel) {
+    if (STORE_VISIBLE(item) && !seen.announcedListed && channel) {
       try {
         await channel.send(buildStoreListed(item));
         seen.announcedListed = true; listed++;
