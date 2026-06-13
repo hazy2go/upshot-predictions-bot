@@ -964,13 +964,16 @@ export async function getStoreBundles() {
  */
 export async function getSeasonRank(walletAddress) {
   try {
-    // 1. Get current season
+    // 1. Get current season. Prefer the one explicitly flagged ACTIVE rather
+    // than trusting array order — /seasons happens to come back newest-first
+    // today, but if that ever flips (or a not-yet-started season lands at
+    // index 0) we'd report rank/XP for the wrong month. Fall back to seasons[0].
     const seasonsRes = await fetchRetry(`${BASE}/seasons`, { timeout: 10_000 });
     if (!seasonsRes.ok) return null;
     const seasonsJson = await seasonsRes.json();
     const seasons = seasonsJson.data || [];
     if (seasons.length === 0) return null;
-    const season = seasons[0]; // most recent season
+    const season = seasons.find(s => s.status === 'ACTIVE') || seasons[0];
 
     // 2. Get userId from wallet
     const userRes = await fetchRetry(`${BASE}/users/${walletAddress}`, { timeout: 10_000 });
