@@ -117,20 +117,24 @@ let _liveContestsInFlight = null;    // Promise<contest[]>
 const _standingsCache = new Map();   // contestId -> { at, value: {standings,totalLineups} }
 const _standingsInFlight = new Map(); // contestId -> Promise
 
-// The /contests endpoint is PAGINATED — meta: { total, lastPage, currentPage,
-// perPage }, perPage defaulting to 20. Fetching only page 1 silently drops every
-// contest past the first 20: a card entered in a LIVE contest on page 2+ then
-// reads as "not owned" (checkCardInContests never scans that contest — the "bot
-// says I don't own my card but I do" bug), and the contest watcher never sees
-// those contests to announce them. A high perPage collapses it to one request
-// (the endpoint honors perPage≥100, unlike /cards/balances which caps at 100);
-// we still page through lastPage in case that cap behavior ever changes.
-// Returns [] on a page-1 failure. Bounded concurrency keeps us off the shield.
-const CONTESTS_PER_PAGE = 200;
-const CONTESTS_MAX_PAGES = 25; // safety cap (~5000 contests); log if exceeded
-async function fetchAllContests() {
-  const page = (p) => fetchRetry(`${BASE}/contests?page=${p}&perPage=${CONTESTS_PER_PAGE}`, { timeout: 12_000 });
+// Several Upshot list endpoints (/contests, /packs, /bundles, /raffles) are
+// PAGINATED — meta: { total, lastPage, currentPage, perPage }, perPage defaulting
+// to 20. Fetching only page 1 silently drops everything past the first 20: a card
+// entered in a LIVE contest on page 2+ reads as "not owned" (checkCardInContests
+// never scans that contest — the "bot says I don't own my card but I do" bug),
+// the store hides packs, the raffle list/watcher misses raffles. This generic
+// helper pages through ALL of it: fetch page 1, read meta.lastPage, then fetch the
+// rest in bounded-concurrency batches (keeping us off the shield). `perPage` is
+// the endpoint's max — these cap at 100 (≥150 returns 400), so 100 collapses
+// each to a single page today while still paging if a count ever exceeds it.
+// `buildUrl(page, perPage)` lets callers carry their own query params (e.g.
+// ?status=). Returns the concatenated `data` arrays; [] on a page-1 failure;
+// pages that error are skipped (partial result rather than total failure).
+const LIST_PER_PAGE = 100;
+const LIST_MAX_PAGES = 25; // safety cap (~2500 entries); log if exceeded
+async function fetchAllPages(buildUrl, { perPage = LIST_PER_PAGE, maxPages = LIST_MAX_PAGES, timeout = 12_000, label = 'list' } = {}) {
   const arrOf = (json) => Array.isArray(json?.data ?? json) ? (json.data ?? json) : [];
+  const page = (p) => fetchRetry(buildUrl(p, perPage), { timeout });
 
   const first = await page(1);
   if (!first.ok) return [];
@@ -138,9 +142,9 @@ async function fetchAllContests() {
   const out = [...arrOf(firstJson)];
 
   let lastPage = firstJson.meta?.lastPage || 1;
-  if (lastPage > CONTESTS_MAX_PAGES) {
-    console.warn(`Upshot API: ${firstJson.meta?.total} contests (${lastPage} pages); capping at ${CONTESTS_MAX_PAGES}.`);
-    lastPage = CONTESTS_MAX_PAGES;
+  if (lastPage > maxPages) {
+    console.warn(`Upshot API: ${label} has ${firstJson.meta?.total} entries (${lastPage} pages); capping at ${maxPages}.`);
+    lastPage = maxPages;
   }
 
   const CHUNK = 5;
@@ -154,6 +158,9 @@ async function fetchAllContests() {
   }
   return out;
 }
+
+const fetchAllContests = () =>
+  fetchAllPages((p, pp) => `${BASE}/contests?page=${p}&perPage=${pp}`, { label: 'contests' });
 
 // Live contests, deduped and cached. Returns [] on failure (never throws).
 async function getLiveContests() {
@@ -814,11 +821,14 @@ const RAFFLE_BASE = process.env.UPSHOT_RAFFLE_BASE || BASE;
  */
 export async function getRaffles(status) {
   try {
-    const qs = status ? `?status=${encodeURIComponent(status)}` : '';
-    const res = await fetchRetry(`${RAFFLE_BASE}/raffles${qs}`, { timeout: 12_000 });
-    if (!res.ok) return [];
-    const json = await res.json();
-    const all = json.data ?? json;
+    // /raffles is paginated — page through all of it (see fetchAllPages) or the
+    // list/watcher misses every raffle past the first 20. Carry the status filter
+    // into each page request.
+    const statusQs = status ? `&status=${encodeURIComponent(status)}` : '';
+    const all = await fetchAllPages(
+      (p, pp) => `${RAFFLE_BASE}/raffles?page=${p}&perPage=${pp}${statusQs}`,
+      { label: 'raffles' },
+    );
     if (!Array.isArray(all)) return [];
     return all.map(r => ({
       id: r.id,
@@ -927,10 +937,10 @@ function normalizeStoreItem(raw, kind) {
 // List store packs (normalized). Read-only, best-effort: [] on failure.
 export async function getStorePacks() {
   try {
-    const res = await fetchRetry(`${BASE}/packs`, { timeout: 12_000 });
-    if (!res.ok) return [];
-    const all = (await res.json()).data ?? [];
-    return Array.isArray(all) ? all.map(p => normalizeStoreItem(p, 'pack')).filter(x => x.id) : [];
+    // /packs is paginated — page through all of it (see fetchAllPages) or the
+    // store silently hides every pack past the first 20.
+    const all = await fetchAllPages((p, pp) => `${BASE}/packs?page=${p}&perPage=${pp}`, { label: 'packs' });
+    return all.map(p => normalizeStoreItem(p, 'pack')).filter(x => x.id);
   } catch (err) {
     console.error('Upshot API: getStorePacks() failed:', err.message);
     return [];
@@ -940,10 +950,8 @@ export async function getStorePacks() {
 // List store bundles (normalized). Read-only, best-effort: [] on failure.
 export async function getStoreBundles() {
   try {
-    const res = await fetchRetry(`${BASE}/bundles`, { timeout: 12_000 });
-    if (!res.ok) return [];
-    const all = (await res.json()).data ?? [];
-    return Array.isArray(all) ? all.map(b => normalizeStoreItem(b, 'bundle')).filter(x => x.id) : [];
+    const all = await fetchAllPages((p, pp) => `${BASE}/bundles?page=${p}&perPage=${pp}`, { label: 'bundles' });
+    return all.map(b => normalizeStoreItem(b, 'bundle')).filter(x => x.id);
   } catch (err) {
     console.error('Upshot API: getStoreBundles() failed:', err.message);
     return [];
