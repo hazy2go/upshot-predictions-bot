@@ -57,7 +57,7 @@ import {
 
 import {
   extractWallet, extractCardId,
-  getCardDetails, checkCardOwnership, checkCardResolution,
+  getCardDetails, checkCardOwnership, checkCardResolution, isInstantWinCard,
   getSeasonRank, getUserContestLineups, getPredictableCards, getCardStats,
   getUserProfile, getUserPacks, transferPack, refreshUpshotAccessToken,
   getContests, getContestTop, getRaffles, getRaffleDetail, getRaffleTop,
@@ -2415,6 +2415,15 @@ async function handlePredictModalSubmit(interaction) {
       } catch {
         // API is down — let through, admins will check
       }
+    }
+
+    // Forbid Instant Cash / Instant XP cards — they pay out on pack-pull and
+    // carry no prediction, so they can't back one. (Only reject when we actually
+    // got card data; a failed lookup falls through and is handled above.)
+    if (cardDetails && isInstantWinCard(cardDetails)) {
+      return interaction.editReply({
+        content: '❌ That\'s an Instant Win card (Instant Cash or Instant XP). These pay out when pulled from a pack and can\'t be used to back a prediction. Pick a regular prediction card instead.',
+      });
     }
 
     try {

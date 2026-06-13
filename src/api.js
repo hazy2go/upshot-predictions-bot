@@ -288,6 +288,9 @@ async function fetchCardDetails(cardId, { retries, timeout }) {
       eventStatus: card.event?.status || null,
       winningOutcomeId: card.event?.winningOutcomeId || null,
       resolvedAt: card.event?.resolvedAt || null,
+      kind: card.kind || null,
+      isInstantWin: !!card.isInstantWin,
+      prizeType: card.prizeType || null,
     };
     cacheSet(cardDetailsCache, cardId, { at: Date.now(), value }, 2000);
     return { ok: true, value };
@@ -480,6 +483,26 @@ function eventDeadlinePassed(details) {
 }
 
 /**
+ * True for "instant win" cards — Instant Cash and Instant XP cards that pay out
+ * the moment they're pulled from a pack and carry NO prediction. They must never
+ * be usable to back a prediction. Upshot marks them several consistent ways
+ * (present on both the card-detail payload and the balance embed); we check all
+ * of them so a single field rename upstream can't silently let them through:
+ *   card.isInstantWin === true
+ *   card.kind === 'INSTANT'              (event.kind matches)
+ *   event.resolutionType === 'INSTANT'   (vs 'STANDARD' for real predictions)
+ * Accepts either a normalized getCardDetails result or a raw balance-embed card.
+ */
+export function isInstantWinCard(cardLike) {
+  if (!cardLike) return false;
+  const event = cardLike.event || cardLike.outcome?.event || null;
+  return cardLike.isInstantWin === true
+    || cardLike.kind === 'INSTANT'
+    || event?.kind === 'INSTANT'
+    || event?.resolutionType === 'INSTANT';
+}
+
+/**
  * Drop any card whose event deadline has already passed. Cards that carry an
  * embedded `event` (everything from wallet balances) are filtered inline with
  * NO network call — critical for large wallets (hundreds/thousands of cards;
@@ -648,6 +671,8 @@ export async function getPredictableCards(walletAddress) {
       const claimed = parseInt(entry.claimedQuantity || '0', 10);
       const unclaimed = parseInt(entry.unclaimedQuantity || '0', 10);
       if (claimed + unclaimed <= 0) continue;
+      // Instant Cash / Instant XP cards can't back a prediction — never list them.
+      if (isInstantWinCard(entry.card)) continue;
       const event = entry.card?.event || entry.card?.outcome?.event || null;
       byId.set(cardId, { id: cardId, name: entry.card?.name || cardId, inContest: false, event });
     }
