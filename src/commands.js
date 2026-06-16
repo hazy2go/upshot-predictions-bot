@@ -339,6 +339,10 @@ export const commands = [
         .setDescription('Use AI to suggest star ratings for every unrated prediction (review before applying)')
     )
     .addSubcommand(sub =>
+      sub.setName('recheck-all-ratings')
+        .setDescription('Re-run the AI rating on every active (unresolved) rated prediction (review before applying)')
+    )
+    .addSubcommand(sub =>
       sub.setName('check-all-resolutions')
         .setDescription('Manually run the auto-resolve sweep for every unresolved rated prediction')
     )

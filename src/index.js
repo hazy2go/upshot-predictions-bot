@@ -27,7 +27,7 @@ import {
   getUnresolvedRatedPredictions, getResolvedCount, getUnresolvedCount,
   getProfileByWallet, getProfileByUrl, getAllUsers, getDbPath,
   upsertCommunityVote, getCommunityVoteSummary,
-  getPendingVerificationPredictions, getUnratedVerifiedPredictions,
+  getPendingVerificationPredictions, getUnratedVerifiedPredictions, getRatedActivePredictions,
   getContestWatchState, setContestWatchState,
   getRaffleWatchState, setRaffleWatchState,
   getStoreWatchState, setStoreWatchState,
@@ -1950,6 +1950,9 @@ async function handleSetup(interaction) {
     case 'auto-rate-all': {
       return handleAutoRateAll(interaction, guildId);
     }
+    case 'recheck-all-ratings': {
+      return handleRecheckAllRatings(interaction, guildId);
+    }
     case 'check-all-resolutions': {
       return handleCheckAllResolutions(interaction);
     }
@@ -2226,6 +2229,80 @@ async function handleAutoRateAll(interaction, guildId) {
   });
 }
 
+async function handleRecheckAllRatings(interaction, guildId) {
+  const preds = getRatedActivePredictions();
+  if (preds.length === 0) {
+    return interaction.reply({ content: '✅ No active rated predictions to recheck.', flags: ['Ephemeral'] });
+  }
+
+  if (!process.env.NVIDIA_NIM_API_KEY) {
+    return interaction.reply({ content: '❌ `NVIDIA_NIM_API_KEY` is not set in .env.', flags: ['Ephemeral'] });
+  }
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  const suggestions = [];
+  const failures = [];
+
+  for (const p of preds) {
+    try {
+      const ctx = await gatherRatingContext(p);
+      const result = await rateWithAI(ctx);
+      suggestions.push({ id: p.id, stars: result.stars, oldStars: p.star_rating, reason: result.reason, title: p.title });
+      // Light throttle to be kind to free-tier rate limits
+      await new Promise(r => setTimeout(r, 800));
+    } catch (err) {
+      failures.push(`${formatId(p.id)} — ${err.message.slice(0, 120)}`);
+    }
+  }
+
+  if (suggestions.length === 0) {
+    let content = `❌ All ${preds.length} AI calls failed.\n${failures.join('\n')}`;
+    if (content.length > 1900) content = content.slice(0, 1870) + '\n... *(truncated)*';
+    return interaction.editReply({ content });
+  }
+
+  const changed = suggestions.filter(s => s.stars !== s.oldStars);
+
+  if (changed.length === 0) {
+    const footer = failures.length ? `\n\n⚠️ **${failures.length} failed:**\n${failures.join('\n')}` : '';
+    return interaction.editReply({
+      content: `✅ Rechecked **${suggestions.length}** active prediction${suggestions.length === 1 ? '' : 's'} — the AI agrees with every current rating, nothing to change.${footer}`,
+    });
+  }
+
+  const batchId = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  // Only the changed suggestions get applied; mode 'recheck' lets the accept
+  // handler re-rate predictions that are already rated.
+  pendingRatingBatches.set(batchId, { suggestions: changed, mode: 'recheck', guildId, adminId: interaction.user.id, createdAt: Date.now() });
+
+  const header = `**AI re-rating suggestions** — ${changed.length} change${changed.length === 1 ? '' : 's'} across ${suggestions.length} active prediction${suggestions.length === 1 ? '' : 's'} (model: \`${NIM_MODEL}\`)`;
+  const body = changed.map(s => {
+    const title = s.title.length > 55 ? s.title.slice(0, 52) + '...' : s.title;
+    return `${formatId(s.id)} ${renderStars(s.oldStars)} → ${renderStars(s.stars)} — *${title}*\n   └ ${s.reason}`;
+  }).join('\n\n');
+
+  const footer = failures.length
+    ? `\n\n⚠️ **${failures.length} failed:**\n${failures.join('\n')}`
+    : '';
+
+  let content = `${header}\n\n${body}${footer}`;
+  if (content.length > 1900) {
+    content = content.slice(0, 1870) + '\n... *(truncated — batch still has all changes)*';
+  }
+
+  return interaction.editReply({
+    content,
+    components: [{
+      type: 1, // ActionRow
+      components: [
+        { type: 2, style: 3, label: `✅ Apply ${changed.length} change${changed.length === 1 ? '' : 's'}`, custom_id: `accept_ratings:${batchId}` },
+        { type: 2, style: 4, label: 'Cancel', custom_id: `cancel_ratings:${batchId}` },
+      ],
+    }],
+  });
+}
+
 async function handleAcceptRatings(interaction, batchId) {
   if (!isAdmin(interaction.member)) {
     return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
@@ -2237,21 +2314,29 @@ async function handleAcceptRatings(interaction, batchId) {
   }
   pendingRatingBatches.delete(batchId);
 
-  await interaction.update({ content: `⏳ Applying ${batch.suggestions.length} ratings...`, components: [] });
+  const isRecheck = batch.mode === 'recheck';
+  await interaction.update({ content: `⏳ Applying ${batch.suggestions.length} ${isRecheck ? 'rating change' : 'rating'}${batch.suggestions.length === 1 ? '' : 's'}...`, components: [] });
 
   let applied = 0;
   const skipped = [];
   for (const s of batch.suggestions) {
     const current = getPrediction(s.id);
     if (!current) { skipped.push(`${formatId(s.id)} (deleted)`); continue; }
-    if (isRated(current)) { skipped.push(`${formatId(s.id)} (already rated)`); continue; }
-    if (!current.ownership_verified) { skipped.push(`${formatId(s.id)} (no longer verified)`); continue; }
+    if (isRecheck) {
+      // Re-rating an already-rated prediction; only skip if it has since
+      // resolved (outcome is locked) or the rating already matches.
+      if (current.outcome) { skipped.push(`${formatId(s.id)} (already resolved)`); continue; }
+      if (current.star_rating === s.stars) { skipped.push(`${formatId(s.id)} (unchanged)`); continue; }
+    } else {
+      if (isRated(current)) { skipped.push(`${formatId(s.id)} (already rated)`); continue; }
+      if (!current.ownership_verified) { skipped.push(`${formatId(s.id)} (no longer verified)`); continue; }
+    }
     await applyStarRating(s.id, s.stars, batch.adminId, batch.guildId);
     applied++;
   }
 
   const lines = [
-    `✅ Applied **${applied}** AI star rating${applied === 1 ? '' : 's'}`,
+    `✅ Applied **${applied}** ${isRecheck ? 'rating change' : 'AI star rating'}${applied === 1 ? '' : 's'}`,
   ];
   if (skipped.length) lines.push(`⏭️ Skipped **${skipped.length}**: ${skipped.join(', ')}`);
   return interaction.editReply({ content: lines.join('\n'), components: [] });

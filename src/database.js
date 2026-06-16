@@ -277,6 +277,15 @@ export function getUnratedVerifiedPredictions() {
   return rows.map(r => ({ ...r, images: JSON.parse(r.images) }));
 }
 
+// Active (unresolved) predictions that already have a star rating — used by
+// /setup recheck-all-ratings to re-evaluate the AI rating before they resolve.
+export function getRatedActivePredictions() {
+  const rows = db.prepare(
+    'SELECT * FROM predictions WHERE star_rating IS NOT NULL AND outcome IS NULL ORDER BY created_at ASC'
+  ).all();
+  return rows.map(r => ({ ...r, images: JSON.parse(r.images) }));
+}
+
 export function countUserUnresolved(authorId) {
   return db.prepare(
     "SELECT COUNT(*) as count FROM predictions WHERE author_id = ? AND status = 'rated' AND outcome IS NULL"
