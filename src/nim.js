@@ -9,10 +9,13 @@
 const BASE = 'https://integrate.api.nvidia.com/v1';
 export const MODEL = 'nvidia/nemotron-3-super-120b-a12b';
 
-// Nemotron thinks before answering; cap the reasoning budget so a single rating
-// can't run away, but leave enough room for the short JSON answer after it.
-const REASONING_BUDGET = 4096;
+// Nemotron thinks before answering, and every reasoning token is streamed — so
+// latency scales with this budget. A 0-3 star call with a one-sentence reason
+// needs very little deliberation, so keep it tight: a big budget (e.g. 4096)
+// blows past the request timeout on the free tier and every call times out.
+const REASONING_BUDGET = 1024;
 const MAX_TOKENS = REASONING_BUDGET + 256;
+const REQUEST_TIMEOUT_MS = 120_000;
 
 const RUBRIC = `You are a STRICT prediction-market analyst rating the quality of a user-submitted prediction on a 0-3 star scale. Be harsh: most submissions are low effort. A submission that is not a genuine, original prediction gets 0 stars and earns the user NOTHING.
 
@@ -135,13 +138,14 @@ export async function rateWithAI(ctx) {
   let lastErr;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const content = await callNim(apiKey, body, 60_000);
+      const content = await callNim(apiKey, body, REQUEST_TIMEOUT_MS);
       const parsed = parseRating(content);
       if (!parsed) throw new Error(`AI returned unparseable response: ${content.slice(0, 200)}`);
       return parsed;
     } catch (err) {
       lastErr = err;
-      const transient = /timeout|terminated|fetch failed|NVIDIA NIM 5\d\d/i.test(err.message);
+      // Retry timeouts, dropped connections, 5xx, and 429 rate-limits.
+      const transient = /timeout|terminated|fetch failed|NVIDIA NIM (?:5\d\d|429)/i.test(err.message);
       if (!transient || attempt === 3) throw err;
       console.warn(`rateWithAI [${MODEL}] attempt ${attempt} failed (${err.message}) — retrying`);
       await new Promise(r => setTimeout(r, 1500));

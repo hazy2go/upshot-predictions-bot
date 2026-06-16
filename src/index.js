@@ -2164,6 +2164,51 @@ async function gatherRatingContext(prediction) {
   return ctx;
 }
 
+// How many AI rating calls to run at once. Nemotron is slow per call, so a
+// sequential loop over a big batch can take many minutes; a small pool cuts
+// wall-clock without hammering the free-tier rate limit (429s are retried).
+const RATE_CONCURRENCY = 3;
+
+/**
+ * Run an async mapper over `items` with at most `concurrency` in flight,
+ * preserving input order in the returned results array.
+ */
+async function mapPool(items, concurrency, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+  return results;
+}
+
+/**
+ * AI-rate a list of predictions concurrently. `extra(p)` lets the caller attach
+ * fields (e.g. oldStars) to each suggestion. Returns { suggestions, failures }.
+ */
+async function rateManyPredictions(preds, extra = () => ({})) {
+  const suggestions = [];
+  const failures = [];
+  const results = await mapPool(preds, RATE_CONCURRENCY, async (p) => {
+    try {
+      const ctx = await gatherRatingContext(p);
+      const result = await rateWithAI(ctx);
+      return { ok: true, suggestion: { id: p.id, stars: result.stars, reason: result.reason, title: p.title, ...extra(p) } };
+    } catch (err) {
+      return { ok: false, failure: `${formatId(p.id)} — ${err.message.slice(0, 120)}` };
+    }
+  });
+  for (const r of results) {
+    if (r.ok) suggestions.push(r.suggestion);
+    else failures.push(r.failure);
+  }
+  return { suggestions, failures };
+}
+
 async function handleAutoRateAll(interaction, guildId) {
   const preds = getUnratedVerifiedPredictions();
   if (preds.length === 0) {
@@ -2176,20 +2221,7 @@ async function handleAutoRateAll(interaction, guildId) {
 
   await interaction.deferReply({ flags: ['Ephemeral'] });
 
-  const suggestions = [];
-  const failures = [];
-
-  for (const p of preds) {
-    try {
-      const ctx = await gatherRatingContext(p);
-      const result = await rateWithAI(ctx);
-      suggestions.push({ id: p.id, stars: result.stars, reason: result.reason, title: p.title });
-      // Light throttle to be kind to free-tier rate limits
-      await new Promise(r => setTimeout(r, 800));
-    } catch (err) {
-      failures.push(`${formatId(p.id)} — ${err.message.slice(0, 120)}`);
-    }
-  }
+  const { suggestions, failures } = await rateManyPredictions(preds);
 
   if (suggestions.length === 0) {
     let content = `❌ All ${preds.length} AI calls failed.\n${failures.join('\n')}`;
@@ -2241,20 +2273,7 @@ async function handleRecheckAllRatings(interaction, guildId) {
 
   await interaction.deferReply({ flags: ['Ephemeral'] });
 
-  const suggestions = [];
-  const failures = [];
-
-  for (const p of preds) {
-    try {
-      const ctx = await gatherRatingContext(p);
-      const result = await rateWithAI(ctx);
-      suggestions.push({ id: p.id, stars: result.stars, oldStars: p.star_rating, reason: result.reason, title: p.title });
-      // Light throttle to be kind to free-tier rate limits
-      await new Promise(r => setTimeout(r, 800));
-    } catch (err) {
-      failures.push(`${formatId(p.id)} — ${err.message.slice(0, 120)}`);
-    }
-  }
+  const { suggestions, failures } = await rateManyPredictions(preds, (p) => ({ oldStars: p.star_rating }));
 
   if (suggestions.length === 0) {
     let content = `❌ All ${preds.length} AI calls failed.\n${failures.join('\n')}`;
