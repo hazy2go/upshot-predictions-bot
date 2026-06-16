@@ -40,6 +40,7 @@ export const Colors = {
 
 // Point values
 export const Points = {
+  Star0: 0,
   Star1: 1,
   Star2: 3,
   Star3: 5,
@@ -59,12 +60,28 @@ export const Status = {
 // Default categories (used if none configured via /setup)
 export const DefaultCategories = ['DeFi', 'NFTs', 'L1-L2', 'Gaming', 'Macro'];
 
+// A prediction is "rated" once it has a star value — including 0. Because 0 is
+// falsy in JS, never test `prediction.star_rating` for truthiness; use this.
+export function isRated(prediction) {
+  return prediction != null && prediction.star_rating != null;
+}
+
 export function starPoints(stars) {
-  return [0, Points.Star1, Points.Star2, Points.Star3][stars] || 0;
+  return [Points.Star0, Points.Star1, Points.Star2, Points.Star3][stars] ?? 0;
+}
+
+// Visual for a star value. 0 = low-effort, shown with a distinct badge so it can
+// never be mistaken for an unrated prediction. null/undefined = not yet rated.
+export function renderStars(stars) {
+  if (stars == null) return '—';
+  if (stars <= 0) return '🚫 0★';
+  return '⭐'.repeat(stars) + '☆'.repeat(3 - stars);
 }
 
 export function weightedStarRating(adminStars, communityAvg) {
-  const admin = Math.max(1, Math.min(3, adminStars || 1));
+  const admin = Math.max(0, Math.min(3, adminStars ?? 0));
+  // 0★ is a deliberate low-effort call — community votes can't rescue it.
+  if (admin === 0) return 0;
   if (!communityAvg || communityAvg === 0) return admin;
   const community = Math.max(0, Math.min(3, communityAvg));
   const weighted = admin * 0.7 + community * 0.3;
@@ -72,6 +89,8 @@ export function weightedStarRating(adminStars, communityAvg) {
 }
 
 export function totalPoints(stars, outcome, hasTweet = false) {
+  // Low-effort (0★) submissions earn nothing — no quality, hit, or tweet points.
+  if (!stars || stars <= 0) return 0;
   const base = starPoints(stars);
   const hitBonus = outcome === 'hit' ? Points.HitBonus : 0;
   const tweetBonus = outcome === 'hit' && hasTweet ? Points.TweetBonus : 0;

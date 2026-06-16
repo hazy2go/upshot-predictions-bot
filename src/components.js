@@ -1,6 +1,6 @@
 import {
   ComponentType as CT, ButtonStyle, Colors, Points,
-  statusLabel, statusColor, starPoints, weightedStarRating, Status,
+  statusLabel, statusColor, starPoints, weightedStarRating, Status, isRated, renderStars,
 } from './constants.js';
 
 // ── Helpers ─────────────────────────────────────────────────
@@ -682,20 +682,24 @@ const helpPages = [
   [
     '## Points & Community Voting',
     '',
-    '**Admin rates quality (1-3 stars)**',
-    '⭐ 1 star = 1 pt · ⭐⭐ 2 stars = 3 pts · ⭐⭐⭐ 3 stars = 5 pts',
+    '**Quality rating (0-3 stars)**',
+    '🚫 0 stars = **0 pts** · ⭐ 1 star = 1 pt · ⭐⭐ 2 stars = 3 pts · ⭐⭐⭐ 3 stars = 5 pts',
+    '',
+    '🚫 **0 stars = low-effort.** Restating the card, a question, hype, off-topic or spam earns **nothing** — no points, and **no hit or tweet bonus even if it comes true.** Put in real effort: make an original call and back it up.',
     '',
     '**Community voting**',
     'Every prediction has vote buttons — rate others\' predictions 1-3 stars! You can\'t vote on your own. The final quality rating is:',
     '- **70% admin** + **30% community average**',
     '- You can change your vote at any time',
+    '- A 0★ low-effort rating stands on its own — community votes can\'t lift it',
     '',
-    '**Outcome Bonuses**',
+    '**Outcome Bonuses** (1★+ only)',
     '🟢 Prediction hits = **+10 pts**',
     '📎 Tweet linked + hit = **+1 pt**',
     '🔴 Prediction fails = quality pts only',
     '',
     '-# Example: admin 3⭐, community avg 2⭐ → weighted 3⭐ (5pts) + hit (10) + tweet (1) = **16 pts**',
+    '-# Example: 🚫 0★ low-effort → **0 pts**, even if it hits and has a tweet',
   ].join('\n'),
 
   // Page 4 — Rules & Tips
@@ -913,30 +917,35 @@ export function buildPredictionCard(prediction, upshotUrl) {
   if (prediction.community_star_avg) {
     const communityStars = prediction.community_star_avg.toFixed(1);
     const communityLine = `👥 Community: **${communityStars}** avg`;
-    if (prediction.star_rating) {
+    if (isRated(prediction)) {
       const effective = weightedStarRating(prediction.star_rating, prediction.community_star_avg);
-      const adminStars = '⭐'.repeat(prediction.star_rating);
-      children.push(text(`${communityLine} · Admin: ${adminStars} · Weighted: **${effective}**/3`));
+      children.push(text(`${communityLine} · Admin: ${renderStars(prediction.star_rating)} · Weighted: **${renderStars(effective)}**`));
     } else {
       children.push(text(communityLine));
     }
   }
 
   // Points display (if rated)
-  if (prediction.star_rating) {
+  if (isRated(prediction)) {
     const effective = weightedStarRating(prediction.star_rating, prediction.community_star_avg);
-    const stars = '⭐'.repeat(effective) + '☆'.repeat(3 - effective);
-    let pointsLine = `${stars} ${starPoints(effective)} pts`;
 
-    if (prediction.outcome === 'hit') {
-      const parts = [`+${starPoints(effective)} quality`, '+10 hit bonus'];
-      if (prediction.tweet_url) parts.push(`+${Points.TweetBonus} tweet bonus`);
-      pointsLine = `${stars} **${prediction.total_points} pts awarded** (${parts.join(', ')})`;
-    } else if (prediction.outcome === 'fail') {
-      pointsLine = `${stars} **${prediction.total_points} pts awarded** (quality only)`;
+    if (effective === 0) {
+      // Low-effort: make it unmistakable that this submission earned nothing.
+      children.push(text('🚫 **Low-effort — 0★** · **No points awarded** (no rewards even if it hits or has a tweet)'));
+    } else {
+      const stars = renderStars(effective);
+      let pointsLine = `${stars} ${starPoints(effective)} pts`;
+
+      if (prediction.outcome === 'hit') {
+        const parts = [`+${starPoints(effective)} quality`, '+10 hit bonus'];
+        if (prediction.tweet_url) parts.push(`+${Points.TweetBonus} tweet bonus`);
+        pointsLine = `${stars} **${prediction.total_points} pts awarded** (${parts.join(', ')})`;
+      } else if (prediction.outcome === 'fail') {
+        pointsLine = `${stars} **${prediction.total_points} pts awarded** (quality only)`;
+      }
+
+      children.push(text(pointsLine));
     }
-
-    children.push(text(pointsLine));
   }
 
   // Footer
@@ -1031,10 +1040,9 @@ export function buildAdminCard(prediction, upshotUrl) {
   // Status info
   const label = statusLabel(prediction.status);
   let statusInfo = `**Status:** ${label}`;
-  if (prediction.star_rating) {
+  if (isRated(prediction)) {
     const effective = weightedStarRating(prediction.star_rating, prediction.community_star_avg);
-    const stars = '⭐'.repeat(prediction.star_rating) + '☆'.repeat(3 - prediction.star_rating);
-    statusInfo += ` · **Admin:** ${stars} · **Weighted:** ${effective}/3 (${starPoints(effective)} pts)`;
+    statusInfo += ` · **Admin:** ${renderStars(prediction.star_rating)} · **Weighted:** ${renderStars(effective)} (${starPoints(effective)} pts)`;
   }
   if (prediction.ownership_verified) {
     statusInfo += ` · ✅ Ownership verified by <@${prediction.verified_by}>`;
@@ -1052,12 +1060,12 @@ export function buildAdminCard(prediction, upshotUrl) {
   }
 
   if (prediction.ownership_verified) {
-    const label = prediction.star_rating ? '⭐ Change Rating' : '⭐ Assign Stars';
-    const style = prediction.star_rating ? ButtonStyle.Secondary : ButtonStyle.Primary;
+    const label = isRated(prediction) ? '⭐ Change Rating' : '⭐ Assign Stars';
+    const style = isRated(prediction) ? ButtonStyle.Secondary : ButtonStyle.Primary;
     buttons.push(button(`assign_stars:${prediction.id}`, label, style));
   }
 
-  if (prediction.star_rating) {
+  if (isRated(prediction)) {
     buttons.push(button(`check_resolve:${prediction.id}`, '🔍 Recheck', ButtonStyle.Primary));
     buttons.push(button(`mark_hit:${prediction.id}`, '🟢 Mark Hit', ButtonStyle.Success));
     buttons.push(button(`mark_fail:${prediction.id}`, '🔴 Mark Fail', ButtonStyle.Danger));
@@ -1188,7 +1196,7 @@ export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = []
     children.push(text(`**Scoring Predictions (${scoredPredictions.length})**`));
     const lines = scoredPredictions.slice(0, 15).map(p => {
       const id = String(p.id).padStart(4, '0');
-      const stars = '⭐'.repeat(p.star_rating || 0);
+      const stars = renderStars(p.star_rating);
       const outcomeIcon = p.outcome === 'hit' ? '🟢' : p.outcome === 'fail' ? '🔴' : '⏳';
       const titleSnip = p.title.length > 55 ? p.title.slice(0, 55) + '…' : p.title;
       return `${outcomeIcon} \`#${id}\` **${p.total_points}**pts ${stars} — ${titleSnip}`;
@@ -1204,7 +1212,7 @@ export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = []
     children.push(text(`**Open in Future Months (${futureOpen.length})**`));
     const lines = futureOpen.slice(0, 15).map(p => {
       const id = String(p.id).padStart(4, '0');
-      const stars = '⭐'.repeat(p.star_rating || 0);
+      const stars = renderStars(p.star_rating);
       const titleSnip = p.title.length > 55 ? p.title.slice(0, 55) + '…' : p.title;
       return `⏳ \`#${id}\` ${stars} — ${titleSnip} (due ${p.deadline})`;
     });
@@ -1215,7 +1223,7 @@ export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = []
   }
 
   children.push(separator());
-  children.push(text('-# Points = quality stars (1/3/5) + hit bonus (+10) + tweet bonus (+1)'));
+  children.push(text('-# Points = quality stars (0/1/3/5) + hit bonus (+10) + tweet bonus (+1) · 🚫 0★ low-effort = 0 pts'));
 
   return {
     components: [container(Colors.Stats, children)],

@@ -28,7 +28,7 @@ Everything lives on the **prediction panel** an admin posts — no commands to m
 Predictions flow through a review pipeline in the admin channel:
 
 ```
-Submitted  →  Verify Ownership  →  Assign Stars (1-3)  →  Auto/Manual Resolve
+Submitted  →  Verify Ownership  →  Assign Stars (0-3)  →  Auto/Manual Resolve
 ```
 
 Each step has a button on the admin review card. The bot runs an **automatic API pre-check** on submission — you'll see one of:
@@ -45,12 +45,13 @@ Two `/setup` subcommands let admins clear the review queue in bulk instead of cl
 
 - **`/setup auto-verify-all`** — Loops every unverified prediction and hits the Upshot API to check ownership. Passing predictions are marked verified (same effect as clicking the button manually — embeds and state update identically). Failing predictions are listed back so you can handle them by hand.
 
-- **`/setup auto-rate-all`** — Uses [NVIDIA NIM](https://build.nvidia.com) (`meta/llama-4-maverick-17b-128e-instruct`) to suggest 1-3 star ratings for every verified-but-unrated prediction. The bot feeds each prediction's title, description, category, **plus the real Upshot card/event context** (card name, event description, the specific outcome the user is betting on) to the model and returns a star rating with a one-sentence reason.
+- **`/setup auto-rate-all`** — Uses [NVIDIA NIM](https://build.nvidia.com) (`nvidia/nemotron-3-super-120b-a12b`, a reasoning model) to suggest 0-3 star ratings for every verified-but-unrated prediction. The bot feeds each prediction's title, description, category, **plus the real Upshot card/event context** (card name, event description, the specific outcome the user is betting on) to the model and returns a star rating with a one-sentence reason.
 
   You get an ephemeral summary listing every suggestion, then two buttons: **Accept All** or **Cancel**. Accept All applies the ratings one by one, re-checking each prediction at apply time so it safely skips anything that got manually rated, deleted, or un-verified in the meantime.
 
   **Rubric the AI uses:**
-  - 1 star — Vague, low-effort, no specific thesis or reasoning
+  - 0 stars — **Not a genuine prediction.** Restates/paraphrases the card or event description, a question, bare hype, off-topic, or spam. Earns **0 points — no rewards even if a tweet is attached.**
+  - 1 star — A genuine, original prediction but vague or thin (little or no reasoning)
   - 2 stars — Clear prediction with some reasoning but limited evidence or shallow analysis
   - 3 stars — Specific, well-researched, backed by concrete evidence, data, or a strong mechanistic thesis
 
@@ -60,7 +61,7 @@ Two `/setup` subcommands let admins clear the review queue in bulk instead of cl
 
 Quality stars are determined by a weighted combination of admin and community votes:
 
-- **Admin rating (70%)** — Assigned by admins during review (1-3 stars)
+- **Admin rating (70%)** — Assigned by admins during review (0-3 stars; 0★ = low-effort, a hard floor community votes can't lift)
 - **Community average (30%)** — Average of all community votes on the prediction
 - **Final rating** = `round(admin × 0.7 + community × 0.3)`
 - If no community votes, admin rating counts as 100%
@@ -98,13 +99,16 @@ If a user tries to link an Upshot profile that's already linked to another accou
 
 | Component | Points | When |
 |-----------|--------|------|
+| 0-Star (low-effort) | 0 pts | After rating — earns nothing, no bonuses apply |
 | 1-Star quality (weighted) | 1 pt | After admin rates |
 | 2-Star quality (weighted) | 3 pts | After admin rates |
 | 3-Star quality (weighted) | 5 pts | After admin rates |
-| Hit bonus | +10 pts | Prediction outcome is correct |
-| Tweet bonus | +1 pt | Prediction has a linked tweet AND hits |
+| Hit bonus | +10 pts | Prediction outcome is correct (1★+ only) |
+| Tweet bonus | +1 pt | Prediction has a linked tweet AND hits (1★+ only) |
 
 **Total = weighted quality points + hit bonus + tweet bonus**
+
+A **0★ low-effort** rating earns **0 points total** — the hit and tweet bonuses do **not** apply, so a low-effort submission gets nothing even if it comes true with a tweet attached.
 
 Quality stars use the weighted rating (70% admin + 30% community). Example: admin gives 3 stars, community averages 2 stars → weighted = 3 → 5 pts quality. With hit + tweet = 5 + 10 + 1 = **16 pts**.
 

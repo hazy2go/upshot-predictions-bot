@@ -7,32 +7,33 @@
 // Requires NVIDIA_NIM_API_KEY in .env.
 
 const BASE = 'https://integrate.api.nvidia.com/v1';
-const MODEL = 'nvidia/nemotron-3-super-120b-a12b';
+export const MODEL = 'nvidia/nemotron-3-super-120b-a12b';
 
 // Nemotron thinks before answering; cap the reasoning budget so a single rating
 // can't run away, but leave enough room for the short JSON answer after it.
 const REASONING_BUDGET = 4096;
 const MAX_TOKENS = REASONING_BUDGET + 256;
 
-const RUBRIC = `You are a STRICT prediction-market analyst rating the quality of a user-submitted prediction on a 1-3 star scale. Be harsh: most submissions are low effort and should get 1 star. Reserve 2 and 3 stars for submissions that genuinely earn them.
+const RUBRIC = `You are a STRICT prediction-market analyst rating the quality of a user-submitted prediction on a 0-3 star scale. Be harsh: most submissions are low effort. A submission that is not a genuine, original prediction gets 0 stars and earns the user NOTHING.
 
 RUBRIC:
-- 1 star (DEFAULT) — Vague, low-effort, off-topic, or no real thesis. Generic or obvious claim, a question, a single line with no reasoning, an emotional take ("they will win!"), or anything that doesn't state WHAT will happen AND give a REASON why. When in doubt, it's 1 star.
-- 2 stars — Makes a clear, specific prediction AND gives at least one concrete supporting reason that actually engages with the real outcome. The argument may be thin or under-evidenced, but a real thesis is present.
+- 0 stars — NOT a genuine prediction. The user put in no real effort. This includes: text that just repeats or paraphrases the card title / event name / event description (saying back what is already being asked, with no added thesis), a question ("who else should win?", "will it pump?"), bare hype or emotion ("to the moon", "easy win", "LFG"), off-topic / joke / spam / gibberish, an empty or near-empty submission, or anything that does not state an original claim about the outcome. 0 stars means zero points — no rewards even if a tweet is attached.
+- 1 star — A genuine, original prediction, but vague or thin: states what they think will happen but gives little or no reasoning.
+- 2 stars — Makes a clear, specific prediction AND gives at least one concrete supporting reason that engages with the real outcome. The argument may be thin, but a real thesis is present.
 - 3 stars — Specific prediction backed by concrete evidence, data, or a strong mechanistic thesis. Shows real domain knowledge and clear logic. Rare.
 
-HARD RULES — these are ALWAYS 1 star, no exceptions:
-- A question (e.g. "who else should win?", "will it pump?") — a question is not a prediction.
-- A bare opinion, hope, or hype with no reasoning ("X to the moon", "they got this", "easy win").
-- Off-topic, joke, spam, or text that doesn't engage with the actual event being predicted.
-- Anything under ~10 meaningful words that lacks a stated reason.
+HARD RULES — these are ALWAYS 0 stars, no exceptions:
+- The text just restates / paraphrases the card or event description instead of predicting something. If you removed the card context and the submission says nothing new, it is 0 stars.
+- A question — a question is not a prediction.
+- Bare opinion, hope, or hype with no reasoning.
+- Off-topic, joke, spam, gibberish, or empty text.
 
-To award 2 or 3 stars, the text MUST contain BOTH (a) a specific claim about the outcome and (b) reasoning for it. If either is missing, it is 1 star.
+To earn 1+ stars the submission MUST be an ORIGINAL prediction in the user's own words (not a restatement of the prompt). To earn 2 or 3 stars it must ALSO contain reasoning.
 
-Rate PREDICTION QUALITY (clarity, thesis, evidence, specificity) — NOT whether you think it will hit or fail. Use the Upshot card / event context to judge whether the user's reasoning actually engages with the real outcome being predicted.
+Rate PREDICTION QUALITY (originality, clarity, thesis, evidence, specificity) — NOT whether you think it will hit or fail. Use the Upshot card / event context to judge both whether the reasoning engages with the real outcome AND whether the user is merely parroting that context back.
 
 Respond with ONLY a JSON object, no markdown fences, no prose:
-{"stars": 1, "reason": "one short sentence"}`;
+{"stars": 0, "reason": "one short sentence"}`;
 
 function buildUserPrompt(ctx) {
   const lines = [
@@ -60,7 +61,7 @@ function parseRating(text) {
   try {
     const obj = JSON.parse(match[0]);
     const stars = Number(obj.stars);
-    if (![1, 2, 3].includes(stars)) return null;
+    if (![0, 1, 2, 3].includes(stars)) return null;
     const reason = String(obj.reason || '').trim().slice(0, 300);
     return { stars, reason };
   } catch {
