@@ -195,7 +195,7 @@ API failures are handled gracefully — if the API is down, predictions still su
 
 ## NVIDIA NIM Integration
 
-The `/setup auto-rate-all` command uses [NVIDIA NIM](https://build.nvidia.com) (`meta/llama-4-maverick-17b-128e-instruct`) to suggest admin star ratings. Requires a free API key from build.nvidia.com. The request is streamed and only the final JSON (`{stars, reason}`) is applied. If `NVIDIA_NIM_API_KEY` is missing, the command returns a clear error and no other features are affected.
+The `/setup auto-rate-all` and `/setup recheck-all-ratings` commands use [NVIDIA NIM](https://build.nvidia.com) (`nvidia/nemotron-3-super-120b-a12b`, a reasoning model) to suggest admin star ratings. Requires a free API key from build.nvidia.com. The request is streamed and only the final JSON (`{stars, reason}`) is applied; the model's reasoning tokens are discarded. If `NVIDIA_NIM_API_KEY` is missing, the command returns a clear error and no other features are affected.
 
 ## Setup
 
@@ -258,5 +258,5 @@ pm2 start ecosystem.config.cjs
 - **Discord** — discord.js v14 with Components v2
 - **Database** — SQLite via better-sqlite3 (WAL mode)
 - **API** — Upshot public API (card details, ownership, resolution, season rank, contests)
-- **AI** — NVIDIA NIM (`meta/llama-4-maverick-17b-128e-instruct`) for optional bulk star rating
+- **AI** — NVIDIA NIM (`nvidia/nemotron-3-super-120b-a12b`) for optional bulk star rating
 - **Auto-resolve** — 12h interval, checks card event outcomes via API
