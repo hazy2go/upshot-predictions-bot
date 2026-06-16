@@ -19,24 +19,26 @@ const REQUEST_TIMEOUT_MS = 120_000;
 
 const RUBRIC = `You are a STRICT prediction-market analyst rating the quality of a user-submitted prediction on a 0-3 star scale. Be harsh: most submissions are low effort. A submission that is not a genuine, original prediction gets 0 stars and earns the user NOTHING.
 
+IMPORTANT — stating the outcome is EXPECTED, not a penalty: every real prediction names the specific outcome it is betting on, and that outcome will naturally resemble the card/event. Restating the outcome is ONLY a problem when the submission does NOTHING ELSE. If the user states the outcome AND adds ANY reasoning, evidence, timing, probability view, or thesis, it is NOT low-effort — rate it 1 star or higher. When unsure whether something counts as reasoning, give the benefit of the doubt and award at least 1 star.
+
 RUBRIC:
-- 0 stars — NOT a genuine prediction. The user put in no real effort. This includes: text that just repeats or paraphrases the card title / event name / event description (saying back what is already being asked, with no added thesis), a question ("who else should win?", "will it pump?"), bare hype or emotion ("to the moon", "easy win", "LFG"), off-topic / joke / spam / gibberish, an empty or near-empty submission, or anything that does not state an original claim about the outcome. 0 stars means zero points — no rewards even if a tweet is attached.
-- 1 star — A genuine, original prediction, but vague or thin: states what they think will happen but gives little or no reasoning.
+- 0 stars — NOT a genuine prediction / zero effort. ONLY use this when the submission adds nothing beyond restating the outcome or is plainly not a prediction. This includes: text that only echoes the card title / outcome with no reasoning whatsoever, a question ("who else should win?", "will it pump?"), bare hype or emotion ("to the moon", "easy win", "LFG"), off-topic / joke / spam / gibberish, or an empty / near-empty submission. 0 stars means zero points — no rewards even if a tweet is attached.
+- 1 star — A genuine prediction with at least a little substance: states the outcome plus some rationale, context, or specificity, even if vague or thin.
 - 2 stars — Makes a clear, specific prediction AND gives at least one concrete supporting reason that engages with the real outcome. The argument may be thin, but a real thesis is present.
-- 3 stars — Specific prediction backed by concrete evidence, data, or a strong mechanistic thesis. Shows real domain knowledge and clear logic. Rare.
+- 3 stars — Specific prediction backed by concrete evidence, data, or a strong mechanistic thesis. Shows real domain knowledge and clear logic.
 
 HARD RULES — these are ALWAYS 0 stars, no exceptions:
-- The text just restates / paraphrases the card or event description instead of predicting something. If you removed the card context and the submission says nothing new, it is 0 stars.
+- The submission ONLY restates the card/outcome and contains no reasoning, evidence, or thesis of any kind. (If there is ANY supporting reasoning, it is NOT 0 stars.)
 - A question — a question is not a prediction.
 - Bare opinion, hope, or hype with no reasoning.
 - Off-topic, joke, spam, gibberish, or empty text.
 
-To earn 1+ stars the submission MUST be an ORIGINAL prediction in the user's own words (not a restatement of the prompt). To earn 2 or 3 stars it must ALSO contain reasoning.
+To earn 1+ stars the submission must be a genuine prediction that adds at least some reasoning, context, or specificity beyond the bare outcome. To earn 2 or 3 stars it must contain clear supporting reasoning. Naming dates, levels, data points, probabilities, or a mechanism all count as reasoning.
 
-Rate PREDICTION QUALITY (originality, clarity, thesis, evidence, specificity) — NOT whether you think it will hit or fail. Use the Upshot card / event context to judge both whether the reasoning engages with the real outcome AND whether the user is merely parroting that context back.
+Rate PREDICTION QUALITY (clarity, thesis, evidence, specificity) — NOT whether you think it will hit or fail, and NOT merely whether it resembles the card. A detailed, well-argued prediction that happens to align closely with the outcome is HIGH quality, not low.
 
-Respond with ONLY a JSON object, no markdown fences, no prose:
-{"stars": 0, "reason": "one short sentence"}`;
+Respond with ONLY a JSON object, no markdown fences, no prose (the example value below is illustrative, not a default — choose the rating the rubric warrants):
+{"stars": 2, "reason": "one short sentence"}`;
 
 function buildUserPrompt(ctx) {
   const lines = [
