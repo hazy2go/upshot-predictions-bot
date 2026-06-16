@@ -1,12 +1,18 @@
 // ── NVIDIA NIM AI rater ─────────────────────────────────────
 //
 // OpenAI-compatible endpoint at https://integrate.api.nvidia.com/v1
-// Uses meta/llama-4-maverick. SSE streaming; only `content` deltas are kept.
+// Uses nvidia/nemotron-3-super-120b-a12b, a reasoning model. SSE streaming;
+// reasoning_content deltas are discarded and only `content` deltas are kept.
 //
 // Requires NVIDIA_NIM_API_KEY in .env.
 
 const BASE = 'https://integrate.api.nvidia.com/v1';
-const MODEL = 'meta/llama-4-maverick-17b-128e-instruct';
+const MODEL = 'nvidia/nemotron-3-super-120b-a12b';
+
+// Nemotron thinks before answering; cap the reasoning budget so a single rating
+// can't run away, but leave enough room for the short JSON answer after it.
+const REASONING_BUDGET = 4096;
+const MAX_TOKENS = REASONING_BUDGET + 256;
 
 const RUBRIC = `You are an expert prediction-market analyst rating the quality of a user-submitted prediction on a 1-3 star scale.
 
@@ -88,7 +94,7 @@ async function callNim(apiKey, body, timeoutMs) {
         const evt = JSON.parse(payload);
         const delta = evt?.choices?.[0]?.delta;
         if (delta && typeof delta.content === 'string') content += delta.content;
-        // delta.reasoning_content intentionally discarded — GLM's thinking stream
+        // delta.reasoning_content intentionally discarded — Nemotron's thinking stream
       } catch { /* skip malformed SSE line */ }
     }
   }
@@ -106,10 +112,14 @@ export async function rateWithAI(ctx) {
       { role: 'system', content: RUBRIC },
       { role: 'user', content: buildUserPrompt(ctx) },
     ],
-    temperature: 0.2,
-    top_p: 1,
-    max_tokens: 256,
+    temperature: 1,
+    top_p: 0.95,
+    max_tokens: MAX_TOKENS,
     stream: true,
+    // The OpenAI Python SDK's `extra_body` is flattened into the request body;
+    // posting raw JSON, these go at the top level instead.
+    chat_template_kwargs: { enable_thinking: true },
+    reasoning_budget: REASONING_BUDGET,
   };
 
   // NIM free tier latency is variable; a quick retry usually clears transient errors.
