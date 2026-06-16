@@ -33,7 +33,7 @@ import {
   getStoreWatchState, setStoreWatchState,
 } from './database.js';
 
-import { rateWithAI } from './nim.js';
+import { rateWithAI, MODEL as NIM_MODEL } from './nim.js';
 
 import {
   buildPredictionCard, buildAdminCard,
@@ -52,7 +52,7 @@ import { commands } from './commands.js';
 import { registerReferralHandlers, tryHandleReferralInteraction } from './referral.js';
 
 import {
-  Status, DefaultCategories, starPoints, totalPoints, weightedStarRating,
+  Status, DefaultCategories, starPoints, totalPoints, weightedStarRating, isRated, renderStars,
 } from './constants.js';
 
 import {
@@ -414,7 +414,7 @@ function previousMonthKey(ref = new Date()) {
  */
 function recalculatePoints(predictionId) {
   const prediction = getPrediction(predictionId);
-  if (!prediction || !prediction.star_rating) return prediction;
+  if (!isRated(prediction)) return prediction;
 
   const effectiveStars = weightedStarRating(prediction.star_rating, prediction.community_star_avg);
   const hasTweet = !!prediction.tweet_url;
@@ -1722,7 +1722,7 @@ async function handleResolveCommand(interaction) {
   if (!prediction) {
     return interaction.reply({ content: `❌ Prediction #${id} not found.`, flags: ['Ephemeral'] });
   }
-  if (!prediction.star_rating) {
+  if (!isRated(prediction)) {
     return interaction.reply({ content: '❌ Assign stars first.', flags: ['Ephemeral'] });
   }
 
@@ -1991,7 +1991,7 @@ async function handleSetup(interaction) {
       const scoredLines = scored.length > 0
         ? scored.map(p => {
           const id = String(p.id).padStart(4, '0');
-          const stars = '⭐'.repeat(p.star_rating || 0);
+          const stars = renderStars(p.star_rating);
           const outcomeIcon = p.outcome === 'hit' ? '🟢' : p.outcome === 'fail' ? '🔴' : '⏳';
           const shortTitle = p.title.length > 70 ? `${p.title.slice(0, 67)}...` : p.title;
           return `${outcomeIcon} #${id} **${p.total_points}**pts ${stars} — ${shortTitle}`;
@@ -2008,7 +2008,7 @@ async function handleSetup(interaction) {
           `**Open in Future Months (${futureOpen.length})**`,
           ...futureOpen.map(p => {
             const id = String(p.id).padStart(4, '0');
-            const stars = '⭐'.repeat(p.star_rating || 0);
+            const stars = renderStars(p.star_rating);
             const shortTitle = p.title.length > 70 ? `${p.title.slice(0, 67)}...` : p.title;
             return `⏳ #${id} ${stars} — ${shortTitle} (due ${p.deadline})`;
           }),
@@ -2086,7 +2086,7 @@ async function autoVerifyAndRate(predictionId, guildId) {
 
   try {
     const p = getPrediction(predictionId);
-    if (!p || p.star_rating) return;
+    if (!p || isRated(p)) return;
     const ctx = await gatherRatingContext(p);
     const result = await rateWithAI(ctx);
     await applyStarRating(predictionId, result.stars, 'auto-ai', guildId);
@@ -2197,9 +2197,9 @@ async function handleAutoRateAll(interaction, guildId) {
   const batchId = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   pendingRatingBatches.set(batchId, { suggestions, guildId, adminId: interaction.user.id, createdAt: Date.now() });
 
-  const header = `**AI rating suggestions** (${suggestions.length} predictions, model: \`meta/llama-4-maverick-17b-128e-instruct\`)`;
+  const header = `**AI rating suggestions** (${suggestions.length} predictions, model: \`${NIM_MODEL}\`)`;
   const body = suggestions.map(s => {
-    const stars = '⭐'.repeat(s.stars) + '☆'.repeat(3 - s.stars);
+    const stars = renderStars(s.stars);
     const title = s.title.length > 60 ? s.title.slice(0, 57) + '...' : s.title;
     return `${formatId(s.id)} ${stars} — *${title}*\n   └ ${s.reason}`;
   }).join('\n\n');
@@ -2244,7 +2244,7 @@ async function handleAcceptRatings(interaction, batchId) {
   for (const s of batch.suggestions) {
     const current = getPrediction(s.id);
     if (!current) { skipped.push(`${formatId(s.id)} (deleted)`); continue; }
-    if (current.star_rating) { skipped.push(`${formatId(s.id)} (already rated)`); continue; }
+    if (isRated(current)) { skipped.push(`${formatId(s.id)} (already rated)`); continue; }
     if (!current.ownership_verified) { skipped.push(`${formatId(s.id)} (no longer verified)`); continue; }
     await applyStarRating(s.id, s.stars, batch.adminId, batch.guildId);
     applied++;
@@ -2596,8 +2596,8 @@ async function handleStarsModalSubmit(interaction) {
   const starsInput = interaction.fields.getTextInputValue('stars').trim();
   const stars = parseInt(starsInput, 10);
 
-  if (![1, 2, 3].includes(stars)) {
-    return interaction.reply({ content: '❌ Stars must be 1, 2, or 3.', flags: ['Ephemeral'] });
+  if (![0, 1, 2, 3].includes(stars)) {
+    return interaction.reply({ content: '❌ Stars must be 0, 1, 2, or 3.', flags: ['Ephemeral'] });
   }
 
   const prediction = getPrediction(predictionId);
@@ -2609,10 +2609,11 @@ async function handleStarsModalSubmit(interaction) {
 
   const updated = await applyStarRating(predictionId, stars, interaction.user.id, interaction.guildId);
 
-  await interaction.editReply({
-    content: `⭐ Rated **#${String(predictionId).padStart(4, '0')}** — ${stars} star${stars > 1 ? 's' : ''} (${updated.total_points} pts)`,
-    flags: ['Ephemeral'],
-  });
+  const id = String(predictionId).padStart(4, '0');
+  const content = stars === 0
+    ? `🚫 Rated **#${id}** — **0★ low-effort**. No points, no rewards (even with a tweet).`
+    : `⭐ Rated **#${id}** — ${stars} star${stars > 1 ? 's' : ''} (${updated.total_points} pts)`;
+  await interaction.editReply({ content, flags: ['Ephemeral'] });
 }
 
 // ── Button handlers ─────────────────────────────────────────
@@ -2944,8 +2945,8 @@ async function handleAssignStars(interaction, predictionId) {
     new ActionRowBuilder().addComponents(
       new TextInputBuilder()
         .setCustomId('stars')
-        .setLabel('Stars (1, 2, or 3)')
-        .setPlaceholder('1, 2, or 3')
+        .setLabel('Stars (0 = low-effort, or 1, 2, 3)')
+        .setPlaceholder('0, 1, 2, or 3')
         .setStyle(TextInputStyle.Short)
         .setMaxLength(1)
         .setRequired(true)
@@ -3009,7 +3010,7 @@ async function handleCommunityVote(interaction, predictionId, stars) {
   upsertCommunityVote(predictionId, interaction.user.id, stars);
 
   // Recalculate points if admin has already rated
-  if (prediction.star_rating) {
+  if (isRated(prediction)) {
     recalculatePoints(predictionId);
     await syncPredictionEmbeds(predictionId, interaction.guildId);
     if (prediction.outcome) {
@@ -3035,7 +3036,7 @@ async function handleMarkOutcome(interaction, predictionId, outcome) {
   const prediction = getPrediction(predictionId);
   if (!prediction) return interaction.reply({ content: '❌ Not found.', flags: ['Ephemeral'] });
 
-  if (!prediction.star_rating) {
+  if (!isRated(prediction)) {
     return interaction.reply({ content: '❌ Assign stars first.', flags: ['Ephemeral'] });
   }
 
