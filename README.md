@@ -57,6 +57,8 @@ Two `/setup` subcommands let admins clear the review queue in bulk instead of cl
 
   Rating is based on **prediction quality**, not whether the AI thinks the prediction will hit.
 
+- **`/setup recheck-all-ratings`** — Re-runs the AI rater on every **active (unresolved) prediction that already has a star rating** and shows where its judgement has changed. You get an ephemeral summary listing only the predictions whose rating moved (`old → new`, e.g. `⭐⭐ → 🚫 0★`) with the AI's reason, then an **Apply changes** / **Cancel** pair. Apply re-rates only the changed predictions, re-checking each at apply time so it skips anything that resolved in the meantime. Predictions the AI still agrees with are left untouched. Useful after tightening the rubric, to sweep old ratings without re-rating by hand.
+
 ### Community Weighting
 
 Quality stars are determined by a weighted combination of admin and community votes:
