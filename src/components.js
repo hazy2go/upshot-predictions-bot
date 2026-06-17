@@ -1154,8 +1154,13 @@ export function buildLeaderboard(entries, monthLabel, options = {}) {
 
 // ── Personal stats ───────────────────────────────────────────
 
-export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = [], tier = 0, cardStats = null, futureOpen = []) {
+const STATS_PAGE_SIZE = 15;
+
+export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = [], tier = 0, cardStats = null, futureOpen = [], page = 0) {
   const children = [];
+
+  const scoredPageCount = Math.max(1, Math.ceil(scoredPredictions.length / STATS_PAGE_SIZE));
+  const scoredPage = Math.min(Math.max(0, page), scoredPageCount - 1);
 
   children.push(text(`## 📊 Your Stats — ${monthLabel}`));
   children.push(separator());
@@ -1193,8 +1198,10 @@ export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = []
 
   if (scoredPredictions.length > 0) {
     children.push(separator());
-    children.push(text(`**Scoring Predictions (${scoredPredictions.length})**`));
-    const lines = scoredPredictions.slice(0, 15).map(p => {
+    const pageSuffix = scoredPageCount > 1 ? ` — Page ${scoredPage + 1}/${scoredPageCount}` : '';
+    children.push(text(`**Scoring Predictions (${scoredPredictions.length})**${pageSuffix}`));
+    const start = scoredPage * STATS_PAGE_SIZE;
+    const lines = scoredPredictions.slice(start, start + STATS_PAGE_SIZE).map(p => {
       const id = String(p.id).padStart(4, '0');
       const stars = renderStars(p.star_rating);
       const outcomeIcon = p.outcome === 'hit' ? '🟢' : p.outcome === 'fail' ? '🔴' : '⏳';
@@ -1202,9 +1209,6 @@ export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = []
       return `${outcomeIcon} \`#${id}\` **${p.total_points}**pts ${stars} — ${titleSnip}`;
     });
     children.push(text(lines.join('\n')));
-    if (scoredPredictions.length > 15) {
-      children.push(text(`-# +${scoredPredictions.length - 15} more`));
-    }
   }
 
   if (futureOpen.length > 0) {
@@ -1224,6 +1228,14 @@ export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = []
 
   children.push(separator());
   children.push(text('-# Points = quality stars (0/1/3/5) + hit bonus (+10) + tweet bonus (+1) · 🚫 0★ low-effort = 0 pts'));
+
+  // Pager for the scored list — only when it spans more than one page.
+  if (scoredPageCount > 1) {
+    children.push(actionRow(
+      button(`mystats_page:${scoredPage - 1}`, '◀ Prev', ButtonStyle.Secondary, { disabled: scoredPage === 0 }),
+      button(`mystats_page:${scoredPage + 1}`, 'Next ▶', ButtonStyle.Secondary, { disabled: scoredPage >= scoredPageCount - 1 }),
+    ));
+  }
 
   return {
     components: [container(Colors.Stats, children)],

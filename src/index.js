@@ -778,25 +778,35 @@ async function handleLinkUpshot(interaction) {
   });
 }
 
-async function handleMyStats(interaction) {
+async function buildMyStatsPayload(userId, page = 0) {
   const monthKey = currentMonthKey();
-  const stats = getUserStats(interaction.user.id, monthKey);
-  const scored = getUserMonthScoredPredictions(interaction.user.id, monthKey);
-  const tier = getUserTier(interaction.user.id);
+  const stats = getUserStats(userId, monthKey);
+  const scored = getUserMonthScoredPredictions(userId, monthKey);
+  const tier = getUserTier(userId);
   // Open predictions whose deadline falls in a future month don't show up in the
   // monthly scoring list — surface them so the open slots reconcile on screen.
-  const futureOpen = getUserOpenPredictions(interaction.user.id).filter(p => p.month_key !== monthKey);
+  const futureOpen = getUserOpenPredictions(userId).filter(p => p.month_key !== monthKey);
 
   // Card collection stats come from the linked wallet's balances (paginated, can
-  // take a moment for large wallets), so defer and edit. No wallet → skip them.
-  const profile = getUpshotProfile(interaction.user.id);
-  await interaction.deferReply({ flags: ['Ephemeral'] });
+  // take a moment for large wallets). No wallet → skip them.
+  const profile = getUpshotProfile(userId);
   let cardStats = null;
   if (profile?.wallet_address) {
     cardStats = await getCardStats(profile.wallet_address).catch(() => null);
   }
 
-  const payload = buildStatsCard(stats, interaction.user.id, currentMonthLabel(), scored, tier, cardStats, futureOpen);
+  return buildStatsCard(stats, userId, currentMonthLabel(), scored, tier, cardStats, futureOpen, page);
+}
+
+async function handleMyStats(interaction) {
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+  const payload = await buildMyStatsPayload(interaction.user.id, 0);
+  await interaction.editReply(payload);
+}
+
+async function handleMyStatsPage(interaction, page) {
+  await interaction.deferUpdate();
+  const payload = await buildMyStatsPayload(interaction.user.id, page);
   await interaction.editReply(payload);
 }
 
@@ -2743,6 +2753,11 @@ async function handleButton(interaction) {
   if (interaction.customId.startsWith('mycards_page:')) {
     const page = parseInt(interaction.customId.split(':')[1], 10);
     return handleCardPage(interaction, Number.isNaN(page) ? 0 : page);
+  }
+
+  if (interaction.customId.startsWith('mystats_page:')) {
+    const page = parseInt(interaction.customId.split(':')[1], 10);
+    return handleMyStatsPage(interaction, Number.isNaN(page) ? 0 : page);
   }
 
   // Admin panel
