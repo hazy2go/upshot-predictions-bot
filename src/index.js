@@ -2696,9 +2696,12 @@ async function handlePredictModalSubmit(interaction) {
     let aiRating = null;
     try {
       const ctx = await gatherRatingContext({ title, description, category: 'General', deadline: deadlineFormatted, card_id: cardId });
-      aiRating = await rateWithAI(ctx);
+      // Single attempt here so a flaky model can't block the member behind
+      // compounding retries. On failure we fall through to the standard flow,
+      // where the background auto-rater retries patiently after submission.
+      aiRating = await rateWithAI(ctx, { attempts: 1 });
     } catch (err) {
-      console.error(`pre-submit rating failed for user ${interaction.user.id}:`, err.message);
+      console.error(`pre-submit rating failed for user ${interaction.user.id} — falling back to standard flow:`, err.message);
     }
 
     if (aiRating && aiRating.stars === 0) {
