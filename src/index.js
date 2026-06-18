@@ -589,6 +589,10 @@ async function refreshLeaderboard(guildId) {
 const pendingSubmissions = new Map();
 const pendingTimers = new Map();
 
+// Submissions held at the 0★ warning gate, keyed by user id: { draft, aiRating }.
+// The prediction is NOT created until the user confirms "submit anyway".
+const pendingZeroStarSubmissions = new Map();
+
 function setPendingSubmission(userId, data) {
   // Clear old timer if exists
   const oldTimer = pendingTimers.get(userId);
@@ -634,7 +638,7 @@ async function showLinkProfileModal(interaction) {
   return interaction.showModal(modal);
 }
 
-async function showPredictModal(interaction, { presetCardId = null, presetCardName = null } = {}) {
+async function showPredictModal(interaction, { presetCardId = null, presetCardName = null, presetDescription = null, presetTweetUrl = null } = {}) {
   const profile = getUpshotProfile(interaction.user.id);
   if (!profile) {
     // Show profile-link modal first — prediction modal follows after submit
@@ -685,6 +689,7 @@ async function showPredictModal(interaction, { presetCardId = null, presetCardNa
         .setStyle(TextInputStyle.Paragraph)
         .setMaxLength(2000)
         .setRequired(true)
+        .setValue(presetDescription ? presetDescription.slice(0, 2000) : '')
     ),
   ];
 
@@ -712,6 +717,7 @@ async function showPredictModal(interaction, { presetCardId = null, presetCardNa
         .setStyle(TextInputStyle.Short)
         .setMaxLength(280)
         .setRequired(false)
+        .setValue(presetTweetUrl ? presetTweetUrl.slice(0, 280) : '')
     ),
   );
 
@@ -808,6 +814,62 @@ async function handleMyStatsPage(interaction, page) {
   await interaction.deferUpdate();
   const payload = await buildMyStatsPayload(interaction.user.id, page);
   await interaction.editReply(payload);
+}
+
+// User confirmed they want to submit despite the 0★ warning.
+async function handleZeroStarSubmitAnyway(interaction) {
+  const held = pendingZeroStarSubmissions.get(interaction.user.id);
+  if (!held) {
+    return interaction.update({ content: '❌ This submission expired. Please make the prediction again.', components: [] });
+  }
+  pendingZeroStarSubmissions.delete(interaction.user.id);
+
+  // The warning can sit for minutes — re-check the things that may have changed
+  // in that window so the gate can't be used to bypass caps or grab a taken card.
+  if (held.draft.cardId) {
+    const taken = hasUnresolvedPredictionForCard(held.draft.cardId);
+    if (taken) {
+      return interaction.update({ content: cardTakenMessage(taken, interaction.guildId, interaction.user.id), components: [] });
+    }
+  }
+  const maxDaily = getMaxDaily(interaction.guildId);
+  if (countUserDailyPredictions(interaction.user.id) >= maxDaily) {
+    return interaction.update({ content: `❌ You've reached the daily limit of **${maxDaily}** predictions. Try again tomorrow.`, components: [] });
+  }
+  const maxOpen = getMaxOpen(interaction.guildId);
+  if (countUserUnresolved(interaction.user.id) >= maxOpen) {
+    return interaction.update({ content: `❌ You have the max of **${maxOpen}** open predictions. Wait for some to resolve before submitting more.`, components: [] });
+  }
+
+  await interaction.update({ content: '⏳ Submitting…', components: [] });
+
+  const prediction = await finalizeSubmission(held.draft, held.aiRating);
+  if (!prediction) {
+    return interaction.editReply({ content: '❌ Failed to save prediction. Please try again.', components: [] });
+  }
+  return interaction.editReply({
+    content: `Submitted **#${String(prediction.id).padStart(4, '0')}** as **🚫 0★** (0 points). You can still improve future predictions for a better score.`,
+    components: [],
+  });
+}
+
+// User chose to refine the prediction — reopen the modal prefilled so they can
+// edit before anything is created. Nothing was submitted yet.
+async function handleZeroStarEdit(interaction) {
+  const held = pendingZeroStarSubmissions.get(interaction.user.id);
+  if (!held) {
+    return interaction.reply({ content: '❌ This submission expired. Please make the prediction again.', flags: ['Ephemeral'] });
+  }
+  pendingZeroStarSubmissions.delete(interaction.user.id);
+  const d = held.draft;
+  // We already resolved the card, so reopen as a preset-card modal (no URL field)
+  // with the previous text prefilled. Resubmitting re-runs the full flow + rating.
+  return showPredictModal(interaction, {
+    presetCardId: d.cardId,
+    presetCardName: d.presetCardName,
+    presetDescription: d.description,
+    presetTweetUrl: d.tweetUrl,
+  });
 }
 
 async function handleUpshotRank(interaction) {
@@ -2606,47 +2668,130 @@ async function handlePredictModalSubmit(interaction) {
   // label, then a generic fallback (covers API-down submissions).
   const title = (cardName || pending.cardName || 'Upshot prediction').slice(0, 100);
 
-  let prediction;
-  try {
-    prediction = createPrediction({
-      authorId: interaction.user.id,
-      title,
-      category: 'General',
-      description,
-      deadline: deadlineFormatted,
-      proofType,
-      tweetUrl,
-      images: [],
-      status: Status.PendingVerification,
-      cardId,
-      cardImage,
-      ownershipCheck,
+  // Everything needed to create the prediction — held in memory so that, when
+  // ownership is verified, we can AI-rate it BEFORE it counts as submitted and
+  // give the author a chance to improve a 0★ (low-effort) call.
+  const draft = {
+    authorId: interaction.user.id,
+    title,
+    category: 'General',
+    description,
+    deadline: deadlineFormatted,
+    proofType,
+    tweetUrl,
+    cardId,
+    cardImage,
+    ownershipCheck,
+    guildId,
+    // for the "Edit & improve" re-prompt:
+    presetCardName: pending.cardName || cardName,
+  };
+
+  const verified = ownershipCheck === 'verified' || ownershipCheck === 'verified_contest';
+
+  // Verified path: rate now, before finalizing. A 0★ result is gated behind a
+  // confirmation so the author can refine it first. Rating errors fall through
+  // to a normal submit (admin/recheck will rate later).
+  if (verified && process.env.NVIDIA_NIM_API_KEY) {
+    let aiRating = null;
+    try {
+      const ctx = await gatherRatingContext({ title, description, category: 'General', deadline: deadlineFormatted, card_id: cardId });
+      aiRating = await rateWithAI(ctx);
+    } catch (err) {
+      console.error(`pre-submit rating failed for user ${interaction.user.id}:`, err.message);
+    }
+
+    if (aiRating && aiRating.stars === 0) {
+      pendingZeroStarSubmissions.set(interaction.user.id, { draft, aiRating });
+      // Auto-expire so a forgotten warning doesn't linger forever.
+      setTimeout(() => pendingZeroStarSubmissions.delete(interaction.user.id), 10 * 60 * 1000);
+      return interaction.editReply({
+        content: [
+          '⚠️ **Hold on — this looks low-effort.**',
+          `The AI would rate this **🚫 0★**, which earns **0 points** (no rewards even if it hits, even with a tweet).`,
+          aiRating.reason ? `> _${aiRating.reason.replace(/\s*\n\s*/g, ' ')}_` : null,
+          '',
+          'Add your reasoning — why will this happen? Cite dates, data, or a mechanism. Or submit it as-is.',
+        ].filter(Boolean).join('\n'),
+        components: [{
+          type: 1,
+          components: [
+            { type: 2, style: 1, label: '✏️ Edit & improve', custom_id: 'subzero_edit' },
+            { type: 2, style: 4, label: 'Submit anyway (0★)', custom_id: 'subzero_yes' },
+          ],
+        }],
+      });
+    }
+
+    // 1★+ (or rating unavailable) — finalize straight away, passing the rating
+    // so we don't call the model twice.
+    const prediction = await finalizeSubmission(draft, aiRating);
+    if (!prediction) return interaction.editReply({ content: '❌ Failed to save prediction. Please try again.' });
+    const ratedNote = aiRating ? ` AI-rated ${renderStars(aiRating.stars)}.` : '';
+    return interaction.editReply({
+      content: `✅ Prediction **#${String(prediction.id).padStart(4, '0')}** submitted! — ✅ Auto-verified via Upshot API.${ratedNote}`,
     });
-  } catch (err) {
-    console.error('Failed to create prediction:', err);
-    return interaction.editReply({ content: '❌ Failed to save prediction. Please try again.' });
   }
 
-  await postPredictionToFeed(prediction, guildId).catch(e => console.error('Feed post failed:', e.message));
-  await postToAdminReview(prediction, guildId).catch(e => console.error('Admin post failed:', e.message));
-  await refreshLeaderboard(guildId).catch(() => {});
-
-  // Auto-verify + auto-rate when the API pre-check confirms ownership.
-  // AI rating runs in the background; embeds update themselves when it lands.
-  if (ownershipCheck === 'verified' || ownershipCheck === 'verified_contest') {
-    autoVerifyAndRate(prediction.id, guildId).catch(() => {});
-  }
+  // Unverified path (or no AI key): normal submit, admin verifies + rates later.
+  const prediction = await finalizeSubmission(draft, null);
+  if (!prediction) return interaction.editReply({ content: '❌ Failed to save prediction. Please try again.' });
 
   let statusNote = '';
-  if (ownershipCheck === 'verified' || ownershipCheck === 'verified_contest') {
+  if (verified) {
     statusNote = ' — ✅ Auto-verified via Upshot API.';
   } else if (ownershipCheck === 'not_found') {
     statusNote = ' — ⚠️ Card not found in your wallet (admin will review)';
   }
-
-  await interaction.editReply({
+  return interaction.editReply({
     content: `✅ Prediction **#${String(prediction.id).padStart(4, '0')}** submitted! Now in the review queue.${statusNote}`,
   });
+}
+
+/**
+ * Create the prediction record, post it to the feed + admin review, and apply
+ * verification/rating when ownership is confirmed. `aiRating` (if provided) is
+ * the pre-computed {stars, reason} so we don't re-call the model. Returns the
+ * created prediction, or null on failure.
+ */
+async function finalizeSubmission(draft, aiRating) {
+  let prediction;
+  try {
+    prediction = createPrediction({
+      authorId: draft.authorId,
+      title: draft.title,
+      category: draft.category,
+      description: draft.description,
+      deadline: draft.deadline,
+      proofType: draft.proofType,
+      tweetUrl: draft.tweetUrl,
+      images: [],
+      status: Status.PendingVerification,
+      cardId: draft.cardId,
+      cardImage: draft.cardImage,
+      ownershipCheck: draft.ownershipCheck,
+    });
+  } catch (err) {
+    console.error('Failed to create prediction:', err);
+    return null;
+  }
+
+  await postPredictionToFeed(prediction, draft.guildId).catch(e => console.error('Feed post failed:', e.message));
+  await postToAdminReview(prediction, draft.guildId).catch(e => console.error('Admin post failed:', e.message));
+  await refreshLeaderboard(draft.guildId).catch(() => {});
+
+  const verified = draft.ownershipCheck === 'verified' || draft.ownershipCheck === 'verified_contest';
+  if (verified) {
+    if (aiRating) {
+      // We already rated it — verify and apply directly (no second model call).
+      await applyVerification(prediction.id, 'auto-api', draft.guildId).catch(e => console.error('verify failed:', e.message));
+      await applyStarRating(prediction.id, aiRating.stars, 'auto-ai', draft.guildId).catch(e => console.error('rate apply failed:', e.message));
+    } else {
+      // No pre-computed rating (no API key or it errored) — verify + rate in bg.
+      autoVerifyAndRate(prediction.id, draft.guildId).catch(() => {});
+    }
+  }
+  return prediction;
 }
 
 async function handleEditModalSubmit(interaction) {
@@ -2758,6 +2903,13 @@ async function handleButton(interaction) {
   if (interaction.customId.startsWith('mystats_page:')) {
     const page = parseInt(interaction.customId.split(':')[1], 10);
     return handleMyStatsPage(interaction, Number.isNaN(page) ? 0 : page);
+  }
+
+  if (interaction.customId === 'subzero_yes') {
+    return handleZeroStarSubmitAnyway(interaction);
+  }
+  if (interaction.customId === 'subzero_edit') {
+    return handleZeroStarEdit(interaction);
   }
 
   // Admin panel
