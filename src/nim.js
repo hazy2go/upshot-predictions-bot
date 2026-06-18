@@ -21,6 +21,8 @@ const RUBRIC = `You are a STRICT prediction-market analyst rating the quality of
 
 IMPORTANT — stating the outcome is EXPECTED, not a penalty: every real prediction names the specific outcome it is betting on, and that outcome will naturally resemble the card/event. Restating the outcome is ONLY a problem when the submission does NOTHING ELSE. If the user states the outcome AND adds ANY reasoning, evidence, timing, probability view, or thesis, it is NOT low-effort — rate it 1 star or higher. When unsure whether something counts as reasoning, give the benefit of the doubt and award at least 1 star.
 
+IMPORTANT — predicting the LIKELY / EXPECTED / "obvious" / base-case outcome is legitimate and can be HIGH quality. Do NOT lower the rating just because the predicted outcome is the most probable one, is "the natural result", "already in motion", or "not a dramatic breakthrough". Correctly identifying the base case and ARGUING for it with concrete facts (specific dates, documents, events, mechanisms, who-does-what-next) is exactly what a skilled analyst does. Judge the QUALITY OF THE ARGUMENT, never how surprising the outcome is. A submission that explains WHY the expected outcome will happen, citing real recent events, is 2-3 stars — even if the user modestly calls it "obvious" or says it "just describes the expected outcome". Self-deprecating framing does not make a well-supported prediction low-effort.
+
 RUBRIC:
 - 0 stars — NOT a genuine prediction / zero effort. ONLY use this when the submission adds nothing beyond restating the outcome or is plainly not a prediction. This includes: text that only echoes the card title / outcome with no reasoning whatsoever, a question ("who else should win?", "will it pump?"), bare hype or emotion ("to the moon", "easy win", "LFG"), off-topic / joke / spam / gibberish, or an empty / near-empty submission. 0 stars means zero points — no rewards even if a tweet is attached.
 - 1 star — A genuine prediction with at least a little substance: states the outcome plus some rationale, context, or specificity, even if vague or thin.
@@ -126,7 +128,10 @@ export async function rateWithAI(ctx) {
       { role: 'system', content: RUBRIC },
       { role: 'user', content: buildUserPrompt(ctx) },
     ],
-    temperature: 1,
+    // Rating is a classification task — low temperature keeps it consistent so
+    // the same prediction doesn't swing between 0 and 3 across runs. (NVIDIA's
+    // default of 1 is tuned for open-ended generation, not scoring.)
+    temperature: 0.3,
     top_p: 0.95,
     max_tokens: MAX_TOKENS,
     stream: true,
