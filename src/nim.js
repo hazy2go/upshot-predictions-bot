@@ -118,7 +118,26 @@ async function callNim(apiKey, body, timeoutMs) {
   return content;
 }
 
-export async function rateWithAI(ctx) {
+// A failure is worth retrying if it's a transient network/server condition
+// (timeout, dropped connection, 5xx, 429) or an unparseable response (the model
+// occasionally emits stray prose before the JSON; a re-roll usually fixes it).
+function isRetryable(message) {
+  return /timeout|terminated|fetch failed|ECONNRESET|socket hang up|network|NVIDIA NIM (?:5\d\d|429)|unparseable/i.test(message);
+}
+
+/**
+ * Rate a prediction. Throws if it can't get a valid rating after all retries —
+ * callers MUST handle that (fall back to the standard, un-rated flow).
+ *
+ * opts:
+ *   attempts  — total tries (default 3)
+ *   timeoutMs — per-request timeout (default REQUEST_TIMEOUT_MS = 120s)
+ *
+ * For latency-sensitive callers (e.g. rating during a live submission), pass a
+ * smaller budget so the user isn't blocked, and fall back on throw.
+ */
+export async function rateWithAI(ctx, opts = {}) {
+  const { attempts = 3, timeoutMs = REQUEST_TIMEOUT_MS } = opts;
   const apiKey = process.env.NVIDIA_NIM_API_KEY;
   if (!apiKey) throw new Error('NVIDIA_NIM_API_KEY not set in .env');
 
@@ -141,21 +160,21 @@ export async function rateWithAI(ctx) {
     reasoning_budget: REASONING_BUDGET,
   };
 
-  // NIM free tier latency is variable; a quick retry usually clears transient errors.
+  // NIM free tier latency is variable; retries with exponential backoff clear
+  // most transient errors.
   let lastErr;
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      const content = await callNim(apiKey, body, REQUEST_TIMEOUT_MS);
+      const content = await callNim(apiKey, body, timeoutMs);
       const parsed = parseRating(content);
       if (!parsed) throw new Error(`AI returned unparseable response: ${content.slice(0, 200)}`);
       return parsed;
     } catch (err) {
       lastErr = err;
-      // Retry timeouts, dropped connections, 5xx, and 429 rate-limits.
-      const transient = /timeout|terminated|fetch failed|NVIDIA NIM (?:5\d\d|429)/i.test(err.message);
-      if (!transient || attempt === 3) throw err;
-      console.warn(`rateWithAI [${MODEL}] attempt ${attempt} failed (${err.message}) — retrying`);
-      await new Promise(r => setTimeout(r, 1500));
+      if (!isRetryable(err.message) || attempt === attempts) throw err;
+      const backoff = 1500 * 2 ** (attempt - 1); // 1.5s, 3s, 6s, …
+      console.warn(`rateWithAI [${MODEL}] attempt ${attempt}/${attempts} failed (${err.message}) — retrying in ${backoff}ms`);
+      await new Promise(r => setTimeout(r, backoff));
     }
   }
   throw lastErr;
