@@ -10,11 +10,14 @@ const BASE = 'https://integrate.api.nvidia.com/v1';
 export const MODEL = 'nvidia/nemotron-3-super-120b-a12b';
 
 // Nemotron thinks before answering, and every reasoning token is streamed — so
-// latency scales with this budget. A 0-3 star call with a one-sentence reason
-// needs very little deliberation, so keep it tight: a big budget (e.g. 4096)
-// blows past the request timeout on the free tier and every call times out.
-const REASONING_BUDGET = 1024;
-const MAX_TOKENS = REASONING_BUDGET + 256;
+// per-call latency scales almost linearly with this budget. A 0-3 star call with
+// a one-sentence reason needs little deliberation, so keeping it tight is the
+// main speed lever. Too big (e.g. 4096) blows past the timeout on the free tier.
+// Tunable via NIM_REASONING_BUDGET so it can be benchmarked without a code change
+// (see scripts/rating-bench.mjs). 512 is the default sweet spot; raise if a lower
+// value starts mis-rating edge cases.
+const REASONING_BUDGET = Number(process.env.NIM_REASONING_BUDGET) || 512;
+const ANSWER_TOKENS = 256; // headroom for the short JSON answer after the thinking
 const REQUEST_TIMEOUT_MS = 120_000;
 
 const RUBRIC = `You are a STRICT prediction-market analyst rating the quality of a user-submitted prediction on a 0-3 star scale. Be harsh: most submissions are low effort. A submission that is not a genuine, original prediction gets 0 stars and earns the user NOTHING.
@@ -137,7 +140,7 @@ function isRetryable(message) {
  * smaller budget so the user isn't blocked, and fall back on throw.
  */
 export async function rateWithAI(ctx, opts = {}) {
-  const { attempts = 3, timeoutMs = REQUEST_TIMEOUT_MS } = opts;
+  const { attempts = 3, timeoutMs = REQUEST_TIMEOUT_MS, reasoningBudget = REASONING_BUDGET } = opts;
   const apiKey = process.env.NVIDIA_NIM_API_KEY;
   if (!apiKey) throw new Error('NVIDIA_NIM_API_KEY not set in .env');
 
@@ -152,12 +155,12 @@ export async function rateWithAI(ctx, opts = {}) {
     // default of 1 is tuned for open-ended generation, not scoring.)
     temperature: 0.3,
     top_p: 0.95,
-    max_tokens: MAX_TOKENS,
+    max_tokens: reasoningBudget + ANSWER_TOKENS,
     stream: true,
     // The OpenAI Python SDK's `extra_body` is flattened into the request body;
     // posting raw JSON, these go at the top level instead.
     chat_template_kwargs: { enable_thinking: true },
-    reasoning_budget: REASONING_BUDGET,
+    reasoning_budget: reasoningBudget,
   };
 
   // NIM free tier latency is variable; retries with exponential backoff clear
