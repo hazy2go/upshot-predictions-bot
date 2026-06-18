@@ -3468,6 +3468,60 @@ let resolveTimer = null;
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// How long to wait before retrying the cards the API couldn't reach this sweep.
+const RESOLVE_RETRY_DELAY_MS = 60_000;
+
+/**
+ * Resolve a single prediction against the Upshot API. Commits the outcome and
+ * pings the admin channel on a real resolution. Returns a category so the caller
+ * can tally and decide what to retry:
+ *   'resolved' | 'gone' | 'transient' (API unreachable) | 'error' | 'active'
+ */
+async function resolveOnePrediction(prediction, guildId) {
+  try {
+    const result = await checkCardResolution(prediction.card_id);
+
+    if (result.error === 'card_not_found') {
+      console.warn(`Auto-resolve: #${prediction.id} card no longer exists on Upshot (${prediction.card_id})`);
+      return 'gone';
+    }
+    if (result.error === 'fetch_failed' || result.error === 'no_winning_outcome') {
+      // transient (timeout/rate-limit/5xx), or event flipped to RESOLVED before
+      // its winner was published — worth retrying shortly, don't mark a wrong loss.
+      return 'transient';
+    }
+    if (result.error) {
+      console.error(`Auto-resolve: Error checking #${prediction.id}:`, result.error);
+      return 'error';
+    }
+
+    if (!result.resolved) return 'active'; // still active, skip
+
+    const outcome = result.won ? 'hit' : 'fail';
+    const status = outcome === 'hit' ? Status.Hit : Status.Fail;
+
+    // Commit the resolution first — this is the source of truth. A failure in
+    // the embed sync / admin ping below must NOT reclassify an already-resolved
+    // prediction as an error, so those are individually guarded.
+    updatePrediction(prediction.id, { outcome, status, resolved_by: 'auto' });
+    recalculatePoints(prediction.id);
+
+    await syncPredictionEmbeds(prediction.id, guildId).catch((e) =>
+      console.error(`Auto-resolve: embed sync failed for #${prediction.id}:`, e.message));
+
+    const updatedPred = getPrediction(prediction.id);
+    const emoji = outcome === 'hit' ? '🟢' : '🔴';
+    const id = String(prediction.id).padStart(4, '0');
+    await notifyAdmin(guildId,
+      `${emoji} **Auto-resolved #${id}** — **${outcome}** (${updatedPred.total_points} pts) · <@${prediction.author_id}>`
+    ).catch(() => {});
+    return 'resolved';
+  } catch (err) {
+    console.error(`Auto-resolve: Unexpected error on #${prediction.id}:`, err.message);
+    return 'error';
+  }
+}
+
 async function runAutoResolve() {
   const guildId = process.env.GUILD_ID;
   if (!guildId) {
@@ -3486,58 +3540,35 @@ async function runAutoResolve() {
   console.log(`Auto-resolve: Checking ${predictions.length} prediction(s)...`);
   let resolved = 0;
   let gone = 0;        // card genuinely 404s — won't ever resolve via the API
-  let transient = 0;   // couldn't reach the API this sweep — retried next time
   let errors = 0;      // unexpected failures in our own resolve logic
+  let unreachable = []; // couldn't reach the API this pass — retried below
 
   for (const prediction of predictions) {
-    try {
-      const result = await checkCardResolution(prediction.card_id);
-
-      if (result.error === 'card_not_found') {
-        gone++;
-        console.warn(`Auto-resolve: #${prediction.id} card no longer exists on Upshot (${prediction.card_id})`);
-        continue;
-      }
-      if (result.error === 'fetch_failed' || result.error === 'no_winning_outcome') {
-        // transient (timeout/rate-limit/5xx), or event flipped to RESOLVED before
-        // its winner was published — recheck next sweep, don't mark a wrong loss.
-        transient++;
-        continue;
-      }
-      if (result.error) {
-        errors++;
-        console.error(`Auto-resolve: Error checking #${prediction.id}:`, result.error);
-        continue;
-      }
-
-      if (!result.resolved) continue; // still active, skip
-
-      const outcome = result.won ? 'hit' : 'fail';
-      const status = outcome === 'hit' ? Status.Hit : Status.Fail;
-
-      // Commit the resolution first — this is the source of truth. A failure in
-      // the embed sync / admin ping below must NOT reclassify an already-resolved
-      // prediction as an error, so those are individually guarded.
-      updatePrediction(prediction.id, { outcome, status, resolved_by: 'auto' });
-      recalculatePoints(prediction.id);
-      resolved++;
-
-      await syncPredictionEmbeds(prediction.id, guildId).catch((e) =>
-        console.error(`Auto-resolve: embed sync failed for #${prediction.id}:`, e.message));
-
-      const updatedPred = getPrediction(prediction.id);
-      const emoji = outcome === 'hit' ? '🟢' : '🔴';
-      const id = String(prediction.id).padStart(4, '0');
-      await notifyAdmin(guildId,
-        `${emoji} **Auto-resolved #${id}** — **${outcome}** (${updatedPred.total_points} pts) · <@${prediction.author_id}>`
-      ).catch(() => {});
-    } catch (err) {
-      errors++;
-      console.error(`Auto-resolve: Unexpected error on #${prediction.id}:`, err.message);
-    }
-
+    const cat = await resolveOnePrediction(prediction, guildId);
+    if (cat === 'resolved') resolved++;
+    else if (cat === 'gone') gone++;
+    else if (cat === 'error') errors++;
+    else if (cat === 'transient') unreachable.push(prediction);
     // 3 second delay between checks to be nice to the API
     await sleep(3000);
+  }
+
+  // Second chance: the API being briefly unreachable is common, so instead of
+  // waiting the full 12h, wait a minute and retry only the cards we couldn't
+  // reach. Anything still unreachable is reported by name below.
+  let stillUnreachable = [];
+  if (unreachable.length > 0) {
+    console.log(`Auto-resolve: ${unreachable.length} unreachable — retrying in ${RESOLVE_RETRY_DELAY_MS / 1000}s`);
+    await notifyAdmin(guildId, `⏳ ${unreachable.length} card(s) unreachable — retrying in ${RESOLVE_RETRY_DELAY_MS / 1000}s…`).catch(() => {});
+    await sleep(RESOLVE_RETRY_DELAY_MS);
+    for (const prediction of unreachable) {
+      const cat = await resolveOnePrediction(prediction, guildId);
+      if (cat === 'resolved') resolved++;
+      else if (cat === 'gone') gone++;
+      else if (cat === 'error') errors++;
+      else if (cat === 'transient') stillUnreachable.push(prediction);
+      await sleep(3000);
+    }
   }
 
   if (resolved > 0) {
@@ -3547,12 +3578,25 @@ async function runAutoResolve() {
   const stillActive = predictions.length - resolved - gone;
   const extra = [
     gone ? `${gone} card(s) gone` : null,
-    transient ? `${transient} unreachable (will retry)` : null,
+    stillUnreachable.length ? `${stillUnreachable.length} still unreachable` : null,
     errors ? `${errors} error(s)` : null,
   ].filter(Boolean).join(', ');
   const summary = `🤖 **Auto-resolve complete** — ${resolved} resolved, ${stillActive} still active${extra ? ` · ${extra}` : ''}`;
-  console.log(`Auto-resolve: ${resolved} resolved, ${gone} gone, ${transient} transient, ${errors} errors`);
+  console.log(`Auto-resolve: ${resolved} resolved, ${gone} gone, ${stillUnreachable.length} still unreachable, ${errors} errors`);
   await notifyAdmin(guildId, summary);
+
+  // Name the cards that are still unreachable after the retry so an admin can
+  // check them manually — the API didn't respond for these two sweeps running.
+  if (stillUnreachable.length > 0) {
+    const MAX_LIST = 40;
+    const shown = stillUnreachable.slice(0, MAX_LIST)
+      .map(p => `#${String(p.id).padStart(4, '0')} (\`${p.card_id}\`)`)
+      .join(', ');
+    const more = stillUnreachable.length > MAX_LIST ? ` …and ${stillUnreachable.length - MAX_LIST} more` : '';
+    await notifyAdmin(guildId,
+      `⚠️ **Still unreachable after retry (${stillUnreachable.length}):** ${shown}${more}\n-# The Upshot API didn't respond for these — they'll be rechecked on the next sweep, or use 🔍 Recheck on the card.`
+    ).catch(() => {});
+  }
 }
 
 async function safeRunAutoResolve() {
