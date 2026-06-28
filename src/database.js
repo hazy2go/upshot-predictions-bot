@@ -86,6 +86,39 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_tier_awards_user ON tier_awards(discord_id);
+
+  -- Pack giveaways (Discord-native, button-entry). Distinct from the on-chain
+  -- "Lucky Shots" raffle watcher: these are run by an admin from their own pack
+  -- inventory and auto-transferred to the winner(s) when the timer ends.
+  CREATE TABLE IF NOT EXISTS giveaways (
+    id              TEXT PRIMARY KEY,
+    guild_id        TEXT NOT NULL,
+    channel_id      TEXT NOT NULL,
+    message_id      TEXT,                              -- the live embed message
+    creator_id      TEXT NOT NULL,                     -- admin who owns the packs
+    pack_id         TEXT NOT NULL,
+    pack_name       TEXT NOT NULL,
+    winners_count   INTEGER NOT NULL DEFAULT 1,
+    description     TEXT,
+    required_roles  TEXT NOT NULL DEFAULT '[]',        -- JSON: entrant must have ANY of these
+    excluded_roles  TEXT NOT NULL DEFAULT '[]',        -- JSON: entrant must have NONE of these
+    excluded_users  TEXT NOT NULL DEFAULT '[]',        -- JSON: barred discord ids
+    require_prediction INTEGER NOT NULL DEFAULT 0,     -- 1 = must have ≥1 prediction ever
+    ends_at         TEXT NOT NULL,                     -- ISO timestamp
+    status          TEXT NOT NULL DEFAULT 'live',      -- 'live' | 'drawn' | 'cancelled'
+    winner_ids      TEXT NOT NULL DEFAULT '[]',        -- JSON: discord ids drawn
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_giveaways_status ON giveaways(status);
+
+  CREATE TABLE IF NOT EXISTS giveaway_entries (
+    giveaway_id  TEXT NOT NULL,
+    discord_id   TEXT NOT NULL,
+    entered_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (giveaway_id, discord_id),
+    FOREIGN KEY (giveaway_id) REFERENCES giveaways(id) ON DELETE CASCADE
+  );
 `);
 
 // ── Migrations (add columns to existing tables) ─────────────
@@ -94,6 +127,7 @@ try { db.exec('ALTER TABLE predictions ADD COLUMN card_id TEXT'); } catch { /* a
 try { db.exec('ALTER TABLE predictions ADD COLUMN card_image TEXT'); } catch { /* already exists */ }
 try { db.exec('ALTER TABLE predictions ADD COLUMN ownership_check TEXT'); } catch { /* already exists */ }
 try { db.exec('ALTER TABLE predictions ADD COLUMN community_star_avg REAL'); } catch { /* already exists */ }
+try { db.exec('ALTER TABLE giveaways ADD COLUMN require_prediction INTEGER NOT NULL DEFAULT 0'); } catch { /* already exists / table absent */ }
 
 // ── User queries ────────────────────────────────────────────
 
@@ -225,6 +259,11 @@ export function recordTierAward(discordId, monthKey, rank) {
 export function getUserTier(discordId) {
   const row = db.prepare('SELECT COUNT(*) AS n FROM tier_awards WHERE discord_id = ?').get(discordId);
   return row?.n ?? 0;
+}
+
+// True if this user has ever created a prediction (used by giveaway eligibility).
+export function hasAnyPrediction(discordId) {
+  return !!db.prepare('SELECT 1 FROM predictions WHERE author_id = ? LIMIT 1').get(discordId);
 }
 
 export function hasUnresolvedPredictionForCard(cardId) {
@@ -384,6 +423,84 @@ export function getStoreWatchState(guildId) {
 
 export function setStoreWatchState(guildId, state) {
   db.prepare("INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)").run(`store_watch_${guildId}`, JSON.stringify(state));
+}
+
+// ── Pack giveaways ──────────────────────────────────────────
+
+function hydrateGiveaway(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    required_roles: JSON.parse(row.required_roles || '[]'),
+    excluded_roles: JSON.parse(row.excluded_roles || '[]'),
+    excluded_users: JSON.parse(row.excluded_users || '[]'),
+    winner_ids: JSON.parse(row.winner_ids || '[]'),
+    require_prediction: !!row.require_prediction,
+  };
+}
+
+export function createGiveaway(g) {
+  db.prepare(`
+    INSERT INTO giveaways (id, guild_id, channel_id, creator_id, pack_id, pack_name,
+      winners_count, description, required_roles, excluded_roles, excluded_users, require_prediction, ends_at)
+    VALUES (@id, @guild_id, @channel_id, @creator_id, @pack_id, @pack_name,
+      @winners_count, @description, @required_roles, @excluded_roles, @excluded_users, @require_prediction, @ends_at)
+  `).run({
+    id: g.id,
+    guild_id: g.guildId,
+    channel_id: g.channelId,
+    creator_id: g.creatorId,
+    pack_id: g.packId,
+    pack_name: g.packName,
+    winners_count: g.winnersCount,
+    description: g.description || null,
+    required_roles: JSON.stringify(g.requiredRoles || []),
+    excluded_roles: JSON.stringify(g.excludedRoles || []),
+    excluded_users: JSON.stringify(g.excludedUsers || []),
+    require_prediction: g.requirePrediction ? 1 : 0,
+    ends_at: g.endsAt,
+  });
+  return getGiveaway(g.id);
+}
+
+export function getGiveaway(id) {
+  return hydrateGiveaway(db.prepare('SELECT * FROM giveaways WHERE id = ?').get(id));
+}
+
+export function setGiveawayMessageId(id, messageId) {
+  db.prepare('UPDATE giveaways SET message_id = ? WHERE id = ?').run(messageId, id);
+}
+
+export function setGiveawayStatus(id, status) {
+  db.prepare('UPDATE giveaways SET status = ? WHERE id = ?').run(status, id);
+}
+
+export function setGiveawayWinners(id, winnerIds) {
+  db.prepare('UPDATE giveaways SET winner_ids = ?, status = ? WHERE id = ?')
+    .run(JSON.stringify(winnerIds || []), 'drawn', id);
+}
+
+// Live giveaways whose timer has elapsed — the draw sweep picks these up.
+export function getDueGiveaways(nowIso) {
+  return db.prepare("SELECT * FROM giveaways WHERE status = 'live' AND ends_at <= ?")
+    .all(nowIso).map(hydrateGiveaway);
+}
+
+export function addGiveawayEntry(giveawayId, discordId) {
+  const res = db.prepare(
+    'INSERT OR IGNORE INTO giveaway_entries (giveaway_id, discord_id) VALUES (?, ?)'
+  ).run(giveawayId, discordId);
+  return res.changes > 0; // true = newly entered, false = already in
+}
+
+export function getGiveawayEntries(giveawayId) {
+  return db.prepare('SELECT discord_id FROM giveaway_entries WHERE giveaway_id = ?')
+    .all(giveawayId).map(r => r.discord_id);
+}
+
+export function countGiveawayEntries(giveawayId) {
+  return db.prepare('SELECT COUNT(*) AS n FROM giveaway_entries WHERE giveaway_id = ?')
+    .get(giveawayId).n;
 }
 
 // ── Config (DB-backed, overrides .env) ──────────────────────

@@ -383,6 +383,53 @@ export const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName('giveaway')
+    .setDescription('Start a pack giveaway — entrants react, a winner is drawn and the pack auto-sent (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption(opt =>
+      opt.setName('pack')
+        .setDescription('Pick a pack from your unopened packs (one is sent to each winner)')
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('duration')
+        .setDescription('How long it runs, e.g. 30m, 2h, 1d (min 1m, max 14d)')
+        .setRequired(true)
+    )
+    .addIntegerOption(opt =>
+      opt.setName('winners')
+        .setDescription('How many winners (default 1)')
+        .setMinValue(1)
+        .setMaxValue(50)
+    )
+    .addStringOption(opt =>
+      opt.setName('description')
+        .setDescription('Custom blurb shown on the giveaway (a default is used if omitted)')
+    )
+    .addStringOption(opt =>
+      opt.setName('required-roles')
+        .setDescription('Mention role(s) an entrant MUST have one of, e.g. @OG @Holder')
+    )
+    .addStringOption(opt =>
+      opt.setName('excluded-roles')
+        .setDescription('Mention role(s) that are barred from entering')
+    )
+    .addStringOption(opt =>
+      opt.setName('excluded-users')
+        .setDescription('Mention specific members to exclude, e.g. @alice @bob')
+    )
+    .addBooleanOption(opt =>
+      opt.setName('require-prediction')
+        .setDescription('Only members who have made at least one prediction can enter')
+    )
+    .addChannelOption(opt =>
+      opt.setName('channel')
+        .setDescription('Channel to post the giveaway in (default: here)')
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+    ),
+
+  new SlashCommandBuilder()
     .setName('process-tiers')
     .setDescription('Award top-10 leaderboard tiers for a month now (admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)

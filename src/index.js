@@ -31,6 +31,9 @@ import {
   getContestWatchState, setContestWatchState,
   getRaffleWatchState, setRaffleWatchState,
   getStoreWatchState, setStoreWatchState,
+  createGiveaway, getGiveaway, setGiveawayMessageId, setGiveawayStatus, setGiveawayWinners,
+  getDueGiveaways, addGiveawayEntry, getGiveawayEntries, countGiveawayEntries,
+  hasAnyPrediction,
 } from './database.js';
 
 import { rateWithAI, MODEL as NIM_MODEL } from './nim.js';
@@ -44,6 +47,7 @@ import {
   buildCardPicker, buildCardPickerEmpty, buildCardDetail,
   buildContestLive, buildContestResults, buildContestList,
   buildRaffleLive, buildRaffleWinner, buildRaffleList,
+  buildGiveawayLive, buildGiveawayEnded,
   buildStoreListed, buildStoreList,
   buildAdminPanel, buildAdminPickChannel, buildAdminPickRole, ADMIN_SETTINGS_LIST,
 } from './components.js';
@@ -1280,6 +1284,304 @@ async function handleConfirmSendPack(interaction) {
 async function handleCancelSendPack(interaction) {
   pendingPackSends.delete(interaction.user.id);
   return interaction.update({ content: 'Cancelled — no packs were sent.', components: [] });
+}
+
+// ── Pack giveaways ───────────────────────────────────────────
+//
+// Admin starts a giveaway with /giveaway: a public embed with an "Enter" button
+// is posted, members click to enter (an Upshot wallet must be linked), and when
+// the timer ends the draw sweep picks winner(s) at random and auto-transfers one
+// pack each from the creator's inventory. Models /sendpack for the transfer side.
+
+const GIVEAWAY_MIN_MS = 60 * 1000;             // 1 minute
+const GIVEAWAY_MAX_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
+const GIVEAWAY_SWEEP_INTERVAL = 20 * 1000;     // check for due giveaways every 20s
+let giveawaySweepTimer = null;
+
+// Parse "30m" / "2h" / "1d" / "90s" into milliseconds. Returns null if invalid.
+function parseDuration(input) {
+  const m = String(input).trim().toLowerCase().match(/^(\d+)\s*(s|sec|secs|m|min|mins|h|hr|hrs|hour|hours|d|day|days)$/);
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const unit = m[2][0]; // s | m | h | d
+  const mult = unit === 's' ? 1000 : unit === 'm' ? 60_000 : unit === 'h' ? 3_600_000 : 86_400_000;
+  return n * mult;
+}
+
+function newGiveawayId() {
+  return `gw_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+}
+
+const DEFAULT_GIVEAWAY_BLURB = '🎉 We\'re giving away a pack! Hit **Enter** below for your shot. A winner is drawn when the timer ends and the pack is sent straight to their Upshot wallet.';
+
+async function handleGiveaway(interaction) {
+  if (!canSendPack(interaction)) {
+    return interaction.reply({ content: '❌ Only the configured pack owner can run giveaways.', flags: ['Ephemeral'] });
+  }
+
+  const packQuery = interaction.options.getString('pack', true).trim();
+  const durationRaw = interaction.options.getString('duration', true);
+  const winnersCount = interaction.options.getInteger('winners') ?? 1;
+  const description = interaction.options.getString('description')?.trim() || DEFAULT_GIVEAWAY_BLURB;
+  const requiredRolesRaw = interaction.options.getString('required-roles') || '';
+  const excludedRolesRaw = interaction.options.getString('excluded-roles') || '';
+  const excludedUsersRaw = interaction.options.getString('excluded-users') || '';
+  const requirePrediction = interaction.options.getBoolean('require-prediction') ?? false;
+  const targetChannel = interaction.options.getChannel('channel') || interaction.channel;
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  const durationMs = parseDuration(durationRaw);
+  if (!durationMs) {
+    return interaction.editReply({ content: '❌ Couldn\'t read that duration. Use a number + unit like `30m`, `2h`, or `1d`.' });
+  }
+  if (durationMs < GIVEAWAY_MIN_MS || durationMs > GIVEAWAY_MAX_MS) {
+    return interaction.editReply({ content: '❌ Duration must be between **1 minute** and **14 days**.' });
+  }
+
+  // Confirm a token + the creator's linked account, exactly like /sendpack — the
+  // pack is pulled from the creator's inventory and sent with the guild token.
+  let token = getUpshotToken(interaction.guildId);
+  if (!token && await refreshUpshotToken()) token = getUpshotToken(interaction.guildId);
+  if (!token) {
+    return interaction.editReply({ content: '❌ No Upshot token set. Run `/setup upshot-token` first.' });
+  }
+  const sender = getUpshotProfile(interaction.user.id);
+  if (!sender?.wallet_address) {
+    return interaction.editReply({ content: '❌ Link your own Upshot profile first (so I can read your packs) — use `/link-upshot`.' });
+  }
+
+  // Validate the pack against the creator's unopened inventory (need ≥ winners,
+  // one pack per winner). Re-checked at draw time before the actual transfer.
+  const packs = await getUserPacks(sender.wallet_address);
+  if (packs.length === 0) {
+    return interaction.editReply({ content: 'You have no unopened packs to give away (or the Upshot API is unreachable).' });
+  }
+  const match = packs.find(p => p.name.toLowerCase() === packQuery.toLowerCase())
+    || packs.find(p => p.packId === packQuery);
+  if (!match) {
+    const list = packs.map(p => `• ${p.name} ×${p.quantity}`).join('\n');
+    return interaction.editReply({ content: `❌ You don't have a pack named **${packQuery}**. Your packs:\n${list}` });
+  }
+  if (winnersCount > match.quantity) {
+    return interaction.editReply({ content: `❌ You only have **${match.quantity}× ${match.name}** — can't give away to ${winnersCount} winners (need one each).` });
+  }
+
+  // Parse role/user mentions out of the free-text options.
+  const requiredRoles = [...new Set([...requiredRolesRaw.matchAll(/<@&(\d+)>/g)].map(m => m[1]))];
+  const excludedRoles = [...new Set([...excludedRolesRaw.matchAll(/<@&(\d+)>/g)].map(m => m[1]))];
+  const excludedUsers = [...new Set([...excludedUsersRaw.matchAll(/<@!?(\d+)>/g)].map(m => m[1]))];
+
+  const id = newGiveawayId();
+  const endsAt = new Date(Date.now() + durationMs).toISOString();
+  const g = createGiveaway({
+    id,
+    guildId: interaction.guildId,
+    channelId: targetChannel.id,
+    creatorId: interaction.user.id,
+    packId: match.packId,
+    packName: match.name,
+    winnersCount,
+    description,
+    requiredRoles,
+    excludedRoles,
+    excludedUsers,
+    requirePrediction,
+    endsAt,
+  });
+
+  // Post the public giveaway embed (suppress role/user pings in the rules).
+  let posted;
+  try {
+    posted = await targetChannel.send({ ...buildGiveawayLive(g, 0), allowedMentions: { parse: [] } });
+  } catch (e) {
+    setGiveawayStatus(id, 'cancelled');
+    return interaction.editReply({ content: `❌ Couldn't post the giveaway in <#${targetChannel.id}>: ${e.message}` });
+  }
+  setGiveawayMessageId(id, posted.id);
+
+  return interaction.editReply({
+    content: `✅ Giveaway started in <#${targetChannel.id}> — **${winnersCount} winner${winnersCount > 1 ? 's' : ''}** of **${match.name}**, ends <t:${Math.floor(Date.parse(endsAt) / 1000)}:R>.`,
+  });
+}
+
+// Throttle live-count edits so a burst of entries can't hit Discord's rate limit.
+const giveawayCountEditAt = new Map(); // giveawayId -> last edit ts
+async function refreshGiveawayMessage(g, { force = false } = {}) {
+  if (!g.message_id) return;
+  const last = giveawayCountEditAt.get(g.id) || 0;
+  if (!force && Date.now() - last < 5000) return;
+  giveawayCountEditAt.set(g.id, Date.now());
+  const channel = await safeGetChannel(g.channel_id);
+  if (!channel) return;
+  const msg = await safeGetMessage(channel, g.message_id);
+  if (!msg) return;
+  const count = countGiveawayEntries(g.id);
+  await msg.edit({ ...buildGiveawayLive(g, count), allowedMentions: { parse: [] } }).catch(() => {});
+}
+
+async function handleGiveawayEnter(interaction, giveawayId) {
+  const g = getGiveaway(giveawayId);
+  if (!g || g.status !== 'live') {
+    return interaction.reply({ content: '⌛ This giveaway has ended.', flags: ['Ephemeral'] });
+  }
+  if (Date.parse(g.ends_at) <= Date.now()) {
+    return interaction.reply({ content: '⌛ This giveaway just closed — the winner is being drawn.', flags: ['Ephemeral'] });
+  }
+
+  const userId = interaction.user.id;
+  const member = interaction.member;
+
+  // Eligibility: excluded users / roles, then required roles.
+  if (g.excluded_users.includes(userId)) {
+    return interaction.reply({ content: '🚫 You\'re not eligible for this giveaway.', flags: ['Ephemeral'] });
+  }
+  if (g.excluded_roles.length && g.excluded_roles.some(r => member.roles.cache.has(r))) {
+    return interaction.reply({ content: '🚫 One of your roles is excluded from this giveaway.', flags: ['Ephemeral'] });
+  }
+  if (g.required_roles.length && !g.required_roles.some(r => member.roles.cache.has(r))) {
+    const need = g.required_roles.map(r => `<@&${r}>`).join(' or ');
+    return interaction.reply({ content: `🚫 You need ${need} to enter this giveaway.`, flags: ['Ephemeral'], allowedMentions: { parse: [] } });
+  }
+  if (g.require_prediction && !hasAnyPrediction(userId)) {
+    return interaction.reply({ content: '🚫 This giveaway is for active predictors — make at least one prediction first, then come back and enter.', flags: ['Ephemeral'] });
+  }
+
+  // Wallet connection is mandatory — the pack is auto-sent there on draw.
+  const profile = getUpshotProfile(userId);
+  if (!profile?.wallet_address) {
+    return interaction.reply({
+      content: '🔗 **Connect your Upshot wallet first.**\nYou need a linked Upshot profile to receive the pack if you win:\n'
+        + '1. Run `/link-upshot` (or tap **📇 My Cards**) and paste your Upshot profile URL.\n'
+        + '2. Come back here and hit **🎟 Enter** again.',
+      flags: ['Ephemeral'],
+    });
+  }
+
+  const isNew = addGiveawayEntry(giveawayId, userId);
+  if (!isNew) {
+    return interaction.reply({ content: '✅ You\'re already entered — good luck! 🍀', flags: ['Ephemeral'] });
+  }
+
+  await interaction.reply({ content: '🎟 **You\'re in!** The winner is drawn when the timer ends. 🍀', flags: ['Ephemeral'] });
+  refreshGiveawayMessage(g).catch(() => {});
+}
+
+// Shuffle a copy of an array (Fisher–Yates) for fair random draws.
+function shuffled(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+const giveawaysDrawing = new Set(); // ids currently being drawn (overlap guard)
+
+async function drawGiveaway(g) {
+  if (giveawaysDrawing.has(g.id)) return;
+  giveawaysDrawing.add(g.id);
+  try {
+    const channel = await safeGetChannel(g.channel_id);
+    const guild = channel?.guild || (g.guild_id ? await client.guilds.fetch(g.guild_id).catch(() => null) : null);
+
+    const entries = shuffled(getGiveawayEntries(g.id));
+    const token = getUpshotToken(g.guild_id) || (await refreshUpshotToken() ? getUpshotToken(g.guild_id) : null);
+
+    const winners = [];      // discord ids whose pack was sent
+    const deliveryFailed = []; // { id, reason } — drawn but transfer failed
+    let refreshed = false;
+
+    for (const id of entries) {
+      if (winners.length >= g.winners_count) break;
+
+      // Re-validate eligibility at draw time (roles may have changed / member left).
+      let member = null;
+      if (guild) member = await guild.members.fetch(id).catch(() => null);
+      if (guild && !member) continue; // left the server
+      if (g.excluded_users.includes(id)) continue;
+      if (member && g.excluded_roles.length && g.excluded_roles.some(r => member.roles.cache.has(r))) continue;
+      if (member && g.required_roles.length && !g.required_roles.some(r => member.roles.cache.has(r))) continue;
+      if (g.require_prediction && !hasAnyPrediction(id)) continue;
+
+      const profile = getUpshotProfile(id);
+      if (!profile?.wallet_address) continue; // unlinked since entering
+      const upshot = await getUserProfile(profile.wallet_address);
+      if (!upshot?.id) continue; // can't resolve an Upshot account to send to
+
+      if (!token) { deliveryFailed.push({ id, reason: 'no Upshot token configured' }); winners.push(id); continue; }
+
+      const params = { recipientId: upshot.id, packId: g.pack_id, quantity: 1 };
+      let result = await transferPack(params, getUpshotToken(g.guild_id));
+      if ((result.code === 401 || result.code === 403) && !refreshed && await refreshUpshotToken()) {
+        refreshed = true;
+        result = await transferPack(params, getUpshotToken(g.guild_id));
+      }
+      if (result.ok) {
+        winners.push(id);
+      } else {
+        const reason = result.code === 'shield' ? 'blocked by anti-bot shield'
+          : (result.code === 401 || result.code === 403) ? 'token expired/rejected'
+          : (result.error || 'unknown error');
+        deliveryFailed.push({ id, reason });
+        winners.push(id); // they still won — flag the delivery for manual resend
+      }
+    }
+
+    // Commit the result (sets status = 'drawn') before announcing.
+    setGiveawayWinners(g.id, winners);
+
+    // Update the original embed to its ended state.
+    if (g.message_id && channel) {
+      const msg = await safeGetMessage(channel, g.message_id);
+      if (msg) await msg.edit({ ...buildGiveawayEnded(g, winners), allowedMentions: { parse: [] } }).catch(() => {});
+    }
+
+    // Announce in the channel (reply to the original embed, pinging winners).
+    if (channel) {
+      if (winners.length) {
+        const mentions = winners.map(id => `<@${id}>`).join(', ');
+        await channel.send({
+          content: `🎉 Congratulations ${mentions}! You won **${g.pack_name}** — the pack has been sent to your Upshot wallet. 🎁`,
+          ...(g.message_id ? { reply: { messageReference: g.message_id, failIfNotExists: false } } : {}),
+        }).catch(e => console.error('Giveaway announce failed:', e.message));
+      } else {
+        await channel.send({
+          content: `😕 The **${g.pack_name}** giveaway ended with no eligible entrants — no winner this time.`,
+          ...(g.message_id ? { reply: { messageReference: g.message_id, failIfNotExists: false } } : {}),
+        }).catch(() => {});
+      }
+    }
+
+    // Admin summary, including any deliveries that need a manual resend.
+    const lines = [`🎁 **Giveaway drawn** — **${g.pack_name}** (${winners.length}/${g.winners_count} winner(s)).`];
+    if (winners.length) lines.push('Winners: ' + winners.map(id => `<@${id}>`).join(', '));
+    if (deliveryFailed.length) {
+      lines.push('⚠️ **Pack delivery FAILED** for (resend with `/sendpack`):');
+      lines.push(...deliveryFailed.map(f => `• <@${f.id}> — ${f.reason}`));
+    }
+    notifyAdmin(g.guild_id, lines.join('\n')).catch(() => {});
+  } catch (err) {
+    console.error(`Giveaway draw failed for ${g.id}:`, err.message);
+  } finally {
+    giveawaysDrawing.delete(g.id);
+  }
+}
+
+async function runGiveawaySweep() {
+  const due = getDueGiveaways(new Date().toISOString());
+  for (const g of due) await drawGiveaway(g);
+}
+
+async function safeRunGiveawaySweep() {
+  try {
+    await runGiveawaySweep();
+  } catch (err) {
+    console.error('Giveaway sweep: fatal error:', err.message);
+  }
+  giveawaySweepTimer = setTimeout(safeRunGiveawaySweep, GIVEAWAY_SWEEP_INTERVAL);
 }
 
 // ── Card picker (pick a card to predict — no URL needed) ─────
@@ -2971,6 +3273,11 @@ async function handleButton(interaction) {
     return handleCancelSendPack(interaction);
   }
 
+  // Giveaway entry
+  if (interaction.customId.startsWith('gw_enter:')) {
+    return handleGiveawayEnter(interaction, interaction.customId.slice('gw_enter:'.length));
+  }
+
   // Contest navigation
   if (interaction.customId === 'contest_back') {
     const contests = contestCache.get(interaction.user.id);
@@ -4250,7 +4557,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (await tryHandleReferralInteraction(interaction)) return;
 
     if (interaction.isAutocomplete?.()) {
-      if (interaction.commandName === 'sendpack') return await handleSendPackAutocomplete(interaction);
+      if (interaction.commandName === 'sendpack' || interaction.commandName === 'giveaway') return await handleSendPackAutocomplete(interaction);
       return;
     }
 
@@ -4274,6 +4581,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'leaderboard': return await handleLeaderboardCommand(interaction);
         case 'setup': return await handleSetup(interaction);
         case 'sendpack': return await handleSendPack(interaction);
+        case 'giveaway': return await handleGiveaway(interaction);
         case 'process-tiers': return await handleProcessTiers(interaction);
       }
     }
@@ -4415,6 +4723,11 @@ client.once(Events.ClientReady, async () => {
   storeWatchTimer = setTimeout(safeRunStoreWatch, 150_000);
   console.log(`   Store watch: first check in 2.5 min, then every 60min`);
 
+  // Start the giveaway draw sweep (first run after 30s, then every 20s). It
+  // draws any giveaway whose timer has elapsed — survives restarts via the DB.
+  giveawaySweepTimer = setTimeout(safeRunGiveawaySweep, 30_000);
+  console.log(`   Giveaway sweep: first check in 30s, then every 20s`);
+
   // Keep the Upshot token fresh hands-off: the access token lives ~15h and the
   // refresh token is a rotating 7-day sliding window, so a check every 6h keeps
   // both alive indefinitely with no browser/login (no-op unless near expiry).
@@ -4439,6 +4752,7 @@ process.on('unhandledRejection', async (err) => {
 process.on('SIGTERM', () => {
   if (resolveTimer) clearTimeout(resolveTimer);
   if (tierTimer) clearTimeout(tierTimer);
+  if (giveawaySweepTimer) clearTimeout(giveawaySweepTimer);
   client.destroy();
   process.exit(0);
 });
@@ -4446,6 +4760,7 @@ process.on('SIGTERM', () => {
 process.on('SIGINT', () => {
   if (resolveTimer) clearTimeout(resolveTimer);
   if (tierTimer) clearTimeout(tierTimer);
+  if (giveawaySweepTimer) clearTimeout(giveawaySweepTimer);
   client.destroy();
   process.exit(0);
 });
