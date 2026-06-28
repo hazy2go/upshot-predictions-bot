@@ -414,6 +414,69 @@ export function buildRaffleList(raffles, topByRaffle = new Map()) {
   return { components: [container(Colors.Stats, children)], flags: 1 << 15 };
 }
 
+// ── Pack giveaways (Discord-native, button entry) ───────────
+//
+// `g` is the hydrated row from database.getGiveaway(): { id, pack_name,
+// winners_count, description, required_roles[], excluded_roles[],
+// excluded_users[], ends_at, status, winner_ids[], ... }
+
+// Render the eligibility rules as human-readable lines (role/user mentions).
+function giveawayRules(g) {
+  const lines = [];
+  if (g.required_roles?.length) {
+    lines.push(`✅ **Must have:** ${g.required_roles.map(r => `<@&${r}>`).join(' or ')}`);
+  }
+  if (g.excluded_roles?.length) {
+    lines.push(`🚫 **Excluded roles:** ${g.excluded_roles.map(r => `<@&${r}>`).join(', ')}`);
+  }
+  if (g.excluded_users?.length) {
+    lines.push(`🚫 **Excluded:** ${g.excluded_users.map(u => `<@${u}>`).join(', ')}`);
+  }
+  if (g.require_prediction) {
+    lines.push('📈 **Must have made at least one prediction**');
+  }
+  return lines;
+}
+
+export function buildGiveawayLive(g, entryCount = 0) {
+  const children = [];
+  children.push(text('## 🎁 Pack Giveaway'));
+  children.push(text(`### ${g.pack_name}`));
+  if (g.description) children.push(text(g.description.slice(0, 600)));
+
+  children.push(separator());
+  const meta = [];
+  meta.push(`🏆 **Winners:** ${g.winners_count}`);
+  const endMs = Date.parse(g.ends_at);
+  if (Number.isFinite(endMs)) meta.push(`🕒 **Ends:** <t:${Math.floor(endMs / 1000)}:F> (<t:${Math.floor(endMs / 1000)}:R>)`);
+  meta.push(`🎟 **Entries:** ${entryCount}`);
+  children.push(text(meta.join('\n')));
+
+  const rules = giveawayRules(g);
+  if (rules.length) { children.push(separator()); children.push(text(rules.join('\n'))); }
+
+  children.push(text('-# 🔗 An Upshot wallet must be connected to enter — the pack is sent there automatically.'));
+  children.push(actionRow(button(`gw_enter:${g.id}`, '🎟 Enter', ButtonStyle.Primary)));
+
+  return { components: [container(Colors.Pending, children)], flags: 1 << 15 };
+}
+
+export function buildGiveawayEnded(g, winnerIds = []) {
+  const children = [];
+  children.push(text('## 🎁 Pack Giveaway — Ended'));
+  children.push(text(`### ${g.pack_name}`));
+  children.push(separator());
+  if (winnerIds.length) {
+    const who = winnerIds.map(id => `<@${id}>`).join(', ');
+    children.push(text(`🎉 **Winner${winnerIds.length > 1 ? 's' : ''}:** ${who}`));
+    children.push(text(`📦 A **${g.pack_name}** pack has been sent to ${winnerIds.length > 1 ? 'their wallets' : 'their wallet'}.`));
+  } else {
+    children.push(text('😕 No eligible entrants — no winner was drawn.'));
+  }
+
+  return { components: [container(winnerIds.length ? Colors.Hit : Colors.Fail, children)], flags: 1 << 15 };
+}
+
 // ── Store (packs + bundles) announcements ───────────────────
 //
 // `item` is the normalized shape from api.getStorePacks()/getStoreBundles():
@@ -516,8 +579,8 @@ const ADMIN_SETTINGS = [
   { key: 'admin_role',          label: 'Admin role',          kind: 'role',    emoji: '👮' },
   { key: 'max_daily',           label: 'Max predictions / day', kind: 'int',   emoji: '📆' },
   { key: 'max_open',            label: 'Max open predictions',  kind: 'int',   emoji: '📂' },
-  { key: 'upshot_token',        label: 'Upshot token (/sendpack)', kind: 'token', emoji: '🔑' },
-  { key: 'owner_id',            label: 'Lock /sendpack to me',  kind: 'owner', emoji: '🔒' },
+  { key: 'upshot_token',        label: 'Upshot token (packs/giveaways)', kind: 'token', emoji: '🔑' },
+  { key: 'owner_id',            label: 'Lock /sendpack & /giveaway to me', kind: 'owner', emoji: '🔒' },
 ];
 
 export const ADMIN_SETTINGS_LIST = ADMIN_SETTINGS; // exported for the handler
@@ -547,7 +610,7 @@ export function buildAdminPanel(cfg) {
   children.push(text([
     '**Settings**',
     `👮 Admin role: ${cfg.adminRole ? `<@&${cfg.adminRole}>` : 'server admins'}`,
-    `🔒 /sendpack owner: ${cfg.ownerId ? `<@${cfg.ownerId}>` : 'any admin'}`,
+    `🔒 Pack/giveaway owner: ${cfg.ownerId ? `<@${cfg.ownerId}>` : 'any admin'}`,
     `📆 Max daily: **${cfg.maxDaily}** · 📂 Max open: **${cfg.maxOpen}**`,
     `🔑 Upshot token: ${tokenLine}`,
     `🗂 Categories: ${cfg.categories?.length ? cfg.categories.join(', ') : '—'}`,
