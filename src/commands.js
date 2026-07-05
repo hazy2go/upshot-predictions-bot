@@ -431,7 +431,7 @@ export const commands = [
 
   new SlashCommandBuilder()
     .setName('lookup-wallets')
-    .setDescription('Upload a .txt of Discord names (one per line) → get a CSV of their wallet + Upshot profile (admin only)')
+    .setDescription('Upload a .txt of Discord names → CSV of their wallet + Upshot profile (admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .addAttachmentOption(opt =>
       opt.setName('file')
