@@ -428,6 +428,27 @@ function recalculatePoints(predictionId) {
   return getPrediction(predictionId);
 }
 
+// A prediction's month_key is fixed from its deadline at creation, so it scores
+// in the month it's due. But some events only settle in a *later* month than
+// their deadline — e.g. a June 27 deadline for an event that doesn't publish its
+// outcome until July. The prediction sits in "pending" across the month boundary
+// and, when it finally resolves, its points would land in June — a month that
+// has already closed (leaderboard finalized, tiers awarded). Crediting a closed
+// month makes no sense, so at first resolution we re-home such a prediction to
+// the month it actually resolved in. Returns the month_key to store on resolve.
+//
+// `prediction` must be the PRE-update row (outcome still reflects prior state):
+//   • never resolved before  → re-home to the current month if it's later
+//   • being re-resolved/corrected later → keep its existing month_key so an
+//     admin's correction doesn't drag it into whatever month they fix it in.
+function resolutionMonthKey(prediction) {
+  if (prediction.outcome) return prediction.month_key; // correction, not first resolve
+  const now = new Date();
+  const current = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  // 'YYYY-MM' strings sort lexicographically, so `>` means strictly later.
+  return current > prediction.month_key ? current : prediction.month_key;
+}
+
 function isAdmin(member) {
   const roleId = getAdminRoleId(member.guild.id);
   return roleId ? member.roles.cache.has(roleId) : member.permissions.has('Administrator');
@@ -2206,7 +2227,7 @@ async function handleResolveCommand(interaction) {
   const previousOutcome = prediction.outcome;
   const status = outcome === 'hit' ? Status.Hit : Status.Fail;
 
-  updatePrediction(id, { outcome, status, resolved_by: interaction.user.id });
+  updatePrediction(id, { outcome, status, resolved_by: interaction.user.id, month_key: resolutionMonthKey(prediction) });
   const updated = recalculatePoints(id);
 
   await syncPredictionEmbeds(id, interaction.guildId);
@@ -3666,7 +3687,7 @@ async function handleCheckResolve(interaction, predictionId) {
   const outcome = result.won ? 'hit' : 'fail';
   const status = outcome === 'hit' ? Status.Hit : Status.Fail;
 
-  updatePrediction(predictionId, { outcome, status, resolved_by: 'auto' });
+  updatePrediction(predictionId, { outcome, status, resolved_by: 'auto', month_key: resolutionMonthKey(prediction) });
   const updated = recalculatePoints(predictionId);
 
   await syncPredictionEmbeds(predictionId, interaction.guildId);
@@ -3727,7 +3748,7 @@ async function handleMarkOutcome(interaction, predictionId, outcome) {
   const previousOutcome = prediction.outcome;
   const status = outcome === 'hit' ? Status.Hit : Status.Fail;
 
-  updatePrediction(predictionId, { outcome, status, resolved_by: interaction.user.id });
+  updatePrediction(predictionId, { outcome, status, resolved_by: interaction.user.id, month_key: resolutionMonthKey(prediction) });
   const updated = recalculatePoints(predictionId);
 
   await syncPredictionEmbeds(predictionId, interaction.guildId);
@@ -3911,7 +3932,7 @@ async function resolveOnePrediction(prediction, guildId) {
     // Commit the resolution first — this is the source of truth. A failure in
     // the embed sync / admin ping below must NOT reclassify an already-resolved
     // prediction as an error, so those are individually guarded.
-    updatePrediction(prediction.id, { outcome, status, resolved_by: 'auto' });
+    updatePrediction(prediction.id, { outcome, status, resolved_by: 'auto', month_key: resolutionMonthKey(prediction) });
     recalculatePoints(prediction.id);
 
     await syncPredictionEmbeds(prediction.id, guildId).catch((e) =>
