@@ -430,6 +430,16 @@ export const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName('lookup-wallets')
+    .setDescription('Upload a .txt of Discord names (one per line) → get a CSV of their wallet + Upshot profile (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addAttachmentOption(opt =>
+      opt.setName('file')
+        .setDescription('A .txt file with one Discord name per line')
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
     .setName('process-tiers')
     .setDescription('Award top-10 leaderboard tiers for a month now (admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)

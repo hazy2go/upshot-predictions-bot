@@ -1046,6 +1046,107 @@ async function handleLeaderboardExport(interaction, monthKey) {
   await interaction.editReply({ content: `📥 Leaderboard export for **${monthKey}** (${entries.length} entries)`, files: [file] });
 }
 
+// Resolve a list of Discord names (one per line, from an uploaded .txt) to their
+// linked wallet + Upshot profile, returned as a CSV. Names are matched against
+// each guild member's username, global display name, and server nickname
+// (case-insensitive). Unmatched / unlinked rows are still emitted so every input
+// line is accounted for — the `status` column says what happened.
+async function handleLookupWallets(interaction) {
+  const att = interaction.options.getAttachment('file', true);
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  // Pull the file. Accept text/* or a .txt name; reject obvious binaries early.
+  const isText = (att.contentType || '').startsWith('text/') || /\.(txt|csv)$/i.test(att.name || '');
+  if (!isText) {
+    return interaction.editReply('❌ Please upload a plain-text `.txt` file with one Discord name per line.');
+  }
+  let text;
+  try {
+    const res = await fetch(att.url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    text = await res.text();
+  } catch (err) {
+    return interaction.editReply(`❌ Couldn't download the file: ${err.message}`);
+  }
+
+  // One name per line. Strip a leading '@', trim, drop blanks — but keep the
+  // original text for the CSV's left column so the output lines up with input.
+  const names = text
+    .split(/\r?\n/)
+    .map(l => l.trim())
+    .filter(Boolean);
+  if (names.length === 0) {
+    return interaction.editReply('❌ That file had no names in it.');
+  }
+  if (names.length > 2000) {
+    return interaction.editReply(`❌ That's ${names.length} names — please split into files of 2000 or fewer.`);
+  }
+
+  // Fetch the full member list once and index it by every handle a name could be.
+  // First writer wins on collisions (nicknames aren't unique); usernames are.
+  await interaction.editReply(`🔎 Looking up **${names.length}** name(s)…`);
+  let members;
+  try {
+    members = await interaction.guild.members.fetch();
+  } catch (err) {
+    return interaction.editReply(`❌ Couldn't load the server member list: ${err.message}`);
+  }
+  const byHandle = new Map();
+  const index = (key, member) => {
+    if (!key) return;
+    const k = key.toLowerCase();
+    if (!byHandle.has(k)) byHandle.set(k, member);
+  };
+  for (const m of members.values()) {
+    index(m.user.username, m);
+    index(m.user.globalName, m);
+    index(m.nickname, m);
+    index(m.user.tag, m);          // legacy name#1234
+    index(m.user.id, m);           // allow raw IDs in the list too
+  }
+
+  const rows = [['discord_name', 'wallet_address', 'upshot_profile', 'status']];
+  let linked = 0, unlinked = 0, notFound = 0;
+  for (const name of names) {
+    const key = name.replace(/^@/, '').toLowerCase();
+    const member = byHandle.get(key);
+    if (!member) {
+      rows.push([name, '', '', 'user not found']);
+      notFound++;
+      continue;
+    }
+    const profile = getUpshotProfile(member.id);
+    if (!profile) {
+      rows.push([name, '', '', 'no profile linked']);
+      unlinked++;
+      continue;
+    }
+    rows.push([
+      name,
+      profile.wallet_address || '',
+      profile.upshot_url || '',
+      profile.wallet_address ? 'ok' : 'linked, no wallet',
+    ]);
+    linked++;
+  }
+
+  const escape = (v) => {
+    const s = String(v ?? '');
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const csv = rows.map(r => r.map(escape).join(',')).join('\n');
+  const file = new AttachmentBuilder(Buffer.from(csv, 'utf8'), { name: 'wallet-lookup.csv' });
+  await interaction.editReply({
+    content: [
+      `📥 Looked up **${names.length}** name(s):`,
+      `• ✅ ${linked} linked`,
+      unlinked ? `• ⚠️ ${unlinked} found but no Upshot profile` : '',
+      notFound ? `• ❌ ${notFound} not found in this server` : '',
+    ].filter(Boolean).join('\n'),
+    files: [file],
+  });
+}
+
 // Cache contest data per user for navigation (cleared after 10 min)
 const contestCache = new Map();
 
@@ -4583,6 +4684,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'sendpack': return await handleSendPack(interaction);
         case 'giveaway': return await handleGiveaway(interaction);
         case 'process-tiers': return await handleProcessTiers(interaction);
+        case 'lookup-wallets': return await handleLookupWallets(interaction);
       }
     }
 
