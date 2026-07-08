@@ -35,7 +35,7 @@ import {
   getDueGiveaways, addGiveawayEntry, getGiveawayEntries, countGiveawayEntries,
   hasAnyPrediction,
   createBadgeDef, getBadgeDef, getAllBadgeDefs, deleteBadgeDef,
-  grantBadge, revokeBadge, getUserBadges, countBadgeHolders,
+  grantBadge, revokeBadge, getUserBadges, countBadgeHolders, getBadgeHolders,
 } from './database.js';
 
 import { rateWithAI, MODEL as NIM_MODEL } from './nim.js';
@@ -4212,6 +4212,36 @@ async function handleBadgeList(interaction) {
   return interaction.reply({ content: lines.join('\n'), flags: ['Ephemeral'] });
 }
 
+async function handleBadgeHolders(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+  const id = parseInt(interaction.options.getString('badge'), 10);
+  const def = getBadgeDef(id);
+  if (!def) return interaction.reply({ content: '❌ That badge no longer exists.', flags: ['Ephemeral'] });
+
+  const holders = getBadgeHolders(id);
+  const header = `**${def.emoji ? def.emoji + ' ' : ''}${def.name}** — ${holders.length} holder(s)`;
+  if (!holders.length) {
+    return interaction.reply({ content: `${header}\nNobody has earned this yet.`, flags: ['Ephemeral'] });
+  }
+
+  // A message tops out at 2000 chars — cap the list and note the remainder.
+  const MAX_LIST = 60;
+  const lines = holders.slice(0, MAX_LIST).map(h => {
+    const tag = h.source === 'manual' ? ' ·  ✋ manual' : '';
+    const when = (h.awarded_at || '').slice(0, 10);
+    return `<@${h.discord_id}>${when ? `  ·  ${when}` : ''}${tag}`;
+  });
+  const more = holders.length > MAX_LIST ? `\n-# …and ${holders.length - MAX_LIST} more` : '';
+
+  return interaction.reply({
+    content: `${header}\n${lines.join('\n')}${more}`,
+    flags: ['Ephemeral'],
+    allowedMentions: { parse: [] }, // list names without pinging everyone
+  });
+}
+
 async function handleBadgeDelete(interaction) {
   if (!isAdmin(interaction.member)) {
     return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
@@ -4912,7 +4942,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.isAutocomplete?.()) {
       if (interaction.commandName === 'sendpack' || interaction.commandName === 'giveaway') return await handleSendPackAutocomplete(interaction);
-      if (['badge-delete', 'badge-check', 'badge-grant', 'badge-revoke'].includes(interaction.commandName)) return await handleBadgeAutocomplete(interaction);
+      if (['badge-holders', 'badge-delete', 'badge-check', 'badge-grant', 'badge-revoke'].includes(interaction.commandName)) return await handleBadgeAutocomplete(interaction);
       return;
     }
 
@@ -4941,6 +4971,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'lookup-wallets': return await handleLookupWallets(interaction);
         case 'badge-create': return await handleBadgeCreate(interaction);
         case 'badge-list': return await handleBadgeList(interaction);
+        case 'badge-holders': return await handleBadgeHolders(interaction);
         case 'badge-delete': return await handleBadgeDelete(interaction);
         case 'badge-check': return await handleBadgeCheck(interaction);
         case 'badge-grant': return await handleBadgeGrant(interaction);
