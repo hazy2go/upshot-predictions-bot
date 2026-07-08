@@ -481,6 +481,17 @@ export const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
+    .setName('badge-holders')
+    .setDescription('Show who holds a badge and how many (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption(opt =>
+      opt.setName('badge')
+        .setDescription('Which badge to inspect')
+        .setRequired(true)
+        .setAutocomplete(true)
+    ),
+
+  new SlashCommandBuilder()
     .setName('badge-delete')
     .setDescription('Delete a badge and remove it from everyone who holds it (admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)

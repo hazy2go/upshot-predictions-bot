@@ -718,4 +718,12 @@ export function countBadgeHolders(badgeId) {
   return db.prepare('SELECT COUNT(*) AS n FROM user_badges WHERE badge_id = ?').get(badgeId).n;
 }
 
+// Everyone holding a given badge, newest award first. Each row: discord_id,
+// source ('auto'|'manual'), awarded_by, awarded_at.
+export function getBadgeHolders(badgeId) {
+  return db.prepare(
+    'SELECT discord_id, source, awarded_by, awarded_at FROM user_badges WHERE badge_id = ? ORDER BY awarded_at DESC'
+  ).all(badgeId);
+}
+
 export default db;
