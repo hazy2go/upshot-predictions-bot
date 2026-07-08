@@ -119,6 +119,37 @@ db.exec(`
     PRIMARY KEY (giveaway_id, discord_id),
     FOREIGN KEY (giveaway_id) REFERENCES giveaways(id) ON DELETE CASCADE
   );
+
+  -- Admin-defined achievement badges. A badge is earned by having at least
+  -- required_lineups total lineup entries SUMMED across the contests listed in
+  -- contest_ids (a JSON array of Upshot contest IDs). The 12h sweep is add-only:
+  -- once earned a badge is permanent (see user_badges).
+  CREATE TABLE IF NOT EXISTS badge_defs (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    name              TEXT NOT NULL,
+    emoji             TEXT,                              -- display icon (unicode or <:name:id>)
+    description       TEXT,
+    contest_ids       TEXT NOT NULL DEFAULT '[]',        -- JSON array of Upshot contest IDs
+    required_lineups  INTEGER NOT NULL DEFAULT 1,
+    created_by        TEXT,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  -- Each row = one badge held by one user. UNIQUE keeps the sweep idempotent.
+  -- source: 'auto' (granted by the sweep) | 'manual' (admin grant). Deleting a
+  -- badge_defs row cascades here, so removing a definition strips it from all
+  -- users' stats.
+  CREATE TABLE IF NOT EXISTS user_badges (
+    discord_id   TEXT NOT NULL,
+    badge_id     INTEGER NOT NULL,
+    source       TEXT NOT NULL DEFAULT 'auto',
+    awarded_by   TEXT,
+    awarded_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (discord_id, badge_id),
+    FOREIGN KEY (badge_id) REFERENCES badge_defs(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_user_badges_user ON user_badges(discord_id);
 `);
 
 // ── Migrations (add columns to existing tables) ─────────────
@@ -613,6 +644,78 @@ export function removeCategory(guildId, category) {
   const filtered = current.filter(c => c.toLowerCase() !== category.toLowerCase());
   setCategories(guildId, filtered);
   return filtered;
+}
+
+// ── Badges ──────────────────────────────────────────────────
+
+function hydrateBadgeDef(row) {
+  if (!row) return null;
+  return { ...row, contest_ids: JSON.parse(row.contest_ids || '[]') };
+}
+
+export function createBadgeDef({ name, emoji, description, contestIds, requiredLineups, createdBy }) {
+  const res = db.prepare(`
+    INSERT INTO badge_defs (name, emoji, description, contest_ids, required_lineups, created_by)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    name,
+    emoji || null,
+    description || null,
+    JSON.stringify(contestIds || []),
+    requiredLineups,
+    createdBy || null,
+  );
+  return getBadgeDef(res.lastInsertRowid);
+}
+
+export function getBadgeDef(id) {
+  return hydrateBadgeDef(db.prepare('SELECT * FROM badge_defs WHERE id = ?').get(id));
+}
+
+export function getAllBadgeDefs() {
+  return db.prepare('SELECT * FROM badge_defs ORDER BY created_at DESC').all().map(hydrateBadgeDef);
+}
+
+// Cascades to user_badges (FK ON DELETE CASCADE), so awarded badges vanish too.
+export function deleteBadgeDef(id) {
+  return db.prepare('DELETE FROM badge_defs WHERE id = ?').run(id);
+}
+
+// Grant a badge to a user. Idempotent on (discord_id, badge_id): an existing
+// row is left untouched (its source is preserved — a manual grant is never
+// downgraded to auto). Returns true only if a NEW row was inserted.
+export function grantBadge(discordId, badgeId, { source = 'auto', awardedBy = null } = {}) {
+  const res = db.prepare(`
+    INSERT OR IGNORE INTO user_badges (discord_id, badge_id, source, awarded_by)
+    VALUES (?, ?, ?, ?)
+  `).run(discordId, badgeId, source, awardedBy);
+  return res.changes > 0;
+}
+
+export function revokeBadge(discordId, badgeId) {
+  return db.prepare('DELETE FROM user_badges WHERE discord_id = ? AND badge_id = ?')
+    .run(discordId, badgeId);
+}
+
+export function userHasBadge(discordId, badgeId) {
+  return !!db.prepare('SELECT 1 FROM user_badges WHERE discord_id = ? AND badge_id = ?')
+    .get(discordId, badgeId);
+}
+
+// All badge definitions a user currently holds, with award metadata. Ordered by
+// when the definition was created so display is stable.
+export function getUserBadges(discordId) {
+  return db.prepare(`
+    SELECT b.*, ub.source, ub.awarded_at
+    FROM user_badges ub
+    JOIN badge_defs b ON b.id = ub.badge_id
+    WHERE ub.discord_id = ?
+    ORDER BY b.created_at ASC
+  `).all(discordId).map(hydrateBadgeDef);
+}
+
+export function countBadgeHolders(badgeId) {
+  return db.prepare('SELECT COUNT(*) AS n FROM user_badges WHERE badge_id = ?').get(badgeId).n;
 }
 
 export default db;

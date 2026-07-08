@@ -1219,7 +1219,7 @@ export function buildLeaderboard(entries, monthLabel, options = {}) {
 
 const STATS_PAGE_SIZE = 15;
 
-export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = [], tier = 0, cardStats = null, futureOpen = [], page = 0) {
+export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = [], tier = 0, cardStats = null, futureOpen = [], page = 0, badges = []) {
   const children = [];
 
   const scoredPageCount = Math.max(1, Math.ceil(scoredPredictions.length / STATS_PAGE_SIZE));
@@ -1257,6 +1257,15 @@ export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = []
 
   if (!stats.rank) {
     children.push(text('-# Make a rated prediction to join the leaderboard.'));
+  }
+
+  if (badges.length > 0) {
+    children.push(separator());
+    children.push(text(`**🎖️ Badges (${badges.length})**`));
+    children.push(text(badges.map(b => {
+      const label = `${b.emoji ? b.emoji + ' ' : '🏅 '}**${b.name}**`;
+      return b.description ? `${label} — ${b.description}` : label;
+    }).join('\n')));
   }
 
   if (scoredPredictions.length > 0) {
