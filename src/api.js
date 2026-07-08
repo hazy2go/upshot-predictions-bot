@@ -473,6 +473,37 @@ export async function getUserContestLineups(walletAddress) {
 }
 
 /**
+ * Count how many lineup entries each wallet has, SUMMED across the given
+ * contest IDs. Used by the badge sweep: one standings fetch per contest (shared
+ * cache), then a wallet→count tally. A wallet with 3 lineups in contest A and 2
+ * in contest B ends up with 5.
+ *
+ * Works for both LIVE and COMPLETED contests — standings are fetched by explicit
+ * ID, not filtered to the live list. A contest whose standings can't be fetched
+ * (network error, or Upshot no longer serves an ended contest) contributes 0 and
+ * is reported in `failed` so the caller can avoid punishing users for an outage.
+ *
+ * Returns { counts: Map<lowerWallet, number>, failed: string[] }.
+ */
+export async function getContestLineupCounts(contestIds) {
+  const counts = new Map();
+  const failed = [];
+  const ids = [...new Set((contestIds || []).filter(Boolean))];
+
+  await Promise.allSettled(ids.map(async (contestId) => {
+    const data = await getContestStandings(contestId);
+    if (!data) { failed.push(contestId); return; }
+    for (const entry of (data.standings || [])) {
+      const wallet = entry.user?.walletAddress?.toLowerCase();
+      if (!wallet) continue;
+      counts.set(wallet, (counts.get(wallet) || 0) + 1);
+    }
+  }));
+
+  return { counts, failed };
+}
+
+/**
  * True when a card's event deadline is today or in the past (UTC) — i.e. it can
  * no longer be predicted on. Mirrors the deadline check in the submit flow.
  * Returns false on missing/unparseable data so we never hide a card we can't

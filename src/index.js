@@ -1,7 +1,7 @@
 import {
   Client, GatewayIntentBits, Events, Routes, AttachmentBuilder,
   ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder,
-  MessageFlags, ComponentType, ButtonStyle,
+  MessageFlags, ComponentType, ButtonStyle, StringSelectMenuBuilder,
 } from 'discord.js';
 import 'dotenv/config';
 import fs from 'node:fs';
@@ -34,6 +34,8 @@ import {
   createGiveaway, getGiveaway, setGiveawayMessageId, setGiveawayStatus, setGiveawayWinners,
   getDueGiveaways, addGiveawayEntry, getGiveawayEntries, countGiveawayEntries,
   hasAnyPrediction,
+  createBadgeDef, getBadgeDef, getAllBadgeDefs, deleteBadgeDef,
+  grantBadge, revokeBadge, getUserBadges, countBadgeHolders,
 } from './database.js';
 
 import { rateWithAI, MODEL as NIM_MODEL } from './nim.js';
@@ -65,7 +67,7 @@ import {
   getSeasonRank, getUserContestLineups, getPredictableCards, getCardStats,
   getUserProfile, getUserPacks, transferPack, refreshUpshotAccessToken,
   getContests, getContestTop, getRaffles, getRaffleDetail, getRaffleTop,
-  getStorePacks, getStoreBundles,
+  getStorePacks, getStoreBundles, getContestLineupCounts,
 } from './api.js';
 
 // ── Client ──────────────────────────────────────────────────
@@ -826,7 +828,9 @@ async function buildMyStatsPayload(userId, page = 0) {
     cardStats = await getCardStats(profile.wallet_address).catch(() => null);
   }
 
-  return buildStatsCard(stats, userId, currentMonthLabel(), scored, tier, cardStats, futureOpen, page);
+  const badges = getUserBadges(userId);
+
+  return buildStatsCard(stats, userId, currentMonthLabel(), scored, tier, cardStats, futureOpen, page, badges);
 }
 
 async function handleMyStats(interaction) {
@@ -4047,6 +4051,234 @@ function scheduleNextResolve() {
   console.log(`Auto-resolve: Next check at ${nextResolveCheck.toISOString()}`);
 }
 
+// ── Badge sweep ──────────────────────────────────────────────
+//
+// Every 12h: for each badge definition, tally each linked user's total lineup
+// count across the badge's contests (one standings fetch per contest, shared by
+// all users) and auto-grant the badge to anyone at/above the threshold who
+// doesn't already hold it. Add-only — earned badges are permanent, so a user
+// who later drops below the threshold (or whose contest ends) keeps the badge.
+// Manual grants are never touched. Silent: no user notification.
+
+const BADGE_INTERVAL = 12 * 60 * 60 * 1000; // 12 hours
+let badgeTimer = null;
+
+/**
+ * Run the badge sweep once. Returns a summary { defs, granted, skippedDefs }.
+ * skippedDefs lists badges whose contest standings ALL failed to load — we don't
+ * grant off a partial/empty tally when the API was unreachable, so an Upshot
+ * outage can't wrongly deny (it just retries next sweep).
+ */
+async function runBadgeSweep({ onlyBadgeId = null } = {}) {
+  let defs = getAllBadgeDefs();
+  if (onlyBadgeId != null) defs = defs.filter(d => d.id === onlyBadgeId);
+  if (!defs.length) return { defs: 0, granted: 0, skippedDefs: 0 };
+
+  const users = getAllUsers().filter(u => u.wallet_address);
+  let granted = 0;
+  let skippedDefs = 0;
+
+  for (const def of defs) {
+    if (!def.contest_ids.length) continue;
+
+    const { counts, failed } = await getContestLineupCounts(def.contest_ids);
+    // Every referenced contest failed to load → don't evaluate this badge now.
+    if (failed.length === def.contest_ids.length) {
+      skippedDefs++;
+      console.warn(`Badge sweep: all ${failed.length} contest(s) for badge "${def.name}" unreachable — skipping this run`);
+      continue;
+    }
+
+    for (const user of users) {
+      const total = counts.get(user.wallet_address.toLowerCase()) || 0;
+      if (total < def.required_lineups) continue;
+      if (grantBadge(user.discord_id, def.id, { source: 'auto' })) granted++;
+    }
+  }
+
+  return { defs: defs.length, granted, skippedDefs };
+}
+
+async function safeRunBadgeSweep() {
+  try {
+    const { defs, granted, skippedDefs } = await runBadgeSweep();
+    if (defs) {
+      console.log(`Badge sweep: ${defs} badge(s) checked, ${granted} newly granted${skippedDefs ? `, ${skippedDefs} skipped (API unreachable)` : ''}`);
+    }
+  } catch (err) {
+    console.error('Badge sweep: Fatal error:', err.message);
+  }
+  badgeTimer = setTimeout(safeRunBadgeSweep, BADGE_INTERVAL);
+}
+
+// ── Badge admin commands ─────────────────────────────────────
+
+// Pending /badge-create drafts, keyed by admin user id: the command captures the
+// name/threshold, then the contest multi-select finalises the badge.
+const badgeDraftCache = new Map();
+
+// Autocomplete for the `badge` option on delete/check/grant/revoke: match on
+// name, return the badge id as the value.
+async function handleBadgeAutocomplete(interaction) {
+  const q = (interaction.options.getFocused() || '').toLowerCase();
+  const choices = getAllBadgeDefs()
+    .filter(b => !q || b.name.toLowerCase().includes(q))
+    .slice(0, 25)
+    .map(b => ({ name: `${b.emoji ? b.emoji + ' ' : ''}${b.name} (≥${b.required_lineups})`.slice(0, 100), value: String(b.id) }));
+  try { await interaction.respond(choices); } catch { /* interaction expired */ }
+}
+
+async function handleBadgeCreate(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+  const name = interaction.options.getString('name').trim();
+  const requiredLineups = interaction.options.getInteger('lineups');
+  const emoji = interaction.options.getString('emoji')?.trim() || null;
+  const description = interaction.options.getString('description')?.trim() || null;
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  // Show LIVE contests first, then the most recent COMPLETED ones. Discord caps a
+  // select at 25 options, so we surface the freshest 25 and warn if truncated.
+  const contests = await getContests();
+  if (!contests.length) {
+    return interaction.editReply('❌ Couldn\'t load any contests from Upshot right now — try again shortly.');
+  }
+  const rank = c => (c.status === 'LIVE' ? 0 : 1);
+  const sorted = [...contests].sort((a, b) => {
+    if (rank(a) !== rank(b)) return rank(a) - rank(b);
+    return String(b.endDate || b.startDate || '').localeCompare(String(a.endDate || a.startDate || ''));
+  });
+  const shown = sorted.slice(0, 25);
+
+  badgeDraftCache.set(interaction.user.id, { name, requiredLineups, emoji, description });
+  scheduleCacheEvict(badgeDraftCache, 'badge-draft', interaction.user.id);
+
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId('badge_create_contests')
+    .setPlaceholder('Pick the contest(s) that count toward this badge')
+    .setMinValues(1)
+    .setMaxValues(shown.length)
+    .addOptions(shown.map(c => ({
+      label: (c.name || c.id).slice(0, 100),
+      value: c.id,
+      description: (c.status === 'LIVE' ? '🟢 Live' : '🏁 Ended').slice(0, 100),
+    })));
+
+  const truncNote = sorted.length > 25 ? `\n-# Showing the 25 most recent of ${sorted.length} contests.` : '';
+  await interaction.editReply({
+    content: `**${emoji ? emoji + ' ' : ''}${name}** — earned at **${requiredLineups}** total lineup(s).\nSelect the contest(s) whose lineups count toward it:${truncNote}`,
+    components: [new ActionRowBuilder().addComponents(menu)],
+  });
+}
+
+async function handleBadgeCreateContestSelect(interaction) {
+  const draft = badgeDraftCache.get(interaction.user.id);
+  if (!draft) {
+    return interaction.update({ content: '❌ This badge setup expired. Run `/badge-create` again.', components: [] });
+  }
+  badgeDraftCache.delete(interaction.user.id);
+
+  const contestIds = interaction.values;
+  const def = createBadgeDef({
+    name: draft.name,
+    emoji: draft.emoji,
+    description: draft.description,
+    contestIds,
+    requiredLineups: draft.requiredLineups,
+    createdBy: interaction.user.id,
+  });
+
+  await interaction.update({
+    content: `✅ Created badge **${def.emoji ? def.emoji + ' ' : ''}${def.name}** (#${def.id}) — ${contestIds.length} contest(s), needs **${def.required_lineups}** total lineup(s).\nThe 12h sweep will start granting it automatically. Run \`/badge-check\` to award it now.`,
+    components: [],
+  });
+}
+
+async function handleBadgeList(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+  const defs = getAllBadgeDefs();
+  if (!defs.length) {
+    return interaction.reply({ content: 'No badges yet. Create one with `/badge-create`.', flags: ['Ephemeral'] });
+  }
+  const lines = defs.map(b => {
+    const holders = countBadgeHolders(b.id);
+    const head = `**#${b.id} · ${b.emoji ? b.emoji + ' ' : ''}${b.name}** — ≥${b.required_lineups} lineup(s) across ${b.contest_ids.length} contest(s) · ${holders} holder(s)`;
+    return b.description ? `${head}\n-# ${b.description}` : head;
+  });
+  return interaction.reply({ content: lines.join('\n'), flags: ['Ephemeral'] });
+}
+
+async function handleBadgeDelete(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+  const id = parseInt(interaction.options.getString('badge'), 10);
+  const def = getBadgeDef(id);
+  if (!def) return interaction.reply({ content: '❌ That badge no longer exists.', flags: ['Ephemeral'] });
+  const holders = countBadgeHolders(id);
+  deleteBadgeDef(id); // cascades to user_badges
+  return interaction.reply({ content: `🗑️ Deleted **${def.name}** and removed it from ${holders} user(s).`, flags: ['Ephemeral'] });
+}
+
+async function handleBadgeCheck(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+  const badgeArg = interaction.options.getString('badge');
+  let onlyBadgeId = null;
+  if (badgeArg) {
+    onlyBadgeId = parseInt(badgeArg, 10);
+    if (!getBadgeDef(onlyBadgeId)) {
+      return interaction.reply({ content: '❌ That badge no longer exists.', flags: ['Ephemeral'] });
+    }
+  }
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+  const { defs, granted, skippedDefs } = await runBadgeSweep({ onlyBadgeId });
+  if (!defs) {
+    return interaction.editReply('No matching badge to check.');
+  }
+  const skipNote = skippedDefs ? `\n⚠️ ${skippedDefs} badge(s) skipped — Upshot standings were unreachable.` : '';
+  return interaction.editReply(`✅ Checked ${defs} badge(s) against every linked user — **${granted}** new award(s).${skipNote}`);
+}
+
+async function handleBadgeGrant(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+  const user = interaction.options.getUser('user');
+  const id = parseInt(interaction.options.getString('badge'), 10);
+  const def = getBadgeDef(id);
+  if (!def) return interaction.reply({ content: '❌ That badge no longer exists.', flags: ['Ephemeral'] });
+  const isNew = grantBadge(user.id, id, { source: 'manual', awardedBy: interaction.user.id });
+  return interaction.reply({
+    content: isNew
+      ? `✅ Gave **${def.emoji ? def.emoji + ' ' : ''}${def.name}** to <@${user.id}>.`
+      : `ℹ️ <@${user.id}> already has **${def.name}**.`,
+    flags: ['Ephemeral'],
+  });
+}
+
+async function handleBadgeRevoke(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+  const user = interaction.options.getUser('user');
+  const id = parseInt(interaction.options.getString('badge'), 10);
+  const def = getBadgeDef(id);
+  if (!def) return interaction.reply({ content: '❌ That badge no longer exists.', flags: ['Ephemeral'] });
+  const res = revokeBadge(user.id, id);
+  return interaction.reply({
+    content: res.changes > 0
+      ? `🗑️ Removed **${def.name}** from <@${user.id}>.`
+      : `ℹ️ <@${user.id}> didn't have **${def.name}**.`,
+    flags: ['Ephemeral'],
+  });
+}
+
 // ── Contest watcher ──────────────────────────────────────────
 //
 // Polls Upshot's /contests hourly and announces, in the configured contests
@@ -4680,6 +4912,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.isAutocomplete?.()) {
       if (interaction.commandName === 'sendpack' || interaction.commandName === 'giveaway') return await handleSendPackAutocomplete(interaction);
+      if (['badge-delete', 'badge-check', 'badge-grant', 'badge-revoke'].includes(interaction.commandName)) return await handleBadgeAutocomplete(interaction);
       return;
     }
 
@@ -4706,6 +4939,12 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'giveaway': return await handleGiveaway(interaction);
         case 'process-tiers': return await handleProcessTiers(interaction);
         case 'lookup-wallets': return await handleLookupWallets(interaction);
+        case 'badge-create': return await handleBadgeCreate(interaction);
+        case 'badge-list': return await handleBadgeList(interaction);
+        case 'badge-delete': return await handleBadgeDelete(interaction);
+        case 'badge-check': return await handleBadgeCheck(interaction);
+        case 'badge-grant': return await handleBadgeGrant(interaction);
+        case 'badge-revoke': return await handleBadgeRevoke(interaction);
       }
     }
 
@@ -4755,6 +4994,9 @@ client.on(Events.InteractionCreate, async interaction => {
       }
       if (interaction.customId === 'cancel_pred_select') {
         return await handleCancelSelect(interaction);
+      }
+      if (interaction.customId === 'badge_create_contests') {
+        return await handleBadgeCreateContestSelect(interaction);
       }
     }
 
@@ -4850,6 +5092,11 @@ client.once(Events.ClientReady, async () => {
   // draws any giveaway whose timer has elapsed — survives restarts via the DB.
   giveawaySweepTimer = setTimeout(safeRunGiveawaySweep, 30_000);
   console.log(`   Giveaway sweep: first check in 30s, then every 20s`);
+
+  // Start the badge sweep (first run after 3 min, then every 12h). Auto-grants
+  // contest-lineup badges to eligible linked users.
+  badgeTimer = setTimeout(safeRunBadgeSweep, 180_000);
+  console.log(`   Badge sweep: first check in 3 min, then every 12h`);
 
   // Keep the Upshot token fresh hands-off: the access token lives ~15h and the
   // refresh token is a rotating 7-day sliding window, so a check every 6h keeps

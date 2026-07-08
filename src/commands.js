@@ -448,4 +448,88 @@ export const commands = [
         .setDescription('Month to process as YYYY-MM (default: last month)')
         .setRequired(false)
     ),
+
+  new SlashCommandBuilder()
+    .setName('badge-create')
+    .setDescription('Create a contest-lineup badge, then pick its contests (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption(opt =>
+      opt.setName('name')
+        .setDescription('Badge name, e.g. "Contest Grinder"')
+        .setRequired(true)
+        .setMaxLength(60)
+    )
+    .addIntegerOption(opt =>
+      opt.setName('lineups')
+        .setDescription('Total lineups needed across the chosen contests to earn it')
+        .setRequired(true)
+        .setMinValue(1)
+    )
+    .addStringOption(opt =>
+      opt.setName('emoji')
+        .setDescription('Display icon, e.g. 🏆 or a custom :emoji:')
+    )
+    .addStringOption(opt =>
+      opt.setName('description')
+        .setDescription('Short blurb shown with the badge')
+        .setMaxLength(150)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('badge-list')
+    .setDescription('List all badges, their rules, and how many users hold each (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('badge-delete')
+    .setDescription('Delete a badge and remove it from everyone who holds it (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption(opt =>
+      opt.setName('badge')
+        .setDescription('Which badge to delete')
+        .setRequired(true)
+        .setAutocomplete(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('badge-check')
+    .setDescription('Run the badge eligibility sweep now (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption(opt =>
+      opt.setName('badge')
+        .setDescription('Limit the check to one badge (default: all)')
+        .setAutocomplete(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('badge-grant')
+    .setDescription('Manually give a badge to a user (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addUserOption(opt =>
+      opt.setName('user')
+        .setDescription('Who to give the badge to')
+        .setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('badge')
+        .setDescription('Which badge to give')
+        .setRequired(true)
+        .setAutocomplete(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('badge-revoke')
+    .setDescription('Manually remove a badge from a user (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addUserOption(opt =>
+      opt.setName('user')
+        .setDescription('Who to remove the badge from')
+        .setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('badge')
+        .setDescription('Which badge to remove')
+        .setRequired(true)
+        .setAutocomplete(true)
+    ),
 ];
