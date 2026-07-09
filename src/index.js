@@ -1730,8 +1730,9 @@ async function drawGiveaway(g) {
 
       const profile = getUpshotProfile(id);
       if (!profile?.wallet_address) continue; // unlinked since entering
-      // Re-check the required-pack condition — they may have opened/sold it since.
-      if (g.required_pack && !holdsRequiredPack(await getUserPacks(profile.wallet_address), g.required_pack)) continue;
+      // Note: the required-pack condition is enforced only at entry, not here —
+      // an entrant who held it when they joined stays eligible even if they've
+      // since opened or sold it.
       const upshot = await getUserProfile(profile.wallet_address);
       if (!upshot?.id) continue; // can't resolve an Upshot account to send to
 
