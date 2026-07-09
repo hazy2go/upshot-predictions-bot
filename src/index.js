@@ -1,7 +1,7 @@
 import {
   Client, GatewayIntentBits, Events, Routes, AttachmentBuilder,
   ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder,
-  MessageFlags, ComponentType, ButtonStyle, StringSelectMenuBuilder,
+  MessageFlags, ComponentType, ButtonStyle, StringSelectMenuBuilder, ChannelType,
 } from 'discord.js';
 import 'dotenv/config';
 import fs from 'node:fs';
@@ -36,6 +36,7 @@ import {
   hasAnyPrediction,
   createBadgeDef, getBadgeDef, getAllBadgeDefs, deleteBadgeDef,
   grantBadge, revokeBadge, getUserBadges, countBadgeHolders, getBadgeHolders,
+  recordMessage, getMessageActivity, getMessageTrackingSince,
 } from './database.js';
 
 import { rateWithAI, MODEL as NIM_MODEL } from './nim.js';
@@ -77,6 +78,7 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,   // referral: GUILD_MEMBER_ADD
     GatewayIntentBits.GuildInvites,   // referral: invite create/delete
+    GatewayIntentBits.GuildMessages,  // /shotcallers: forward-only message counter (non-privileged; no MessageContent needed)
   ],
   rest: {
     timeout: 30_000, // 30s REST timeout (default is 15s, too short for Pi with large attachments)
@@ -84,6 +86,21 @@ const client = new Client({
 });
 
 registerReferralHandlers(client);
+
+// ── Message activity counter (forward-only, powers /shotcallers) ──
+// We only read metadata (author, channel, timestamp) — never content — so this
+// needs the non-privileged GuildMessages intent, NOT MessageContent. Bots and
+// system messages don't count. Threads are attributed to their parent channel so
+// the "last seen in" link points somewhere browsable.
+client.on(Events.MessageCreate, (message) => {
+  try {
+    if (!message.guildId || message.author?.bot || message.system) return;
+    const channelId = message.channel?.isThread?.() ? (message.channel.parentId || message.channelId) : message.channelId;
+    recordMessage(message.guildId, message.author.id, channelId);
+  } catch (err) {
+    console.error('recordMessage failed:', err.message);
+  }
+});
 
 // ── Config resolver (DB first, .env fallback) ───────────────
 
@@ -290,6 +307,18 @@ function getStoreChannelId(guildId) {
 
 function getAdminRoleId(guildId) {
   return cfg(guildId, 'admin_role', 'ADMIN_ROLE_ID');
+}
+
+function getShotCallerRoleId(guildId) {
+  return cfg(guildId, 'shotcaller_role', 'SHOTCALLER_ROLE_ID');
+}
+
+function getContentChannelId(guildId) {
+  return cfg(guildId, 'content_channel', 'CONTENT_CHANNEL_ID');
+}
+
+function getBountyForumId(guildId) {
+  return cfg(guildId, 'bounty_forum', 'BOUNTY_FORUM_ID');
 }
 
 // /sendpack is restricted to a single owner when one is configured (via
@@ -2340,6 +2369,21 @@ async function handleSetup(interaction) {
       setConfig(guildId, 'admin_role', role.id);
       return interaction.reply({ content: `✅ Admin role set to <@&${role.id}>`, flags: ['Ephemeral'] });
     }
+    case 'shotcaller-role': {
+      const role = interaction.options.getRole('role', true);
+      setConfig(guildId, 'shotcaller_role', role.id);
+      return interaction.reply({ content: `✅ Shot Caller role set to <@&${role.id}>. Run \`/shotcallers\` to open the monitoring panel.`, flags: ['Ephemeral'] });
+    }
+    case 'content-channel': {
+      const channel = interaction.options.getChannel('channel', true);
+      setConfig(guildId, 'content_channel', channel.id);
+      return interaction.reply({ content: `✅ Content channel set to <#${channel.id}>. \`/shotcallers\` will show each member's latest post here.`, flags: ['Ephemeral'] });
+    }
+    case 'bounty-forum': {
+      const channel = interaction.options.getChannel('channel', true);
+      setConfig(guildId, 'bounty_forum', channel.id);
+      return interaction.reply({ content: `✅ Bounty forum set to <#${channel.id}>. \`/shotcallers\` counts each distinct bounty post a member submitted to.`, flags: ['Ephemeral'] });
+    }
     case 'upshot-token': {
       // Accept the raw token OR the whole upshot-token.json the extractor dumps.
       const token = extractTokenFromInput(interaction.options.getString('token', true));
@@ -2550,6 +2594,9 @@ async function handleSetup(interaction) {
         `**Admin review channel:** ${cfg.admin_channel ? `<#${cfg.admin_channel}>` : '`not set (using .env)`'}`,
         `**Leaderboard channel:** ${cfg.leaderboard_channel ? `<#${cfg.leaderboard_channel}>` : '`not set (using .env)`'}`,
         `**Admin role:** ${cfg.admin_role ? `<@&${cfg.admin_role}>` : '`not set (using .env)`'}`,
+        `**Shot Caller role:** ${cfg.shotcaller_role ? `<@&${cfg.shotcaller_role}>` : '`not set`'}`,
+        `**Content channel:** ${cfg.content_channel ? `<#${cfg.content_channel}>` : '`not set`'}`,
+        `**Bounty forum:** ${cfg.bounty_forum ? `<#${cfg.bounty_forum}>` : '`not set`'}`,
         `**Max daily predictions:** ${cfg.max_daily || '`not set (default: 3)`'}`,
         `**Max open predictions:** ${cfg.max_open || '`not set (default: 5)`'}`,
         `**Categories:** ${cats.join(', ')}`,
@@ -4309,6 +4356,258 @@ async function handleBadgeRevoke(interaction) {
   });
 }
 
+// ── Shot Caller monitoring panel ─────────────────────────────
+//
+// /shotcallers shows, for every holder of the configured Shot Caller role:
+//   • message activity (total + last seen) — forward-only, from the messageCreate
+//     counter, since Discord exposes no historical message count
+//   • their latest post in the content channel — scanned live
+//   • how many distinct bounty-forum posts they submitted to — scanned live
+// Members are sorted most-AFK first so silent role-holders surface at the top.
+
+// SQLite datetime('now') stores UTC as 'YYYY-MM-DD HH:MM:SS' (no zone). Append
+// 'Z' so it parses as UTC, then return whole seconds for a Discord <t:…> tag.
+function sqlTimeToUnix(s) {
+  if (!s) return null;
+  const ms = new Date(s.replace(' ', 'T') + 'Z').getTime();
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+}
+
+// Traffic-light for how long since a member last spoke. null = never seen since
+// tracking began. Thresholds: <7d green, <14d amber, else red.
+function afkBadge(lastUnix) {
+  if (!lastUnix) return '🔴';
+  const days = (Date.now() / 1000 - lastUnix) / 86400;
+  if (days < 7) return '🟢';
+  if (days < 14) return '🟡';
+  return '🔴';
+}
+
+// Gather a forum's threads: active + public archived (paginated). Capped so a
+// giant backlog can't stall the panel; returns { threads, truncated }.
+async function fetchForumThreads(channel, cap = 300) {
+  const byId = new Map();
+  try {
+    const active = await channel.threads.fetchActive();
+    for (const t of active.threads.values()) byId.set(t.id, t);
+  } catch (err) {
+    console.error('fetchActive threads failed:', err.message);
+  }
+  let before;
+  let truncated = false;
+  try {
+    while (byId.size < cap) {
+      const page = await channel.threads.fetchArchived({ type: 'public', limit: 100, before });
+      const batch = [...page.threads.values()];
+      for (const t of batch) byId.set(t.id, t);
+      if (!batch.length || !page.hasMore) break;
+      before = batch[batch.length - 1].id;
+    }
+    if (byId.size >= cap) truncated = true;
+  } catch (err) {
+    console.error('fetchArchived threads failed:', err.message);
+  }
+  return { threads: [...byId.values()], truncated };
+}
+
+// Latest content per user in the content channel. Forum → newest thread they
+// started; text/announcement → newest message they posted. Returns
+// Map<userId, { url, label, ts }>.
+async function scanContentChannel(channel) {
+  const latest = new Map();
+  const consider = (userId, ts, url, label) => {
+    if (!userId || !ts) return;
+    const cur = latest.get(userId);
+    if (!cur || ts > cur.ts) latest.set(userId, { url, label, ts });
+  };
+
+  if (channel.type === ChannelType.GuildForum) {
+    const { threads } = await fetchForumThreads(channel);
+    for (const t of threads) {
+      const ts = t.createdTimestamp || (t.archivedAt ? t.archivedAt.getTime() : null);
+      consider(t.ownerId, ts, t.url, t.name);
+    }
+    return latest;
+  }
+
+  // Text / announcement channel — page back through recent messages.
+  let before;
+  let scanned = 0;
+  const CAP = 600; // ~6 pages; enough to find a recent post per active member
+  try {
+    while (scanned < CAP) {
+      const page = await channel.messages.fetch({ limit: 100, before });
+      if (!page.size) break;
+      for (const m of page.values()) {
+        if (m.author?.bot) continue;
+        const label = (m.content || '').replace(/\s+/g, ' ').trim().slice(0, 70) || '(attachment/embed)';
+        consider(m.author.id, m.createdTimestamp, m.url, label);
+      }
+      scanned += page.size;
+      before = page.last().id;
+      if (page.size < 100) break;
+    }
+  } catch (err) {
+    console.error('scanContentChannel failed:', err.message);
+  }
+  return latest;
+}
+
+// Count, per user, how many distinct bounty posts they submitted to. Forum → one
+// count per thread the user posted in (started it, or left any message). Text
+// channel → one count per message they sent. Returns { counts: Map<userId,n>,
+// truncated }.
+async function scanBountyForum(channel) {
+  const counts = new Map();
+  const bump = (userId) => counts.set(userId, (counts.get(userId) || 0) + 1);
+
+  if (channel.type !== ChannelType.GuildForum) {
+    // Fallback for a plain text bounty channel: every message is a submission.
+    let before;
+    let scanned = 0;
+    const CAP = 1000;
+    try {
+      while (scanned < CAP) {
+        const page = await channel.messages.fetch({ limit: 100, before });
+        if (!page.size) break;
+        for (const m of page.values()) {
+          if (!m.author?.bot) bump(m.author.id);
+        }
+        scanned += page.size;
+        before = page.last().id;
+        if (page.size < 100) break;
+      }
+    } catch (err) {
+      console.error('scanBountyForum (text) failed:', err.message);
+    }
+    return { counts, truncated: scanned >= CAP };
+  }
+
+  const { threads, truncated } = await fetchForumThreads(channel);
+  for (const thread of threads) {
+    const participants = new Set();
+    if (thread.ownerId) participants.add(thread.ownerId); // the post's author
+    try {
+      let before;
+      let scanned = 0;
+      const PER_THREAD = 200; // 2 pages of replies per bounty post
+      while (scanned < PER_THREAD) {
+        const page = await thread.messages.fetch({ limit: 100, before });
+        if (!page.size) break;
+        for (const m of page.values()) {
+          if (!m.author?.bot) participants.add(m.author.id);
+        }
+        scanned += page.size;
+        before = page.last().id;
+        if (page.size < 100) break;
+      }
+    } catch (err) {
+      console.error(`bounty thread ${thread.id} scan failed:`, err.message);
+    }
+    for (const userId of participants) bump(userId); // once per post
+  }
+  return { counts, truncated };
+}
+
+async function handleShotCallers(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+  const guildId = interaction.guildId;
+  const roleId = getShotCallerRoleId(guildId);
+  if (!roleId) {
+    return interaction.reply({ content: '❌ No Shot Caller role configured. Set one with `/setup shotcaller-role`.', flags: ['Ephemeral'] });
+  }
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  const role = await interaction.guild.roles.fetch(roleId).catch(() => null);
+  if (!role) {
+    return interaction.editReply('❌ The configured Shot Caller role no longer exists. Re-set it with `/setup shotcaller-role`.');
+  }
+
+  // Ensure the member cache is complete so role membership is accurate.
+  await interaction.guild.members.fetch().catch(() => {});
+  const members = [...role.members.values()];
+  if (!members.length) {
+    return interaction.editReply(`No members currently hold **${role.name}**.`);
+  }
+
+  // Live scans of the two configured channels (skipped if unset/unreachable).
+  const contentChannelId = getContentChannelId(guildId);
+  const bountyForumId = getBountyForumId(guildId);
+
+  let contentMap = null;
+  let contentChannel = null;
+  if (contentChannelId) {
+    contentChannel = await safeGetChannel(contentChannelId);
+    if (contentChannel) contentMap = await scanContentChannel(contentChannel);
+  }
+
+  let bountyCounts = null;
+  let bountyChannel = null;
+  let bountyTruncated = false;
+  if (bountyForumId) {
+    bountyChannel = await safeGetChannel(bountyForumId);
+    if (bountyChannel) {
+      const res = await scanBountyForum(bountyChannel);
+      bountyCounts = res.counts;
+      bountyTruncated = res.truncated;
+    }
+  }
+
+  // Build a row per member, then sort most-AFK first (never-seen at the very top).
+  const rows = members.map(m => {
+    const act = getMessageActivity(guildId, m.id);
+    const lastUnix = sqlTimeToUnix(act?.last_message_at);
+    return {
+      id: m.id,
+      name: m.user?.username || m.displayName || m.id,
+      msgCount: act?.message_count || 0,
+      lastUnix,
+      lastChannelId: act?.last_channel_id || null,
+      content: contentMap?.get(m.id) || null,
+      bounties: bountyCounts?.get(m.id) ?? null,
+    };
+  }).sort((a, b) => (a.lastUnix || 0) - (b.lastUnix || 0));
+
+  const since = getMessageTrackingSince(guildId);
+  const sinceUnix = sqlTimeToUnix(since);
+
+  const header = [
+    `# 🎯 Shot Caller Monitor — ${role.name}`,
+    `${members.length} member(s) · sorted most-inactive first`,
+    contentChannel ? `Content: <#${contentChannel.id}>` : '-# Content channel not set (`/setup content-channel`)',
+    bountyChannel ? `Bounties: <#${bountyChannel.id}>${bountyTruncated ? ' — ⚠️ large forum, partial scan' : ''}` : '-# Bounty forum not set (`/setup bounty-forum`)',
+    sinceUnix
+      ? `-# 💬 message counts are since <t:${sinceUnix}:D> (tracking start) — history before then isn't counted`
+      : '-# 💬 message tracking just started — counts will build up from now',
+    '',
+  ];
+
+  const blocks = rows.map(r => {
+    const last = r.lastUnix
+      ? `last <t:${r.lastUnix}:R>${r.lastChannelId ? ` in <#${r.lastChannelId}>` : ''}`
+      : 'not seen since tracking began';
+    const content = contentMap
+      ? (r.content ? `<t:${Math.floor(r.content.ts / 1000)}:R> — [${r.content.label.replace(/[[\]]/g, '')}](${r.content.url})` : '— none')
+      : '— (channel not set)';
+    const bounties = bountyCounts ? String(r.bounties ?? 0) : '— (forum not set)';
+    return [
+      `${afkBadge(r.lastUnix)} **${r.name}** · <@${r.id}>`,
+      `   💬 ${r.msgCount} msgs · ${last}`,
+      `   📝 last content: ${content}`,
+      `   🎯 bounties: ${bounties}`,
+    ].join('\n');
+  });
+
+  const chunks = chunkLines([...header, ...blocks.flatMap(b => [b, ''])]);
+  await interaction.editReply({ content: chunks[0], allowedMentions: { parse: [] } });
+  for (const chunk of chunks.slice(1)) {
+    await interaction.followUp({ content: chunk, flags: ['Ephemeral'], allowedMentions: { parse: [] } });
+  }
+}
+
 // ── Contest watcher ──────────────────────────────────────────
 //
 // Polls Upshot's /contests hourly and announces, in the configured contests
@@ -4968,6 +5267,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'sendpack': return await handleSendPack(interaction);
         case 'giveaway': return await handleGiveaway(interaction);
         case 'process-tiers': return await handleProcessTiers(interaction);
+        case 'shotcallers': return await handleShotCallers(interaction);
         case 'lookup-wallets': return await handleLookupWallets(interaction);
         case 'badge-create': return await handleBadgeCreate(interaction);
         case 'badge-list': return await handleBadgeList(interaction);

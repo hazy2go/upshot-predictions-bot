@@ -239,6 +239,35 @@ export const commands = [
         )
     )
     .addSubcommand(sub =>
+      sub.setName('shotcaller-role')
+        .setDescription('Set the Shot Caller role tracked by /shotcallers')
+        .addRoleOption(opt =>
+          opt.setName('role')
+            .setDescription('The Shot Caller role')
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('content-channel')
+        .setDescription('Set the channel where Shot Callers post their content')
+        .addChannelOption(opt =>
+          opt.setName('channel')
+            .setDescription('The content channel (text or forum)')
+            .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum)
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('bounty-forum')
+        .setDescription('Set the bounty forum used to count Shot Caller submissions')
+        .addChannelOption(opt =>
+          opt.setName('channel')
+            .setDescription('The bounty forum channel')
+            .addChannelTypes(ChannelType.GuildForum, ChannelType.GuildText)
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
       sub.setName('max-daily')
         .setDescription('Set max predictions per user per day')
         .addIntegerOption(opt =>
@@ -448,6 +477,11 @@ export const commands = [
         .setDescription('Month to process as YYYY-MM (default: last month)')
         .setRequired(false)
     ),
+
+  new SlashCommandBuilder()
+    .setName('shotcallers')
+    .setDescription('Shot Caller monitoring panel — activity, content & bounties (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
     .setName('badge-create')
