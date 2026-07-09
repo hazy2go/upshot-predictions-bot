@@ -239,35 +239,6 @@ export const commands = [
         )
     )
     .addSubcommand(sub =>
-      sub.setName('shotcaller-role')
-        .setDescription('Set the Shot Caller role tracked by /shotcallers')
-        .addRoleOption(opt =>
-          opt.setName('role')
-            .setDescription('The Shot Caller role')
-            .setRequired(true)
-        )
-    )
-    .addSubcommand(sub =>
-      sub.setName('content-channel')
-        .setDescription('Set the channel where Shot Callers post their content')
-        .addChannelOption(opt =>
-          opt.setName('channel')
-            .setDescription('The content channel (text or forum)')
-            .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum)
-            .setRequired(true)
-        )
-    )
-    .addSubcommand(sub =>
-      sub.setName('bounty-forum')
-        .setDescription('Set the bounty forum used to count Shot Caller submissions')
-        .addChannelOption(opt =>
-          opt.setName('channel')
-            .setDescription('The bounty forum channel')
-            .addChannelTypes(ChannelType.GuildForum, ChannelType.GuildText)
-            .setRequired(true)
-        )
-    )
-    .addSubcommand(sub =>
       sub.setName('max-daily')
         .setDescription('Set max predictions per user per day')
         .addIntegerOption(opt =>
@@ -480,8 +451,25 @@ export const commands = [
 
   new SlashCommandBuilder()
     .setName('shotcallers')
-    .setDescription('Shot Caller monitoring panel — activity, content & bounties (admin only)')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    .setDescription('Shot Caller monitoring — activity, content & bounties (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addSubcommand(sub =>
+      sub.setName('panel')
+        .setDescription('Open the Shot Caller monitoring panel'))
+    .addSubcommand(sub =>
+      sub.setName('config')
+        .setDescription('Set the Shot Caller role, content channel, and bounty forum')
+        .addRoleOption(opt =>
+          opt.setName('role')
+            .setDescription('The Shot Caller role tracked by the panel'))
+        .addChannelOption(opt =>
+          opt.setName('content-channel')
+            .setDescription('Channel where Shot Callers post content (text or forum)')
+            .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum))
+        .addChannelOption(opt =>
+          opt.setName('bounty-forum')
+            .setDescription('Bounty forum used to count submissions')
+            .addChannelTypes(ChannelType.GuildForum, ChannelType.GuildText))),
 
   new SlashCommandBuilder()
     .setName('badge-create')
