@@ -239,8 +239,21 @@ function timeTag(iso) {
   return `<t:${Math.floor(ms / 1000)}:F> (<t:${Math.floor(ms / 1000)}:R>)`;
 }
 
+// Return a Discord-safe absolute image URL, or null. The loose `^https?://`
+// test let malformed values through (spaces, stray newlines, a bare "https://"),
+// which Discord rejects with URL_TYPE_INVALID_URL and kills the whole message.
+// Parse with the WHATWG URL parser: it drops anything unparseable and normalizes
+// the rest (e.g. percent-encodes spaces) so the media gallery always gets a
+// well-formed http(s) URL.
 function eventImage(image) {
-  return image && /^https?:\/\//.test(image) ? image : null;
+  if (!image || typeof image !== 'string') return null;
+  try {
+    const u = new URL(image.trim());
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return u.href;
+  } catch {
+    return null;
+  }
 }
 
 // Format a micro-unit prize pool ("1250000000" → "1,250") or null.
