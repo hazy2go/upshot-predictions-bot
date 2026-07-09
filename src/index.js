@@ -53,6 +53,7 @@ import {
   buildGiveawayLive, buildGiveawayEnded,
   buildStoreListed, buildStoreList,
   buildAdminPanel, buildAdminPickChannel, buildAdminPickRole, ADMIN_SETTINGS_LIST,
+  buildShotCallerPanel,
 } from './components.js';
 
 import { commands } from './commands.js';
@@ -3558,6 +3559,12 @@ async function handleButton(interaction) {
   if (interaction.customId === 'shotcallers_tag_afk') {
     return handleShotCallersTagAfk(interaction);
   }
+  if (interaction.customId === 'shotcallers_tag_nobounty') {
+    return handleShotCallersTagNoBounty(interaction);
+  }
+  if (interaction.customId.startsWith('shotcallers_page:')) {
+    return handleShotCallersPage(interaction, parseInt(interaction.customId.slice('shotcallers_page:'.length), 10) || 0);
+  }
 
   const parts = interaction.customId.split(':');
   const action = parts[0];
@@ -4600,6 +4607,28 @@ async function handleShotCallersConfig(interaction) {
   });
 }
 
+// Cached panel data per admin so page turns don't re-scan the channels. Keyed by
+// the invoking user's id (one live panel per admin); recomputed on each open.
+const SC_PAGE_SIZE = 6;
+const SC_PANEL_TTL = 15 * 60 * 1000; // 15 min
+const shotCallerPanels = new Map(); // userId -> { at, ...view data, afkIds, neverBountyIds, bountySet }
+
+// Render a single page from cached panel data into a Components-v2 payload.
+function renderShotCallerPage(cached, page) {
+  const totalPages = Math.max(1, Math.ceil(cached.blocks.length / SC_PAGE_SIZE));
+  const p = Math.min(Math.max(0, page), totalPages - 1);
+  return buildShotCallerPanel({
+    title: cached.title,
+    headerLines: cached.headerLines,
+    blocks: cached.blocks.slice(p * SC_PAGE_SIZE, (p + 1) * SC_PAGE_SIZE),
+    page: p,
+    totalPages,
+    afkCount: cached.afkIds.length,
+    neverBountyCount: cached.neverBountyIds.length,
+    footer: cached.footer,
+  });
+}
+
 async function handleShotCallers(interaction) {
   if (!isAdmin(interaction.member)) {
     return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
@@ -4662,18 +4691,15 @@ async function handleShotCallers(interaction) {
     };
   }).sort((a, b) => (a.lastUnix || 0) - (b.lastUnix || 0));
 
-  const since = getMessageTrackingSince(guildId);
-  const sinceUnix = sqlTimeToUnix(since);
+  const sinceUnix = sqlTimeToUnix(getMessageTrackingSince(guildId));
 
-  const header = [
-    `# 🎯 Shot Caller Monitor — ${role.name}`,
-    `${members.length} member(s) · sorted most-inactive first`,
-    contentChannel ? `Content: <#${contentChannel.id}>` : '-# Content channel not set (`/shotcallers config content-channel:#…`)',
-    bountyChannel ? `Bounties: <#${bountyChannel.id}>${bountyTruncated ? ' — ⚠️ large forum, partial scan' : ''}` : '-# Bounty forum not set (`/shotcallers config bounty-forum:#…`)',
+  const headerLines = [
+    `**${members.length}** member(s) · sorted most-inactive first`,
+    contentChannel ? `📝 Content: <#${contentChannel.id}>` : '-# Content channel not set (`/shotcallers config content-channel:#…`)',
+    bountyChannel ? `🎯 Bounties: <#${bountyChannel.id}>${bountyTruncated ? ' — ⚠️ large forum, partial scan' : ''}` : '-# Bounty forum not set (`/shotcallers config bounty-forum:#…`)',
     sinceUnix
-      ? `-# 💬 message counts are since <t:${sinceUnix}:D> (tracking start) — history before then isn't counted`
-      : '-# 💬 message tracking just started — counts will build up from now',
-    '',
+      ? `-# 💬 counts since <t:${sinceUnix}:D> (tracking start) — earlier history isn't counted`
+      : '-# 💬 message tracking just started — counts build up from now',
   ];
 
   const blocks = rows.map(r => {
@@ -4692,26 +4718,41 @@ async function handleShotCallers(interaction) {
     ].join('\n');
   });
 
-  // A one-click ping for everyone in the red band, attached to the last message.
-  const afkCount = rows.filter(r => isAfk(r.lastUnix)).length;
-  const components = afkCount
-    ? [new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId('shotcallers_tag_afk')
-          .setLabel(`🔔 Tag ${afkCount} AFK member${afkCount === 1 ? '' : 's'}`)
-          .setStyle(ButtonStyle.Danger),
-      )]
-    : [];
+  const afkIds = rows.filter(r => isAfk(r.lastUnix)).map(r => r.id);
+  // Only meaningful when the bounty forum is configured/scannable.
+  const neverBountyIds = bountyCounts ? rows.filter(r => (r.bounties ?? 0) === 0).map(r => r.id) : [];
 
-  const chunks = chunkLines([...header, ...blocks.flatMap(b => [b, ''])]);
-  for (let i = 0; i < chunks.length; i++) {
-    const comps = i === chunks.length - 1 ? components : [];
-    if (i === 0) {
-      await interaction.editReply({ content: chunks[0], allowedMentions: { parse: [] }, components: comps });
-    } else {
-      await interaction.followUp({ content: chunks[i], flags: ['Ephemeral'], allowedMentions: { parse: [] }, components: comps });
-    }
+  const cached = {
+    at: Date.now(),
+    title: `🎯 Shot Caller Monitor — ${role.name}`,
+    headerLines,
+    blocks,
+    footer: '🟢 <7d · 🟡 <14d · 🔴 ≥14d/never active',
+    afkIds,
+    neverBountyIds,
+    bountySet: !!bountyCounts,
+  };
+  shotCallerPanels.set(interaction.user.id, cached);
+
+  await interaction.editReply(renderShotCallerPage(cached, 0));
+}
+
+// Page turn on the panel — re-renders from cache (no re-scan). If the cache has
+// expired (bot restart / >15 min), tell the admin to reopen it.
+async function handleShotCallersPage(interaction, page) {
+  const cached = shotCallerPanels.get(interaction.user.id);
+  if (!cached || Date.now() - cached.at > SC_PANEL_TTL) {
+    return interaction.update({
+      components: [{
+        type: ComponentType.Container,
+        accent_color: 0xe74c3c,
+        components: [{ type: ComponentType.TextDisplay, content: '⌛ This panel expired — run `/shotcallers panel` again.' }],
+      }],
+      flags: 1 << 15,
+    });
   }
+  await interaction.deferUpdate();
+  await interaction.editReply(renderShotCallerPage(cached, page));
 }
 
 // Ping every AFK Shot Caller (the red band) with a public nudge. Recomputes the
@@ -4755,6 +4796,55 @@ async function handleShotCallersTagAfk(interaction) {
       allowedMentions: { users: batch },
     }).catch(() => {});
   }
+}
+
+// Ping every Shot Caller who has never submitted to a bounty (0 distinct bounty
+// posts). Uses the panel's cached scan when fresh; otherwise re-scans the forum.
+async function handleShotCallersTagNoBounty(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+  const guildId = interaction.guildId;
+  const roleId = getShotCallerRoleId(guildId);
+  if (!roleId) {
+    return interaction.reply({ content: '❌ No Shot Caller role configured.', flags: ['Ephemeral'] });
+  }
+  const bountyForumId = getBountyForumId(guildId);
+  if (!bountyForumId) {
+    return interaction.reply({ content: '❌ No bounty forum configured. Set one with `/shotcallers config bounty-forum:#…`.', flags: ['Ephemeral'] });
+  }
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  const role = await interaction.guild.roles.fetch(roleId).catch(() => null);
+  if (!role) return interaction.editReply('❌ The Shot Caller role no longer exists.');
+  await interaction.guild.members.fetch().catch(() => {});
+  const memberIds = new Set([...role.members.values()].map(m => m.id));
+
+  // Prefer the fresh panel cache; fall back to a live re-scan.
+  let noBounty;
+  const cached = shotCallerPanels.get(interaction.user.id);
+  if (cached && cached.bountySet && Date.now() - cached.at <= SC_PANEL_TTL) {
+    noBounty = cached.neverBountyIds.filter(id => memberIds.has(id));
+  } else {
+    const channel = await safeGetChannel(bountyForumId);
+    if (!channel) return interaction.editReply('❌ Can\'t reach the bounty forum right now — try again shortly.');
+    const { counts } = await scanBountyForum(channel);
+    noBounty = [...memberIds].filter(id => !counts.get(id));
+  }
+
+  if (!noBounty.length) {
+    return interaction.editReply('✅ Every Shot Caller has taken part in at least one bounty.');
+  }
+
+  const BATCH = 40;
+  const intro = '🎯 **Bounty nudge** — you haven\'t submitted to a single bounty yet. Pick one up and drop a submission! 💪';
+  for (let i = 0; i < noBounty.length; i += BATCH) {
+    const batch = noBounty.slice(i, i + BATCH);
+    const content = (i === 0 ? `${intro}\n` : '') + batch.map(id => `<@${id}>`).join(' ');
+    await interaction.channel?.send({ content, allowedMentions: { users: batch } }).catch(() => {});
+  }
+  return interaction.editReply(`✅ Tagged **${noBounty.length}** Shot Caller(s) who haven't done a bounty.`);
 }
 
 // ── Contest watcher ──────────────────────────────────────────
