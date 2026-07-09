@@ -150,6 +150,19 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_user_badges_user ON user_badges(discord_id);
+
+  -- Forward-only message activity counter, per guild+user. Discord exposes no
+  -- historical message count, so this is populated by the messageCreate listener
+  -- from the moment the feature ships — counts/last-seen are "since tracking began".
+  -- Used by the /shotcallers monitoring panel to spot members who went AFK.
+  CREATE TABLE IF NOT EXISTS message_activity (
+    guild_id        TEXT NOT NULL,
+    discord_id      TEXT NOT NULL,
+    message_count   INTEGER NOT NULL DEFAULT 0,
+    last_message_at TEXT,
+    last_channel_id TEXT,
+    PRIMARY KEY (guild_id, discord_id)
+  );
 `);
 
 // ── Migrations (add columns to existing tables) ─────────────
@@ -724,6 +737,39 @@ export function getBadgeHolders(badgeId) {
   return db.prepare(
     'SELECT discord_id, source, awarded_by, awarded_at FROM user_badges WHERE badge_id = ? ORDER BY awarded_at DESC'
   ).all(badgeId);
+}
+
+// ── Message activity (forward-only, for /shotcallers) ───────
+
+// Bump a user's message counter and stamp when/where they last spoke. Called on
+// every guild message; the first message for a user seeds the row at count 1.
+// Also records, once per guild, when tracking began so the panel can be honest
+// about the window the counts cover.
+export function recordMessage(guildId, discordId, channelId) {
+  db.prepare(`
+    INSERT INTO message_activity (guild_id, discord_id, message_count, last_message_at, last_channel_id)
+    VALUES (?, ?, 1, datetime('now'), ?)
+    ON CONFLICT(guild_id, discord_id) DO UPDATE SET
+      message_count = message_count + 1,
+      last_message_at = datetime('now'),
+      last_channel_id = excluded.last_channel_id
+  `).run(guildId, discordId, channelId || null);
+  db.prepare(
+    "INSERT OR IGNORE INTO bot_state (key, value) VALUES (?, datetime('now'))"
+  ).run(`msg_tracking_since_${guildId}`);
+}
+
+export function getMessageActivity(guildId, discordId) {
+  return db.prepare(
+    'SELECT * FROM message_activity WHERE guild_id = ? AND discord_id = ?'
+  ).get(guildId, discordId) || null;
+}
+
+// When message tracking first started for this guild (set on the first recorded
+// message). Null until then. Lets the panel state "since <date>" plainly.
+export function getMessageTrackingSince(guildId) {
+  const row = db.prepare('SELECT value FROM bot_state WHERE key = ?').get(`msg_tracking_since_${guildId}`);
+  return row?.value || null;
 }
 
 export default db;
