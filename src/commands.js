@@ -425,7 +425,8 @@ export const commands = [
     )
     .addStringOption(opt =>
       opt.setName('required-pack')
-        .setDescription('Only members holding this pack (by name) in their Upshot inventory can enter')
+        .setDescription('Only members holding this pack can enter — pick from the store list')
+        .setAutocomplete(true)
     )
     .addChannelOption(opt =>
       opt.setName('channel')
