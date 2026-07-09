@@ -1267,6 +1267,47 @@ async function handleSendPackAutocomplete(interaction) {
   }
 }
 
+// Short cache for the store catalogue so per-keystroke autocomplete on
+// /giveaway's `required-pack` doesn't hammer the Upshot API.
+let storePackCache = { at: 0, packs: [] };
+async function getStorePacksCached() {
+  if (storePackCache.packs.length && Date.now() - storePackCache.at < 60_000) return storePackCache.packs;
+  const packs = await getStorePacks();
+  if (packs.length) storePackCache = { at: Date.now(), packs };
+  return packs;
+}
+
+// On sale right now = ACTIVE with stock left (Upshot leaves sold-out packs ACTIVE
+// rather than flipping them, so remaining 0 means gone). Mirrors STORE_VISIBLE.
+function packForSale(p) {
+  return p.status === 'ACTIVE' && p.remaining !== 0;
+}
+
+// Autocomplete for /giveaway's `required-pack`: real store pack names so the admin
+// picks instead of typing a name that may not match anyone's inventory. On-sale
+// packs surface first. The chosen VALUE is the canonical pack name, which is what
+// entrant inventories are matched against.
+async function handleRequiredPackAutocomplete(interaction) {
+  try {
+    const focused = (interaction.options.getFocused() || '').toLowerCase();
+    const packs = await getStorePacksCached();
+    const seen = new Set();
+    const rank = p => (packForSale(p) ? 0 : p.status === 'COMING_SOON' ? 1 : 2);
+    const choices = packs
+      .filter(p => p.name && (!focused || p.name.toLowerCase().includes(focused)))
+      .filter(p => (seen.has(p.name.toLowerCase()) ? false : seen.add(p.name.toLowerCase())))
+      .sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name))
+      .slice(0, 25)
+      .map(p => {
+        const tag = packForSale(p) ? ' · on sale' : p.status === 'COMING_SOON' ? ' · soon' : '';
+        return { name: `${p.name}${tag}`.slice(0, 100), value: p.name.slice(0, 100) };
+      });
+    return await interaction.respond(choices);
+  } catch {
+    try { return await interaction.respond([]); } catch { /* interaction expired */ }
+  }
+}
+
 async function handleSendPack(interaction) {
   if (!canSendPack(interaction)) {
     return interaction.reply({ content: '❌ Only the configured pack owner can use this command.', flags: ['Ephemeral'] });
@@ -5348,7 +5389,12 @@ client.on(Events.InteractionCreate, async interaction => {
     if (await tryHandleReferralInteraction(interaction)) return;
 
     if (interaction.isAutocomplete?.()) {
-      if (interaction.commandName === 'sendpack' || interaction.commandName === 'giveaway') return await handleSendPackAutocomplete(interaction);
+      if (interaction.commandName === 'sendpack') return await handleSendPackAutocomplete(interaction);
+      if (interaction.commandName === 'giveaway') {
+        return interaction.options.getFocused(true).name === 'required-pack'
+          ? await handleRequiredPackAutocomplete(interaction)
+          : await handleSendPackAutocomplete(interaction);
+      }
       if (['badge-holders', 'badge-delete', 'badge-check', 'badge-grant', 'badge-revoke'].includes(interaction.commandName)) return await handleBadgeAutocomplete(interaction);
       return;
     }
