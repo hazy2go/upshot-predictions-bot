@@ -65,7 +65,7 @@ import {
 
 import {
   extractWallet, extractCardId,
-  getCardDetails, checkCardOwnership, checkCardResolution, isInstantWinCard,
+  getCardDetails, checkCardOwnership, checkCardResolution, isInstantWinCard, isCardStillOpen,
   getSeasonRank, getUserContestLineups, getPredictableCards, getCardStats,
   getUserProfile, getUserPacks, transferPack, refreshUpshotAccessToken,
   getContests, getContestTop, getRaffles, getRaffleDetail, getRaffleTop,
@@ -2081,11 +2081,10 @@ async function handlePredictUrlModalSubmit(interaction) {
     const d = new Date(details.eventDate);
     deadline = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
   }
-  const today = new Date();
-  const todayStr = `${today.getUTCFullYear()}-${String(today.getUTCMonth() + 1).padStart(2, '0')}-${String(today.getUTCDate()).padStart(2, '0')}`;
-  const expired = details.resolvedAt || (deadline && deadline <= todayStr);
-  if (expired) {
-    return interaction.editReply({ content: `❌ This card's event deadline has already passed${deadline ? ` (**${deadline}**)` : ''}. You can't predict on it — pick another card.` });
+  // Closed if the event has left its ACTIVE (open) phase — pending or resolved
+  // means the deadline hit, even if the calendar date alone looks fine.
+  if (!isCardStillOpen(details)) {
+    return interaction.editReply({ content: `❌ This card's prediction window has closed — its event is past the open phase${deadline ? ` (deadline **${deadline}**)` : ''}. You can't predict on it — pick another card.` });
   }
 
   // All good — show the card with a "Predict" button (reuses the My Cards detail
@@ -3086,11 +3085,13 @@ async function handlePredictModalSubmit(interaction) {
   let ownershipCheck = null;
   let deadlineFormatted = null;
   let cardName = null;
+  let cardDetailsForCheck = null; // hoisted so the open/pending gate can see it
 
   if (cardId) {
     let cardDetails = null;
     try {
       cardDetails = await getCardDetails(cardId);
+      cardDetailsForCheck = cardDetails;
       if (cardDetails?.arweaveUrl) {
         cardImage = cardDetails.arweaveUrl;
       }
@@ -3153,15 +3154,15 @@ async function handlePredictModalSubmit(interaction) {
     }
   }
 
-  // Check if card event has already passed or is today
-  if (deadlineFormatted && deadlineFormatted !== 'TBD') {
-    const today = new Date();
-    const todayStr = `${today.getUTCFullYear()}-${String(today.getUTCMonth() + 1).padStart(2, '0')}-${String(today.getUTCDate()).padStart(2, '0')}`;
-    if (deadlineFormatted <= todayStr) {
-      return interaction.editReply({
-        content: `❌ This card's event deadline has already passed (**${deadlineFormatted}**). You can only submit predictions for upcoming events.`,
-      });
-    }
+  // Gate on live event state, not just the calendar date: a card is predictable
+  // only while its event is still ACTIVE (open). Once it flips to pending
+  // (deadline hit) or resolved it's closed — even if the date alone looked fine.
+  // Only enforced when we actually have card data; a failed lookup falls through
+  // (handled above) so an API blip can't block a legit submission.
+  if (cardDetailsForCheck && !isCardStillOpen(cardDetailsForCheck)) {
+    return interaction.editReply({
+      content: `❌ This card's prediction window has closed — its event is past the open phase${deadlineFormatted && deadlineFormatted !== 'TBD' ? ` (deadline **${deadlineFormatted}**)` : ''}. You can only submit predictions while a card is still open.`,
+    });
   }
 
   // Check for duplicate — reject if anyone has an unresolved prediction for the same card

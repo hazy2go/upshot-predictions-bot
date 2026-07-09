@@ -504,20 +504,43 @@ export async function getContestLineupCounts(contestIds) {
 }
 
 /**
- * True when a card's event deadline is today or in the past (UTC) — i.e. it can
- * no longer be predicted on. Mirrors the deadline check in the submit flow.
- * Returns false on missing/unparseable data so we never hide a card we can't
- * positively prove is expired (the submit flow rejects stragglers as a backstop).
+ * True when a card's event can no longer be predicted on.
+ *
+ * Live event status is authoritative: a card is open ONLY while its event is
+ * ACTIVE. The instant the deadline passes, Upshot moves the event out of ACTIVE
+ * (into a pending/locked phase) and eventually to RESOLVED — neither accepts new
+ * predictions. So we trust `status` over the calendar date: an ACTIVE event
+ * whose date already slipped is still open, and a pending event is closed even
+ * if the raw date check would have let it through.
+ *
+ * Only when status is absent (older embeds, partial payloads) do we fall back to
+ * comparing the event date. Returns false on missing/unparseable data so we
+ * never hide a card we can't positively prove is closed (submit is a backstop).
+ * Accepts `status` or `eventStatus` (balance-embed vs getCardDetails shapes).
  */
 function eventDeadlinePassed(details) {
   if (!details) return false;          // lookup failed — keep the card
   if (details.resolvedAt) return true; // event already resolved
-  if (!details.eventDate) return false;
+  const status = details.status ?? details.eventStatus ?? null;
+  if (status === 'ACTIVE') return false;  // still open, regardless of the date
+  if (status) return true;                // any other known status = closed/pending
+  if (!details.eventDate) return false;   // unknown status → fall back to the date
   const d = new Date(details.eventDate);
   if (Number.isNaN(d.getTime())) return false;
   const fmt = (dt) =>
     `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
   return fmt(d) <= fmt(new Date());
+}
+
+/**
+ * Submit-time gate: can this card still be predicted on RIGHT NOW? Open only
+ * while the event is ACTIVE; pending (deadline hit) / resolved are closed.
+ * `details` is a getCardDetails result. Returns true when open (or when we
+ * couldn't verify — callers keep their own backstops).
+ */
+export function isCardStillOpen(details) {
+  if (!details) return true;
+  return !eventDeadlinePassed(details);
 }
 
 /**
@@ -555,7 +578,7 @@ async function filterOutExpiredCards(cards) {
 
   for (const c of cards) {
     if (c.event) {
-      if (!eventDeadlinePassed({ resolvedAt: c.event.resolvedAt, eventDate: c.event.eventDate })) {
+      if (!eventDeadlinePassed({ resolvedAt: c.event.resolvedAt, eventDate: c.event.eventDate, status: c.event.status })) {
         out.push({ id: c.id, name: c.name, inContest: c.inContest });
       }
     } else {
