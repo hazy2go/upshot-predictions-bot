@@ -1470,6 +1470,14 @@ function newGiveawayId() {
 
 const DEFAULT_GIVEAWAY_BLURB = '🎉 We\'re giving away a pack! Hit **Enter** below for your shot. A winner is drawn when the timer ends and the pack is sent straight to their Upshot wallet.';
 
+// True if a getUserPacks() list contains the admin-specified required pack,
+// matched case-insensitively by name or exactly by pack id. No requirement → true.
+function holdsRequiredPack(packs, required) {
+  if (!required) return true;
+  const q = required.toLowerCase();
+  return packs.some(p => p.name?.toLowerCase() === q || p.packId === required);
+}
+
 async function handleGiveaway(interaction) {
   if (!canSendPack(interaction)) {
     return interaction.reply({ content: '❌ Only the configured pack owner can run giveaways.', flags: ['Ephemeral'] });
@@ -1483,6 +1491,7 @@ async function handleGiveaway(interaction) {
   const excludedRolesRaw = interaction.options.getString('excluded-roles') || '';
   const excludedUsersRaw = interaction.options.getString('excluded-users') || '';
   const requirePrediction = interaction.options.getBoolean('require-prediction') ?? false;
+  const requiredPack = interaction.options.getString('required-pack')?.trim() || null;
   const targetChannel = interaction.options.getChannel('channel') || interaction.channel;
 
   await interaction.deferReply({ flags: ['Ephemeral'] });
@@ -1543,6 +1552,7 @@ async function handleGiveaway(interaction) {
     excludedRoles,
     excludedUsers,
     requirePrediction,
+    requiredPack,
     endsAt,
   });
 
@@ -1557,7 +1567,8 @@ async function handleGiveaway(interaction) {
   setGiveawayMessageId(id, posted.id);
 
   return interaction.editReply({
-    content: `✅ Giveaway started in <#${targetChannel.id}> — **${winnersCount} winner${winnersCount > 1 ? 's' : ''}** of **${match.name}**, ends <t:${Math.floor(Date.parse(endsAt) / 1000)}:R>.`,
+    content: `✅ Giveaway started in <#${targetChannel.id}> — **${winnersCount} winner${winnersCount > 1 ? 's' : ''}** of **${match.name}**, ends <t:${Math.floor(Date.parse(endsAt) / 1000)}:R>.`
+      + (requiredPack ? `\n-# 🎴 Entrants must hold a **${requiredPack}** pack in their Upshot inventory.` : ''),
   });
 }
 
@@ -1577,12 +1588,16 @@ async function refreshGiveawayMessage(g, { force = false } = {}) {
 }
 
 async function handleGiveawayEnter(interaction, giveawayId) {
+  // Defer up front: the required-pack condition hits the Upshot API, which can
+  // exceed the 3s window for a direct reply. All branches below use editReply.
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
   const g = getGiveaway(giveawayId);
   if (!g || g.status !== 'live') {
-    return interaction.reply({ content: '⌛ This giveaway has ended.', flags: ['Ephemeral'] });
+    return interaction.editReply({ content: '⌛ This giveaway has ended.' });
   }
   if (Date.parse(g.ends_at) <= Date.now()) {
-    return interaction.reply({ content: '⌛ This giveaway just closed — the winner is being drawn.', flags: ['Ephemeral'] });
+    return interaction.editReply({ content: '⌛ This giveaway just closed — the winner is being drawn.' });
   }
 
   const userId = interaction.user.id;
@@ -1590,36 +1605,46 @@ async function handleGiveawayEnter(interaction, giveawayId) {
 
   // Eligibility: excluded users / roles, then required roles.
   if (g.excluded_users.includes(userId)) {
-    return interaction.reply({ content: '🚫 You\'re not eligible for this giveaway.', flags: ['Ephemeral'] });
+    return interaction.editReply({ content: '🚫 You\'re not eligible for this giveaway.' });
   }
   if (g.excluded_roles.length && g.excluded_roles.some(r => member.roles.cache.has(r))) {
-    return interaction.reply({ content: '🚫 One of your roles is excluded from this giveaway.', flags: ['Ephemeral'] });
+    return interaction.editReply({ content: '🚫 One of your roles is excluded from this giveaway.' });
   }
   if (g.required_roles.length && !g.required_roles.some(r => member.roles.cache.has(r))) {
     const need = g.required_roles.map(r => `<@&${r}>`).join(' or ');
-    return interaction.reply({ content: `🚫 You need ${need} to enter this giveaway.`, flags: ['Ephemeral'], allowedMentions: { parse: [] } });
+    return interaction.editReply({ content: `🚫 You need ${need} to enter this giveaway.`, allowedMentions: { parse: [] } });
   }
   if (g.require_prediction && !hasAnyPrediction(userId)) {
-    return interaction.reply({ content: '🚫 This giveaway is for active predictors — make at least one prediction first, then come back and enter.', flags: ['Ephemeral'] });
+    return interaction.editReply({ content: '🚫 This giveaway is for active predictors — make at least one prediction first, then come back and enter.' });
   }
 
-  // Wallet connection is mandatory — the pack is auto-sent there on draw.
+  // Wallet connection is mandatory — the pack is auto-sent there on draw (and
+  // it's also how we read the entrant's inventory for the required-pack check).
   const profile = getUpshotProfile(userId);
   if (!profile?.wallet_address) {
-    return interaction.reply({
+    return interaction.editReply({
       content: '🔗 **Connect your Upshot wallet first.**\nYou need a linked Upshot profile to receive the pack if you win:\n'
         + '1. Run `/link-upshot` (or tap **📇 My Cards**) and paste your Upshot profile URL.\n'
         + '2. Come back here and hit **🎟 Enter** again.',
-      flags: ['Ephemeral'],
     });
+  }
+
+  // Required-pack gate: entrant must currently hold the pack in their inventory.
+  if (g.required_pack) {
+    const entrantPacks = await getUserPacks(profile.wallet_address);
+    if (!holdsRequiredPack(entrantPacks, g.required_pack)) {
+      return interaction.editReply({
+        content: `🚫 This giveaway requires holding a **${g.required_pack}** pack in your Upshot inventory. Grab one, then hit **🎟 Enter** again.`,
+      });
+    }
   }
 
   const isNew = addGiveawayEntry(giveawayId, userId);
   if (!isNew) {
-    return interaction.reply({ content: '✅ You\'re already entered — good luck! 🍀', flags: ['Ephemeral'] });
+    return interaction.editReply({ content: '✅ You\'re already entered — good luck! 🍀' });
   }
 
-  await interaction.reply({ content: '🎟 **You\'re in!** The winner is drawn when the timer ends. 🍀', flags: ['Ephemeral'] });
+  await interaction.editReply({ content: '🎟 **You\'re in!** The winner is drawn when the timer ends. 🍀' });
   refreshGiveawayMessage(g).catch(() => {});
 }
 
@@ -1663,6 +1688,8 @@ async function drawGiveaway(g) {
 
       const profile = getUpshotProfile(id);
       if (!profile?.wallet_address) continue; // unlinked since entering
+      // Re-check the required-pack condition — they may have opened/sold it since.
+      if (g.required_pack && !holdsRequiredPack(await getUserPacks(profile.wallet_address), g.required_pack)) continue;
       const upshot = await getUserProfile(profile.wallet_address);
       if (!upshot?.id) continue; // can't resolve an Upshot account to send to
 
