@@ -2369,21 +2369,6 @@ async function handleSetup(interaction) {
       setConfig(guildId, 'admin_role', role.id);
       return interaction.reply({ content: `✅ Admin role set to <@&${role.id}>`, flags: ['Ephemeral'] });
     }
-    case 'shotcaller-role': {
-      const role = interaction.options.getRole('role', true);
-      setConfig(guildId, 'shotcaller_role', role.id);
-      return interaction.reply({ content: `✅ Shot Caller role set to <@&${role.id}>. Run \`/shotcallers\` to open the monitoring panel.`, flags: ['Ephemeral'] });
-    }
-    case 'content-channel': {
-      const channel = interaction.options.getChannel('channel', true);
-      setConfig(guildId, 'content_channel', channel.id);
-      return interaction.reply({ content: `✅ Content channel set to <#${channel.id}>. \`/shotcallers\` will show each member's latest post here.`, flags: ['Ephemeral'] });
-    }
-    case 'bounty-forum': {
-      const channel = interaction.options.getChannel('channel', true);
-      setConfig(guildId, 'bounty_forum', channel.id);
-      return interaction.reply({ content: `✅ Bounty forum set to <#${channel.id}>. \`/shotcallers\` counts each distinct bounty post a member submitted to.`, flags: ['Ephemeral'] });
-    }
     case 'upshot-token': {
       // Accept the raw token OR the whole upshot-token.json the extractor dumps.
       const token = extractTokenFromInput(interaction.options.getString('token', true));
@@ -4520,6 +4505,33 @@ async function scanBountyForum(channel) {
   return { counts, truncated };
 }
 
+// /shotcallers config — set any of role / content-channel / bounty-forum. Each
+// option is optional so an admin can set or change them one at a time.
+async function handleShotCallersConfig(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+  const guildId = interaction.guildId;
+  const role = interaction.options.getRole('role');
+  const contentChannel = interaction.options.getChannel('content-channel');
+  const bountyForum = interaction.options.getChannel('bounty-forum');
+
+  if (!role && !contentChannel && !bountyForum) {
+    return interaction.reply({ content: 'ℹ️ Nothing to set — pass at least one of `role`, `content-channel`, or `bounty-forum`.', flags: ['Ephemeral'] });
+  }
+
+  const done = [];
+  if (role) { setConfig(guildId, 'shotcaller_role', role.id); done.push(`Role → <@&${role.id}>`); }
+  if (contentChannel) { setConfig(guildId, 'content_channel', contentChannel.id); done.push(`Content channel → <#${contentChannel.id}>`); }
+  if (bountyForum) { setConfig(guildId, 'bounty_forum', bountyForum.id); done.push(`Bounty forum → <#${bountyForum.id}>`); }
+
+  return interaction.reply({
+    content: `✅ Shot Caller settings updated:\n${done.map(d => `• ${d}`).join('\n')}\n-# Run \`/shotcallers panel\` to view the monitor.`,
+    flags: ['Ephemeral'],
+    allowedMentions: { parse: [] },
+  });
+}
+
 async function handleShotCallers(interaction) {
   if (!isAdmin(interaction.member)) {
     return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
@@ -4527,14 +4539,14 @@ async function handleShotCallers(interaction) {
   const guildId = interaction.guildId;
   const roleId = getShotCallerRoleId(guildId);
   if (!roleId) {
-    return interaction.reply({ content: '❌ No Shot Caller role configured. Set one with `/setup shotcaller-role`.', flags: ['Ephemeral'] });
+    return interaction.reply({ content: '❌ No Shot Caller role configured. Set one with `/shotcallers config role:@ShotCaller`.', flags: ['Ephemeral'] });
   }
 
   await interaction.deferReply({ flags: ['Ephemeral'] });
 
   const role = await interaction.guild.roles.fetch(roleId).catch(() => null);
   if (!role) {
-    return interaction.editReply('❌ The configured Shot Caller role no longer exists. Re-set it with `/setup shotcaller-role`.');
+    return interaction.editReply('❌ The configured Shot Caller role no longer exists. Re-set it with `/shotcallers config role:@ShotCaller`.');
   }
 
   // Ensure the member cache is complete so role membership is accurate.
@@ -4588,8 +4600,8 @@ async function handleShotCallers(interaction) {
   const header = [
     `# 🎯 Shot Caller Monitor — ${role.name}`,
     `${members.length} member(s) · sorted most-inactive first`,
-    contentChannel ? `Content: <#${contentChannel.id}>` : '-# Content channel not set (`/setup content-channel`)',
-    bountyChannel ? `Bounties: <#${bountyChannel.id}>${bountyTruncated ? ' — ⚠️ large forum, partial scan' : ''}` : '-# Bounty forum not set (`/setup bounty-forum`)',
+    contentChannel ? `Content: <#${contentChannel.id}>` : '-# Content channel not set (`/shotcallers config content-channel:#…`)',
+    bountyChannel ? `Bounties: <#${bountyChannel.id}>${bountyTruncated ? ' — ⚠️ large forum, partial scan' : ''}` : '-# Bounty forum not set (`/shotcallers config bounty-forum:#…`)',
     sinceUnix
       ? `-# 💬 message counts are since <t:${sinceUnix}:D> (tracking start) — history before then isn't counted`
       : '-# 💬 message tracking just started — counts will build up from now',
@@ -5336,7 +5348,11 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'sendpack': return await handleSendPack(interaction);
         case 'giveaway': return await handleGiveaway(interaction);
         case 'process-tiers': return await handleProcessTiers(interaction);
-        case 'shotcallers': return await handleShotCallers(interaction);
+        case 'shotcallers': {
+          const sub = interaction.options.getSubcommand();
+          if (sub === 'config') return await handleShotCallersConfig(interaction);
+          return await handleShotCallers(interaction);
+        }
         case 'lookup-wallets': return await handleLookupWallets(interaction);
         case 'badge-create': return await handleBadgeCreate(interaction);
         case 'badge-list': return await handleBadgeList(interaction);
