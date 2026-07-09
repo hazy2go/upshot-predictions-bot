@@ -1,7 +1,7 @@
 import {
   Client, GatewayIntentBits, Events, Routes, AttachmentBuilder,
   ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder,
-  MessageFlags, ComponentType, ButtonStyle, StringSelectMenuBuilder, ChannelType,
+  MessageFlags, ComponentType, ButtonStyle, ButtonBuilder, StringSelectMenuBuilder, ChannelType,
 } from 'discord.js';
 import 'dotenv/config';
 import fs from 'node:fs';
@@ -3502,6 +3502,10 @@ async function handleButton(interaction) {
     return handleCancelRatings(interaction, interaction.customId.slice('cancel_ratings:'.length));
   }
 
+  if (interaction.customId === 'shotcallers_tag_afk') {
+    return handleShotCallersTagAfk(interaction);
+  }
+
   const parts = interaction.customId.split(':');
   const action = parts[0];
   const predictionId = parseInt(parts[1] || '', 10);
@@ -4383,6 +4387,13 @@ function afkBadge(lastUnix) {
   return '🔴';
 }
 
+// AFK = the red band: never seen since tracking began, or silent ≥14 days.
+// The "Tag AFK" button pings exactly this set.
+function isAfk(lastUnix) {
+  if (!lastUnix) return true;
+  return (Date.now() / 1000 - lastUnix) / 86400 >= 14;
+}
+
 // Gather a forum's threads: active + public archived (paginated). Capped so a
 // giant backlog can't stall the panel; returns { threads, truncated }.
 async function fetchForumThreads(channel, cap = 300) {
@@ -4601,10 +4612,68 @@ async function handleShotCallers(interaction) {
     ].join('\n');
   });
 
+  // A one-click ping for everyone in the red band, attached to the last message.
+  const afkCount = rows.filter(r => isAfk(r.lastUnix)).length;
+  const components = afkCount
+    ? [new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('shotcallers_tag_afk')
+          .setLabel(`🔔 Tag ${afkCount} AFK member${afkCount === 1 ? '' : 's'}`)
+          .setStyle(ButtonStyle.Danger),
+      )]
+    : [];
+
   const chunks = chunkLines([...header, ...blocks.flatMap(b => [b, ''])]);
-  await interaction.editReply({ content: chunks[0], allowedMentions: { parse: [] } });
-  for (const chunk of chunks.slice(1)) {
-    await interaction.followUp({ content: chunk, flags: ['Ephemeral'], allowedMentions: { parse: [] } });
+  for (let i = 0; i < chunks.length; i++) {
+    const comps = i === chunks.length - 1 ? components : [];
+    if (i === 0) {
+      await interaction.editReply({ content: chunks[0], allowedMentions: { parse: [] }, components: comps });
+    } else {
+      await interaction.followUp({ content: chunks[i], flags: ['Ephemeral'], allowedMentions: { parse: [] }, components: comps });
+    }
+  }
+}
+
+// Ping every AFK Shot Caller (the red band) with a public nudge. Recomputes the
+// AFK set live at click time from the message counter — no channel scans needed,
+// so it's instant. Mentions are batched to stay within message/mention limits.
+async function handleShotCallersTagAfk(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+  const guildId = interaction.guildId;
+  const roleId = getShotCallerRoleId(guildId);
+  if (!roleId) {
+    return interaction.reply({ content: '❌ No Shot Caller role configured.', flags: ['Ephemeral'] });
+  }
+  const role = await interaction.guild.roles.fetch(roleId).catch(() => null);
+  if (!role) {
+    return interaction.reply({ content: '❌ The Shot Caller role no longer exists.', flags: ['Ephemeral'] });
+  }
+
+  await interaction.guild.members.fetch().catch(() => {});
+  const afk = [...role.members.values()]
+    .filter(m => isAfk(sqlTimeToUnix(getMessageActivity(guildId, m.id)?.last_message_at)))
+    .map(m => m.id);
+
+  if (!afk.length) {
+    return interaction.reply({ content: '✅ No AFK Shot Callers right now.', flags: ['Ephemeral'] });
+  }
+
+  const BATCH = 40; // stay well under the 2000-char / mention limits per message
+  const batches = [];
+  for (let i = 0; i < afk.length; i += BATCH) batches.push(afk.slice(i, i + BATCH));
+
+  const intro = '🔔 **Shot Caller check-in** — you\'ve been quiet lately. Post some content, jump on a bounty, or make a call! 👀';
+  await interaction.reply({
+    content: `${intro}\n${batches[0].map(id => `<@${id}>`).join(' ')}`,
+    allowedMentions: { users: batches[0] },
+  });
+  for (const batch of batches.slice(1)) {
+    await interaction.channel?.send({
+      content: batch.map(id => `<@${id}>`).join(' '),
+      allowedMentions: { users: batch },
+    }).catch(() => {});
   }
 }
 
