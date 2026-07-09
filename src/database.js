@@ -104,6 +104,7 @@ db.exec(`
     excluded_roles  TEXT NOT NULL DEFAULT '[]',        -- JSON: entrant must have NONE of these
     excluded_users  TEXT NOT NULL DEFAULT '[]',        -- JSON: barred discord ids
     require_prediction INTEGER NOT NULL DEFAULT 0,     -- 1 = must have ≥1 prediction ever
+    required_pack   TEXT,                              -- entrant must hold this pack (name or id) in their Upshot inventory
     ends_at         TEXT NOT NULL,                     -- ISO timestamp
     status          TEXT NOT NULL DEFAULT 'live',      -- 'live' | 'drawn' | 'cancelled'
     winner_ids      TEXT NOT NULL DEFAULT '[]',        -- JSON: discord ids drawn
@@ -172,6 +173,7 @@ try { db.exec('ALTER TABLE predictions ADD COLUMN card_image TEXT'); } catch { /
 try { db.exec('ALTER TABLE predictions ADD COLUMN ownership_check TEXT'); } catch { /* already exists */ }
 try { db.exec('ALTER TABLE predictions ADD COLUMN community_star_avg REAL'); } catch { /* already exists */ }
 try { db.exec('ALTER TABLE giveaways ADD COLUMN require_prediction INTEGER NOT NULL DEFAULT 0'); } catch { /* already exists / table absent */ }
+try { db.exec('ALTER TABLE giveaways ADD COLUMN required_pack TEXT'); } catch { /* already exists / table absent */ }
 
 // ── User queries ────────────────────────────────────────────
 
@@ -480,15 +482,16 @@ function hydrateGiveaway(row) {
     excluded_users: JSON.parse(row.excluded_users || '[]'),
     winner_ids: JSON.parse(row.winner_ids || '[]'),
     require_prediction: !!row.require_prediction,
+    required_pack: row.required_pack || null,
   };
 }
 
 export function createGiveaway(g) {
   db.prepare(`
     INSERT INTO giveaways (id, guild_id, channel_id, creator_id, pack_id, pack_name,
-      winners_count, description, required_roles, excluded_roles, excluded_users, require_prediction, ends_at)
+      winners_count, description, required_roles, excluded_roles, excluded_users, require_prediction, required_pack, ends_at)
     VALUES (@id, @guild_id, @channel_id, @creator_id, @pack_id, @pack_name,
-      @winners_count, @description, @required_roles, @excluded_roles, @excluded_users, @require_prediction, @ends_at)
+      @winners_count, @description, @required_roles, @excluded_roles, @excluded_users, @require_prediction, @required_pack, @ends_at)
   `).run({
     id: g.id,
     guild_id: g.guildId,
@@ -502,6 +505,7 @@ export function createGiveaway(g) {
     excluded_roles: JSON.stringify(g.excludedRoles || []),
     excluded_users: JSON.stringify(g.excludedUsers || []),
     require_prediction: g.requirePrediction ? 1 : 0,
+    required_pack: g.requiredPack || null,
     ends_at: g.endsAt,
   });
   return getGiveaway(g.id);

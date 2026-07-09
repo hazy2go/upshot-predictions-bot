@@ -435,6 +435,9 @@ function giveawayRules(g) {
   if (g.require_prediction) {
     lines.push('📈 **Must have made at least one prediction**');
   }
+  if (g.required_pack) {
+    lines.push(`🎴 **Must hold pack:** ${g.required_pack}`);
+  }
   return lines;
 }
 

@@ -423,6 +423,10 @@ export const commands = [
       opt.setName('require-prediction')
         .setDescription('Only members who have made at least one prediction can enter')
     )
+    .addStringOption(opt =>
+      opt.setName('required-pack')
+        .setDescription('Only members holding this pack (by name) in their Upshot inventory can enter')
+    )
     .addChannelOption(opt =>
       opt.setName('channel')
         .setDescription('Channel to post the giveaway in (default: here)')
