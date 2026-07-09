@@ -1318,6 +1318,44 @@ export function buildStatsCard(stats, userId, monthLabel, scoredPredictions = []
   };
 }
 
+// ── Shot Caller monitoring panel (paginated, Components v2) ──
+//
+// `view` is a plain, pre-formatted data object built in index.js:
+//   { title, headerLines[], blocks[] (this page's member blocks),
+//     page, totalPages, afkCount, neverBountyCount, footer }
+// Nav buttons carry the target page; the tag buttons act on the whole role.
+export function buildShotCallerPanel(view) {
+  const {
+    title, headerLines = [], blocks = [], page = 0, totalPages = 1,
+    afkCount = 0, neverBountyCount = 0, footer = '',
+  } = view;
+
+  const children = [];
+  children.push(text(`## ${title}`));
+  if (headerLines.length) children.push(text(headerLines.join('\n')));
+  children.push(separator());
+  children.push(text(blocks.length ? blocks.join('\n\n') : '_No members on this page._'));
+  children.push(separator());
+  const pageInfo = totalPages > 1 ? `Page ${page + 1}/${totalPages} · ` : '';
+  children.push(text(`-# ${pageInfo}${footer}`));
+
+  if (totalPages > 1) {
+    children.push(actionRow(
+      button('shotcallers_page:0', '« First', ButtonStyle.Secondary, { disabled: page === 0 }),
+      button(`shotcallers_page:${page - 1}`, '← Prev', ButtonStyle.Secondary, { disabled: page === 0 }),
+      button(`shotcallers_page:${page + 1}`, 'Next →', ButtonStyle.Secondary, { disabled: page >= totalPages - 1 }),
+      button(`shotcallers_page:${totalPages - 1}`, 'Last »', ButtonStyle.Secondary, { disabled: page >= totalPages - 1 }),
+    ));
+  }
+
+  const tagButtons = [];
+  if (afkCount > 0) tagButtons.push(button('shotcallers_tag_afk', `🔔 Tag ${afkCount} AFK`, ButtonStyle.Danger));
+  if (neverBountyCount > 0) tagButtons.push(button('shotcallers_tag_nobounty', `🎯 Tag ${neverBountyCount} no-bounty`, ButtonStyle.Danger));
+  if (tagButtons.length) children.push(actionRow(...tagButtons));
+
+  return { components: [container(Colors.Stats, children)], flags: 1 << 15 };
+}
+
 // ── User self-cancel (deadline > 30 days away) ───────────────
 
 export function buildCancelPicker(predictions, minDays) {
