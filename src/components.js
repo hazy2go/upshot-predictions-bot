@@ -311,7 +311,7 @@ export function buildContestResults(contest, top) {
   return { components: [container(Colors.Leaderboard, children)], flags: 1 << 15 };
 }
 
-// Public list of LIVE contests for the admin `/contests list` command.
+// Public list of LIVE contests for the admin `/announce contests list` command.
 export function buildContestList(contests) {
   const children = [];
   children.push(text(`## 🏆 Live Contests (${contests.length})`));
@@ -389,7 +389,7 @@ export function buildRaffleWinner(raffle, winner) {
   return { components: [container(Colors.Leaderboard, children)], flags: 1 << 15 };
 }
 
-// Public list of LIVE + upcoming (READY) raffles for `/luckyshots list`. For
+// Public list of LIVE + upcoming (READY) raffles for `/announce luckyshots list`. For
 // each LIVE raffle it shows the top-3 ticket holders. `topByRaffle` is a Map of
 // raffleId → [{ rank, username, tickets, chance }] from api.getRaffleTop().
 export function buildRaffleList(raffles, topByRaffle = new Map()) {
@@ -544,7 +544,7 @@ export function buildStoreListed(item) {
 }
 
 // Public list of available (ACTIVE) + upcoming (COMING_SOON) packs & bundles with
-// remaining stock, for `/store list`. `items` is packs+bundles combined.
+// remaining stock, for `/announce store list`. `items` is packs+bundles combined.
 // Hide ACTIVE packs that are sold out (remaining:0 — Upshot keeps them ACTIVE),
 // but always keep COMING_SOON ones: they're upcoming, not sold out, so a 0/empty
 // stock there just means "not on sale yet" (and we never label them sold out).

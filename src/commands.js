@@ -7,52 +7,55 @@ export const commands = [
 
   new SlashCommandBuilder()
     .setName('panel')
-    .setDescription('Post a prediction panel with a Predict button (admin only)')
+    .setDescription('Post or edit a prediction panel (admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addStringOption(opt =>
-      opt.setName('title')
-        .setDescription('Panel title')
-        .setRequired(true)
+    .addSubcommand(sub =>
+      sub.setName('post')
+        .setDescription('Post a prediction panel with a Predict button')
+        .addStringOption(opt =>
+          opt.setName('title')
+            .setDescription('Panel title')
+            .setRequired(true)
+        )
+        .addStringOption(opt =>
+          opt.setName('description')
+            .setDescription('Panel description')
+            .setRequired(true)
+        )
+        .addAttachmentOption(opt =>
+          opt.setName('image')
+            .setDescription('Panel banner image')
+            .setRequired(false)
+        )
     )
-    .addStringOption(opt =>
-      opt.setName('description')
-        .setDescription('Panel description')
-        .setRequired(true)
-    )
-    .addAttachmentOption(opt =>
-      opt.setName('image')
-        .setDescription('Panel banner image')
-        .setRequired(false)
-    ),
-
-  new SlashCommandBuilder()
-    .setName('edit-panel')
-    .setDescription('Edit a previously posted prediction panel (admin only)')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addStringOption(opt =>
-      opt.setName('message_id')
-        .setDescription('ID of the panel message to edit (right-click → Copy Message ID)')
-        .setRequired(true)
-    )
-    .addStringOption(opt =>
-      opt.setName('title')
-        .setDescription('New panel title (leave blank to keep current)')
-        .setRequired(false)
-    )
-    .addStringOption(opt =>
-      opt.setName('description')
-        .setDescription('New panel description (leave blank to keep current)')
-        .setRequired(false)
-    )
-    .addAttachmentOption(opt =>
-      opt.setName('image')
-        .setDescription('New banner image (leave blank to keep current)')
-        .setRequired(false)
-    )
-    .addBooleanOption(opt =>
-      opt.setName('remove_image')
-        .setDescription('Remove the banner image entirely')
-        .setRequired(false)
+    .addSubcommand(sub =>
+      sub.setName('edit')
+        .setDescription('Edit a previously posted prediction panel')
+        .addStringOption(opt =>
+          opt.setName('message_id')
+            .setDescription('ID of the panel message to edit (right-click → Copy Message ID)')
+            .setRequired(true)
+        )
+        .addStringOption(opt =>
+          opt.setName('title')
+            .setDescription('New panel title (leave blank to keep current)')
+            .setRequired(false)
+        )
+        .addStringOption(opt =>
+          opt.setName('description')
+            .setDescription('New panel description (leave blank to keep current)')
+            .setRequired(false)
+        )
+        .addAttachmentOption(opt =>
+          opt.setName('image')
+            .setDescription('New banner image (leave blank to keep current)')
+            .setRequired(false)
+        )
+        .addBooleanOption(opt =>
+          opt.setName('remove_image')
+            .setDescription('Remove the banner image entirely')
+            .setRequired(false)
+        )
     ),
 
   new SlashCommandBuilder()
@@ -90,26 +93,36 @@ export const commands = [
     .setDescription('View your active contest lineups and card IDs'),
 
   new SlashCommandBuilder()
-    .setName('contests')
-    .setDescription('Upshot contest announcements (admin only)')
+    .setName('announce')
+    .setDescription('Upshot announcements — contests, Lucky Shots & store (admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addSubcommand(sub =>
-      sub.setName('check')
-        .setDescription('Run a contest check now — announce any new live or newly-completed contests'))
-    .addSubcommand(sub =>
-      sub.setName('list')
-        .setDescription('Post the current live contests to the channel')),
-
-  new SlashCommandBuilder()
-    .setName('luckyshots')
-    .setDescription('Upshot Lucky Shots (raffle) announcements (admin only)')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addSubcommand(sub =>
-      sub.setName('check')
-        .setDescription('Run a Lucky Shots check now — announce new live raffles and winners'))
-    .addSubcommand(sub =>
-      sub.setName('list')
-        .setDescription('Post the current Lucky Shots and their status to the channel')),
+    .addSubcommandGroup(group =>
+      group.setName('contests')
+        .setDescription('Upshot contest announcements')
+        .addSubcommand(sub =>
+          sub.setName('check')
+            .setDescription('Run a contest check now — announce any new live or newly-completed contests'))
+        .addSubcommand(sub =>
+          sub.setName('list')
+            .setDescription('Post the current live contests to the channel')))
+    .addSubcommandGroup(group =>
+      group.setName('luckyshots')
+        .setDescription('Upshot Lucky Shots (raffle) announcements')
+        .addSubcommand(sub =>
+          sub.setName('check')
+            .setDescription('Run a Lucky Shots check now — announce new live raffles and winners'))
+        .addSubcommand(sub =>
+          sub.setName('list')
+            .setDescription('Post the current Lucky Shots and their status to the channel')))
+    .addSubcommandGroup(group =>
+      group.setName('store')
+        .setDescription('Upshot store (packs & bundles) announcements')
+        .addSubcommand(sub =>
+          sub.setName('check')
+            .setDescription('Run a store check now — announce any newly-listed packs/bundles'))
+        .addSubcommand(sub =>
+          sub.setName('list')
+            .setDescription('Post available + upcoming packs/bundles and remaining stock to the channel'))),
 
   new SlashCommandBuilder()
     .setName('admin')
@@ -117,15 +130,9 @@ export const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
-    .setName('store')
-    .setDescription('Upshot store (packs & bundles) announcements (admin only)')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addSubcommand(sub =>
-      sub.setName('check')
-        .setDescription('Run a store check now — announce any newly-listed packs/bundles'))
-    .addSubcommand(sub =>
-      sub.setName('list')
-        .setDescription('Post available + upcoming packs/bundles and remaining stock to the channel')),
+    .setName('admin-help')
+    .setDescription('List every admin command and what it does (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
     .setName('refresh')
@@ -160,10 +167,6 @@ export const commands = [
           { name: 'Fail', value: 'fail' },
         )
     ),
-
-  new SlashCommandBuilder()
-    .setName('leaderboard')
-    .setDescription('Refresh the leaderboard (admin only)'),
 
   new SlashCommandBuilder()
     .setName('setup')
@@ -477,97 +480,95 @@ export const commands = [
             .addChannelTypes(ChannelType.GuildForum, ChannelType.GuildText))),
 
   new SlashCommandBuilder()
-    .setName('badge-create')
-    .setDescription('Create a contest-lineup badge, then pick its contests (admin only)')
+    .setName('badge')
+    .setDescription('Contest-lineup badges — create, grant & manage (admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addStringOption(opt =>
-      opt.setName('name')
-        .setDescription('Badge name, e.g. "Contest Grinder"')
-        .setRequired(true)
-        .setMaxLength(60)
+    .addSubcommand(sub =>
+      sub.setName('create')
+        .setDescription('Create a contest-lineup badge, then pick its contests')
+        .addStringOption(opt =>
+          opt.setName('name')
+            .setDescription('Badge name, e.g. "Contest Grinder"')
+            .setRequired(true)
+            .setMaxLength(60)
+        )
+        .addIntegerOption(opt =>
+          opt.setName('lineups')
+            .setDescription('Total lineups needed across the chosen contests to earn it')
+            .setRequired(true)
+            .setMinValue(1)
+        )
+        .addStringOption(opt =>
+          opt.setName('emoji')
+            .setDescription('Display icon, e.g. 🏆 or a custom :emoji:')
+        )
+        .addStringOption(opt =>
+          opt.setName('description')
+            .setDescription('Short blurb shown with the badge')
+            .setMaxLength(150)
+        )
     )
-    .addIntegerOption(opt =>
-      opt.setName('lineups')
-        .setDescription('Total lineups needed across the chosen contests to earn it')
-        .setRequired(true)
-        .setMinValue(1)
+    .addSubcommand(sub =>
+      sub.setName('list')
+        .setDescription('List all badges, their rules, and how many users hold each')
     )
-    .addStringOption(opt =>
-      opt.setName('emoji')
-        .setDescription('Display icon, e.g. 🏆 or a custom :emoji:')
+    .addSubcommand(sub =>
+      sub.setName('holders')
+        .setDescription('Show who holds a badge and how many')
+        .addStringOption(opt =>
+          opt.setName('badge')
+            .setDescription('Which badge to inspect')
+            .setRequired(true)
+            .setAutocomplete(true)
+        )
     )
-    .addStringOption(opt =>
-      opt.setName('description')
-        .setDescription('Short blurb shown with the badge')
-        .setMaxLength(150)
-    ),
-
-  new SlashCommandBuilder()
-    .setName('badge-list')
-    .setDescription('List all badges, their rules, and how many users hold each (admin only)')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-
-  new SlashCommandBuilder()
-    .setName('badge-holders')
-    .setDescription('Show who holds a badge and how many (admin only)')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addStringOption(opt =>
-      opt.setName('badge')
-        .setDescription('Which badge to inspect')
-        .setRequired(true)
-        .setAutocomplete(true)
-    ),
-
-  new SlashCommandBuilder()
-    .setName('badge-delete')
-    .setDescription('Delete a badge and remove it from everyone who holds it (admin only)')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addStringOption(opt =>
-      opt.setName('badge')
-        .setDescription('Which badge to delete')
-        .setRequired(true)
-        .setAutocomplete(true)
-    ),
-
-  new SlashCommandBuilder()
-    .setName('badge-check')
-    .setDescription('Run the badge eligibility sweep now (admin only)')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addStringOption(opt =>
-      opt.setName('badge')
-        .setDescription('Limit the check to one badge (default: all)')
-        .setAutocomplete(true)
-    ),
-
-  new SlashCommandBuilder()
-    .setName('badge-grant')
-    .setDescription('Manually give a badge to a user (admin only)')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addUserOption(opt =>
-      opt.setName('user')
-        .setDescription('Who to give the badge to')
-        .setRequired(true)
+    .addSubcommand(sub =>
+      sub.setName('delete')
+        .setDescription('Delete a badge and remove it from everyone who holds it')
+        .addStringOption(opt =>
+          opt.setName('badge')
+            .setDescription('Which badge to delete')
+            .setRequired(true)
+            .setAutocomplete(true)
+        )
     )
-    .addStringOption(opt =>
-      opt.setName('badge')
-        .setDescription('Which badge to give')
-        .setRequired(true)
-        .setAutocomplete(true)
-    ),
-
-  new SlashCommandBuilder()
-    .setName('badge-revoke')
-    .setDescription('Manually remove a badge from a user (admin only)')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addUserOption(opt =>
-      opt.setName('user')
-        .setDescription('Who to remove the badge from')
-        .setRequired(true)
+    .addSubcommand(sub =>
+      sub.setName('check')
+        .setDescription('Run the badge eligibility sweep now')
+        .addStringOption(opt =>
+          opt.setName('badge')
+            .setDescription('Limit the check to one badge (default: all)')
+            .setAutocomplete(true)
+        )
     )
-    .addStringOption(opt =>
-      opt.setName('badge')
-        .setDescription('Which badge to remove')
-        .setRequired(true)
-        .setAutocomplete(true)
+    .addSubcommand(sub =>
+      sub.setName('grant')
+        .setDescription('Manually give a badge to a user')
+        .addUserOption(opt =>
+          opt.setName('user')
+            .setDescription('Who to give the badge to')
+            .setRequired(true)
+        )
+        .addStringOption(opt =>
+          opt.setName('badge')
+            .setDescription('Which badge to give')
+            .setRequired(true)
+            .setAutocomplete(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('revoke')
+        .setDescription('Manually remove a badge from a user')
+        .addUserOption(opt =>
+          opt.setName('user')
+            .setDescription('Who to remove the badge from')
+            .setRequired(true)
+        )
+        .addStringOption(opt =>
+          opt.setName('badge')
+            .setDescription('Which badge to remove')
+            .setRequired(true)
+            .setAutocomplete(true)
+        )
     ),
 ];
