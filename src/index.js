@@ -2214,7 +2214,7 @@ async function handleEditPanel(interaction) {
 
   const message = await safeGetMessage(interaction.channel, messageId);
   if (!message) {
-    return interaction.editReply({ content: '❌ Could not find that message in this channel. Run /edit-panel in the same channel as the panel.' });
+    return interaction.editReply({ content: '❌ Could not find that message in this channel. Run /panel edit in the same channel as the panel.' });
   }
   if (message.author?.id !== client.user.id) {
     return interaction.editReply({ content: '❌ That message wasn\'t posted by this bot.' });
@@ -2296,16 +2296,6 @@ async function refreshPanels(guildId) {
       console.error(`Failed to refresh panel ${messageId}:`, err.message);
     }
   }
-}
-
-async function handleLeaderboardCommand(interaction) {
-  if (!isAdmin(interaction.member)) {
-    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
-  }
-
-  await interaction.deferReply({ flags: ['Ephemeral'] });
-  await refreshLeaderboard(interaction.guildId);
-  await interaction.editReply({ content: '✅ Leaderboard refreshed.' });
 }
 
 async function handleResolveCommand(interaction) {
@@ -4337,7 +4327,7 @@ async function handleBadgeCreate(interaction) {
 async function handleBadgeCreateContestSelect(interaction) {
   const draft = badgeDraftCache.get(interaction.user.id);
   if (!draft) {
-    return interaction.update({ content: '❌ This badge setup expired. Run `/badge-create` again.', components: [] });
+    return interaction.update({ content: '❌ This badge setup expired. Run `/badge create` again.', components: [] });
   }
   badgeDraftCache.delete(interaction.user.id);
 
@@ -4352,7 +4342,7 @@ async function handleBadgeCreateContestSelect(interaction) {
   });
 
   await interaction.update({
-    content: `✅ Created badge **${def.emoji ? def.emoji + ' ' : ''}${def.name}** (#${def.id}) — ${contestIds.length} contest(s), needs **${def.required_lineups}** total lineup(s).\nThe 12h sweep will start granting it automatically. Run \`/badge-check\` to award it now.`,
+    content: `✅ Created badge **${def.emoji ? def.emoji + ' ' : ''}${def.name}** (#${def.id}) — ${contestIds.length} contest(s), needs **${def.required_lineups}** total lineup(s).\nThe 12h sweep will start granting it automatically. Run \`/badge check\` to award it now.`,
     components: [],
   });
 }
@@ -4363,7 +4353,7 @@ async function handleBadgeList(interaction) {
   }
   const defs = getAllBadgeDefs();
   if (!defs.length) {
-    return interaction.reply({ content: 'No badges yet. Create one with `/badge-create`.', flags: ['Ephemeral'] });
+    return interaction.reply({ content: 'No badges yet. Create one with `/badge create`.', flags: ['Ephemeral'] });
   }
   const lines = defs.map(b => {
     const holders = countBadgeHolders(b.id);
@@ -5119,7 +5109,7 @@ async function safeRunRaffleWatch() {
   raffleWatchTimer = setTimeout(safeRunRaffleWatch, RAFFLE_WATCH_INTERVAL);
 }
 
-// Admin /luckyshots command: `check` runs a watch pass now, `list` posts the
+// Admin /announce luckyshots command: `check` runs a watch pass now, `list` posts the
 // current raffles publicly to the channel.
 async function handleLuckyShotsCommand(interaction) {
   if (!isAdmin(interaction.member)) {
@@ -5238,7 +5228,7 @@ async function safeRunStoreWatch() {
   storeWatchTimer = setTimeout(safeRunStoreWatch, STORE_WATCH_INTERVAL);
 }
 
-// Admin /store command: `check` runs a watch pass now, `list` posts the
+// Admin /announce store command: `check` runs a watch pass now, `list` posts the
 // available + upcoming packs/bundles (with remaining stock) publicly.
 async function handleStoreCommand(interaction) {
   if (!isAdmin(interaction.member)) {
@@ -5425,6 +5415,52 @@ async function handleAdminPanel(interaction) {
   return interaction.reply(buildAdminPanel(gatherAdminCfg(interaction.guildId)));
 }
 
+// Static cheat-sheet of every admin command + what it does. Grouped so admins
+// can skim it without digging through Discord's autocomplete. Kept here (not
+// auto-generated) so the descriptions can be friendlier than the raw command
+// blurbs. Update this when adding/removing admin commands.
+async function handleAdminHelp(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admins only.', flags: ['Ephemeral'] });
+  }
+  const sections = [
+    ['🛠 Panels & config', [
+      '`/admin` — control panel: overview of every setting + quick action buttons',
+      '`/admin-help` — this list',
+      '`/setup …` — all configuration (channels, roles, limits, categories, bulk actions, danger zone)',
+      '`/panel post` — post a prediction panel · `/panel edit` — edit an existing one',
+    ]],
+    ['📣 Announcements', [
+      '`/announce contests check|list` — announce/post Upshot contests',
+      '`/announce luckyshots check|list` — announce/post Lucky Shots (raffles)',
+      '`/announce store check|list` — announce/post store packs & bundles',
+    ]],
+    ['🎯 Predictions', [
+      '`/resolve id outcome` — set a prediction Hit/Fail',
+      '`/refresh [id] [all]` — re-sync prediction embeds/buttons',
+    ]],
+    ['🎁 Packs', [
+      '`/sendpack users pack quantity` — send Upshot pack(s) to member(s)',
+      '`/giveaway pack duration …` — run a pack giveaway (react to enter, auto-drawn)',
+    ]],
+    ['🏅 Badges', [
+      '`/badge create` · `list` · `holders` · `delete` · `check` · `grant` · `revoke`',
+    ]],
+    ['🔧 Utilities', [
+      '`/lookup-wallets file` — .txt of names → CSV of wallets/profiles',
+      '`/process-tiers [month]` — award top-10 leaderboard tiers for a month',
+      '`/shotcallers panel|config` — Shot Caller monitoring',
+    ]],
+  ];
+  const body = sections
+    .map(([h, items]) => `**${h}**\n${items.join('\n')}`)
+    .join('\n\n');
+  return interaction.reply({
+    content: `## 📖 Admin command reference\n\n${body}\n\n-# The leaderboard refresh + contest/lucky-shots/store checks are also buttons in \`/admin\`.`,
+    flags: ['Ephemeral'],
+  });
+}
+
 // "⚙️ Change a setting…" select → route to the right input for that setting.
 async function handleAdminConfigure(interaction) {
   if (!isAdmin(interaction.member)) return interaction.reply({ content: '❌ Admins only.', flags: ['Ephemeral'] });
@@ -5535,28 +5571,36 @@ client.on(Events.InteractionCreate, async interaction => {
           ? await handleRequiredPackAutocomplete(interaction)
           : await handleSendPackAutocomplete(interaction);
       }
-      if (['badge-holders', 'badge-delete', 'badge-check', 'badge-grant', 'badge-revoke'].includes(interaction.commandName)) return await handleBadgeAutocomplete(interaction);
+      if (interaction.commandName === 'badge') return await handleBadgeAutocomplete(interaction);
       return;
     }
 
     if (interaction.isChatInputCommand()) {
       switch (interaction.commandName) {
         case 'predict': return await handleCardPicker(interaction);
-        case 'panel': return await handlePanel(interaction);
-        case 'edit-panel': return await handleEditPanel(interaction);
+        case 'panel': {
+          const sub = interaction.options.getSubcommand();
+          if (sub === 'edit') return await handleEditPanel(interaction);
+          return await handlePanel(interaction);
+        }
         case 'link-upshot': return await handleLinkUpshot(interaction);
         case 'mystats': return await handleMyStats(interaction);
         case 'cancel-prediction': return await handleCancelPrediction(interaction);
         case 'upshotrank': return await handleUpshotRank(interaction);
         case 'pastleaderboard': return await handlePastLeaderboard(interaction);
         case 'mycontests': return await handleMyContests(interaction);
-        case 'contests': return await handleContestsCommand(interaction);
-        case 'luckyshots': return await handleLuckyShotsCommand(interaction);
-        case 'store': return await handleStoreCommand(interaction);
+        case 'announce': {
+          switch (interaction.options.getSubcommandGroup()) {
+            case 'contests': return await handleContestsCommand(interaction);
+            case 'luckyshots': return await handleLuckyShotsCommand(interaction);
+            case 'store': return await handleStoreCommand(interaction);
+          }
+          return;
+        }
         case 'admin': return await handleAdminPanel(interaction);
+        case 'admin-help': return await handleAdminHelp(interaction);
         case 'refresh': return await handleRefreshCommand(interaction);
         case 'resolve': return await handleResolveCommand(interaction);
-        case 'leaderboard': return await handleLeaderboardCommand(interaction);
         case 'setup': return await handleSetup(interaction);
         case 'sendpack': return await handleSendPack(interaction);
         case 'giveaway': return await handleGiveaway(interaction);
@@ -5567,13 +5611,18 @@ client.on(Events.InteractionCreate, async interaction => {
           return await handleShotCallers(interaction);
         }
         case 'lookup-wallets': return await handleLookupWallets(interaction);
-        case 'badge-create': return await handleBadgeCreate(interaction);
-        case 'badge-list': return await handleBadgeList(interaction);
-        case 'badge-holders': return await handleBadgeHolders(interaction);
-        case 'badge-delete': return await handleBadgeDelete(interaction);
-        case 'badge-check': return await handleBadgeCheck(interaction);
-        case 'badge-grant': return await handleBadgeGrant(interaction);
-        case 'badge-revoke': return await handleBadgeRevoke(interaction);
+        case 'badge': {
+          switch (interaction.options.getSubcommand()) {
+            case 'create': return await handleBadgeCreate(interaction);
+            case 'list': return await handleBadgeList(interaction);
+            case 'holders': return await handleBadgeHolders(interaction);
+            case 'delete': return await handleBadgeDelete(interaction);
+            case 'check': return await handleBadgeCheck(interaction);
+            case 'grant': return await handleBadgeGrant(interaction);
+            case 'revoke': return await handleBadgeRevoke(interaction);
+          }
+          return;
+        }
       }
     }
 
