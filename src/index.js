@@ -3147,10 +3147,28 @@ async function handlePredictModalSubmit(interaction) {
         } else {
           ownershipCheck = 'not_found';
         }
+      } else {
+        ownershipCheck = 'no_wallet';
       }
     } catch (err) {
       console.error(`API pre-check: checkCardOwnership failed for ${cardId}:`, err.message);
       ownershipCheck = 'error';
+    }
+
+    // Instant ownership gate: you can only back a card you actually own. A
+    // CONFIRMED miss — no linked wallet, or the card simply isn't in the wallet
+    // — is rejected here and never enters the queue. An 'error' (API blip) is
+    // deliberately NOT rejected: it falls through to the old admin-review path
+    // so a transient API issue can't block a legitimate submission.
+    if (ownershipCheck === 'no_wallet') {
+      return interaction.editReply({
+        content: '❌ You can only submit predictions for cards you own. Link your Upshot wallet first with `/link-upshot` (or tap **📇 My Cards**), then try again.',
+      });
+    }
+    if (ownershipCheck === 'not_found') {
+      return interaction.editReply({
+        content: '❌ You can only submit predictions for cards you own — this card isn\'t in your linked wallet. Pick a card you hold and try again.',
+      });
     }
   }
 
@@ -3271,11 +3289,12 @@ async function handlePredictModalSubmit(interaction) {
   const prediction = await finalizeSubmission(draft, null);
   if (!prediction) return interaction.editReply({ content: '❌ Failed to save prediction. Please try again.' });
 
+  // 'not_found'/'no_wallet' can no longer reach here — those are rejected up
+  // front by the instant ownership gate. Only 'verified', 'error', or a
+  // card-less/API-down submission fall through to this admin-review path.
   let statusNote = '';
   if (verified) {
     statusNote = ' — ✅ Auto-verified via Upshot API.';
-  } else if (ownershipCheck === 'not_found') {
-    statusNote = ' — ⚠️ Card not found in your wallet (admin will review)';
   }
   return interaction.editReply({
     content: `✅ Prediction **#${String(prediction.id).padStart(4, '0')}** submitted! Now in the review queue.${statusNote}`,
@@ -3325,7 +3344,36 @@ async function finalizeSubmission(draft, aiRating) {
       autoVerifyAndRate(prediction.id, draft.guildId).catch(() => {});
     }
   }
+
+  // Second nudge for a 0★ submission: the ephemeral "this is low-effort"
+  // warning at submit time is easy to miss, so drop a public ping in the
+  // predictions channel pointing the author back to their prediction. Only
+  // fires at submit time (aiRating === 0★ via the pre-submit gate / "submit
+  // anyway") — not on later admin-assigned 0★s.
+  if (aiRating && aiRating.stars === 0) {
+    await pingZeroStar(prediction, draft.guildId).catch(() => {});
+  }
   return prediction;
+}
+
+/**
+ * Ping the author in the predictions channel that their just-submitted
+ * prediction landed at 0★, then auto-delete the ping after 5 minutes so it
+ * doesn't clutter the feed. The mention is left un-suppressed so it actually
+ * notifies the author (the whole point — a reminder they can't miss).
+ */
+async function pingZeroStar(prediction, guildId) {
+  const channelId = getPredictionsChannelId(guildId);
+  if (!channelId) return;
+  const channel = await safeGetChannel(channelId);
+  if (!channel) return;
+  try {
+    const msg = await channel.send({
+      content: `🚫 <@${prediction.author_id}> heads up — your prediction **#${String(prediction.id).padStart(4, '0')}** was rated **0★** (0 points, no rewards even if it hits). It's posted above — improve your reasoning next time for a real score.`,
+    });
+    // Auto-delete after 5 minutes. Ignore failures (already deleted / no perms).
+    setTimeout(() => { msg.delete().catch(() => {}); }, 5 * 60 * 1000);
+  } catch { /* channel inaccessible — skip */ }
 }
 
 async function handleEditModalSubmit(interaction) {
