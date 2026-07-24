@@ -867,63 +867,86 @@ export async function getContestTop(contestId, n = 3) {
   }
 }
 
-/**
- * Collect every GOLD card currently in play across all LIVE contests, for the
- * "highest card wins" battle pool. Walks each live contest's standings, gathers
- * the unique card IDs from every lineup, then fetches details (funnelled through
- * the shared concurrency limiter — same fan-out shape as getUserContestLineups)
- * and keeps only cards that are: prizeType GOLD, still open (deadline not passed),
- * not instant-win, and carry a numeric points/gold value.
- *
- * Returns [{ id, name, image, goldValue }] (image = resolved Arweave URL, may be
- * null). Best-effort: returns [] on any failure. Deadline-passed / non-gold cards
- * are dropped so the pool only ever contains live gold cards.
- */
-export async function getLiveContestGoldCards() {
-  try {
-    const contests = await getLiveContests();
-    if (!contests.length) return [];
+// ── Live gold-card pool (for the "highest card wins" battle) ─────────────────
+// The pool is EXPENSIVE to build (page the full /cards list — thousands of cards
+// — with include=event so we get each card's live event status in bulk). So it's
+// cached like the live-contest list: a short TTL + in-flight dedup means back-to-
+// back battle drops reuse one scan, and a boot-time pre-warm (see warmGoldPool)
+// keeps even the first drop snappy.
+let _goldPool = null;          // { at, value: card[] }
+let _goldPoolInFlight = null;  // Promise<card[]>
+const GOLD_POOL_TTL = 90_000;
+// /cards is ~80+ pages of 100; override fetchAllPages' 25-page safety cap so we
+// don't silently miss gold cards past page 25. Bumped further if the count grows.
+const GOLD_POOL_MAX_PAGES = 200;
 
-    // Every card entered in any live contest lineup — deduped across contests.
-    const standingsResults = await Promise.allSettled(
-      contests.map((c) => getContestStandings(c.id))
-    );
-    const cardIds = new Set();
-    for (const r of standingsResults) {
-      if (r.status !== 'fulfilled' || !r.value) continue;
-      for (const s of (r.value.standings || [])) {
-        for (const id of (s.lineup?.cardIds || [])) cardIds.add(id);
-      }
-    }
-    if (!cardIds.size) return [];
+async function buildGoldPool() {
+  // ONE bulk pass over every card, with its event embedded — no per-card fetch.
+  // include=event gives event.status/kind/resolutionType/resolvedAt/eventDate so
+  // we can apply the exact same "still open" + instant-win filters in memory.
+  const cards = await fetchAllPages(
+    (p, pp) => `${BASE}/cards?page=${p}&perPage=${pp}&include=event`,
+    { maxPages: GOLD_POOL_MAX_PAGES, label: 'gold-cards' }
+  );
 
-    // Fetch details for each unique card. retries:2 mirrors getUserContestLineups
-    // (the global limiter keeps this off the API shield even for hundreds of cards).
-    const fetches = await Promise.allSettled(
-      [...cardIds].map(async (id) => getCardDetails(id, { retries: 2 }))
-    );
-
-    const gold = [];
-    for (const r of fetches) {
-      if (r.status !== 'fulfilled' || !r.value) continue;
-      const d = r.value;
-      if (isInstantWinCard(d)) continue;
-      if (!isCardStillOpen(d)) continue;
-      if (String(d.prizeType || '').toUpperCase() !== 'GOLD') continue;
-      const goldValue = Number(d.pointsValue);
-      if (!Number.isFinite(goldValue)) continue;
-      gold.push({
-        id: d.id,
-        name: d.name || d.id,
-        image: d.arweaveUrl || d.image || null,
-        goldValue,
-      });
-    }
-    return gold;
-  } catch (err) {
-    console.error('Upshot API: getLiveContestGoldCards failed:', err.message);
-    return [];
+  const gold = [];
+  for (const c of cards) {
+    if (String(c.prizeType || '').toUpperCase() !== 'GOLD') continue;
+    if (isInstantWinCard(c)) continue;
+    // Reuse the authoritative open/closed logic (status > date), fed the embedded
+    // event fields under the names isCardStillOpen expects.
+    const openLike = {
+      eventStatus: c.event?.status || null,
+      resolvedAt: c.event?.resolvedAt || null,
+      eventDate: c.event?.eventDate || null,
+    };
+    if (!isCardStillOpen(openLike)) continue;
+    const goldValue = Number(c.pointsValue);
+    if (!Number.isFinite(goldValue)) continue;
+    const image = c.image
+      ? (c.image.startsWith('http') ? c.image : `https://arweave.net/${c.image}`)
+      : null;
+    gold.push({ id: c.id, name: c.name || c.id, image, goldValue });
   }
+  return gold;
+}
+
+// Kick off a background rebuild (deduped by _goldPoolInFlight) and update the
+// cache when it lands. Returns the in-flight promise.
+function refreshGoldPool() {
+  if (_goldPoolInFlight) return _goldPoolInFlight;
+  _goldPoolInFlight = buildGoldPool()
+    .then((v) => { if (v.length) _goldPool = { at: Date.now(), value: v }; return v; })
+    .catch((err) => { console.error('Upshot API: getLiveGoldCards failed:', err.message); return _goldPool?.value || []; })
+    .finally(() => { _goldPoolInFlight = null; });
+  return _goldPoolInFlight;
+}
+
+/**
+ * Every live GOLD card ("highest card wins" battle pool): prizeType GOLD, event
+ * still ACTIVE (deadline not passed), not instant-win, with a numeric gold value.
+ * Returns [{ id, name, image, goldValue }] (goldValue is the raw micro-unit
+ * pointsValue — divide by 1e6 for display). Best-effort: [] on failure.
+ *
+ * Stale-while-revalidate: a fresh cache is returned instantly; a STALE cache is
+ * also returned instantly while a background refresh runs — so only the very
+ * first (cold) build ever blocks. Repeated battle drops never wait. Pass
+ * fresh:true to force a blocking rebuild.
+ */
+export async function getLiveGoldCards({ fresh = false } = {}) {
+  if (!fresh && _goldPool) {
+    // Serve cached immediately; refresh in the background if it's gone stale.
+    if (Date.now() - _goldPool.at >= GOLD_POOL_TTL) refreshGoldPool();
+    return _goldPool.value;
+  }
+  // Cold (no cache yet) or a forced fresh rebuild — must wait for the build.
+  return refreshGoldPool();
+}
+
+// Fire-and-forget cache warm — call once at startup so the first battle drop
+// hits a hot cache instead of paying for the full scan.
+export function warmGoldPool() {
+  getLiveGoldCards().catch(() => {});
 }
 
 // Base for Lucky Shots / raffle requests. Defaults to the normal API, but can be

@@ -73,7 +73,7 @@ import {
   getUserProfile, getUserPacks, transferPack, refreshUpshotAccessToken,
   getContests, getContestTop, getRaffles, getRaffleDetail, getRaffleTop,
   getStorePacks, getStoreBundles, getContestLineupCounts,
-  getLiveContestGoldCards,
+  getLiveGoldCards, warmGoldPool,
 } from './api.js';
 
 // ── Client ──────────────────────────────────────────────────
@@ -1833,14 +1833,14 @@ async function handleCardBattle(interaction) {
   }
   const targetChannel = interaction.options.getChannel('channel') || interaction.channel;
 
-  // Building the pool fans out over every live contest's cards — well past the 3s
-  // window — so defer first (ephemeral; the battle itself is posted separately).
+  // Building the pool scans the full card list (deferred/cached), so defer first
+  // (ephemeral; the battle itself is posted separately).
   await interaction.deferReply({ flags: ['Ephemeral'] });
 
-  const pool = await getLiveContestGoldCards();
+  const pool = await getLiveGoldCards();
   if (!pool.length) {
     return interaction.editReply({
-      content: '❌ No live gold cards to battle with right now — I couldn\'t find any GOLD cards in the current live contests (or the Upshot API is unreachable). Try again once a gold contest is live.',
+      content: '❌ No live gold cards to battle with right now — I couldn\'t find any live GOLD cards (or the Upshot API is unreachable). Try again once a gold event is live.',
     });
   }
 
@@ -5918,6 +5918,10 @@ client.once(Events.ClientReady, async () => {
   setTimeout(safeRunAutoResolve, 60_000);
   nextResolveCheck = new Date(Date.now() + 60_000);
   console.log(`   Auto-resolve: first check in 1 minute, then every 12h`);
+
+  // Pre-warm the "highest card wins" gold pool ~30s after boot so the first
+  // /cardbattle drop hits a hot cache instead of paying for the full card scan.
+  setTimeout(warmGoldPool, 30_000);
 
   // Start tier rollover timer (first run after 2 minutes, then every 6h).
   tierTimer = setTimeout(safeRunTierRollover, 120_000);
