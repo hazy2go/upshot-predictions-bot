@@ -121,6 +121,44 @@ db.exec(`
     FOREIGN KEY (giveaway_id) REFERENCES giveaways(id) ON DELETE CASCADE
   );
 
+  -- "Highest card wins" battles. An admin drops one embed with a Pull button;
+  -- every member may pull ONE random gold card from the pool collected at drop
+  -- time. The pool column is a JSON array of the still-undrawn cards ({ id, name,
+  -- image, goldValue }); pulls splice from it in a single transaction so two
+  -- simultaneous clickers can never grab the same card. Kept in the DB (not an
+  -- in-memory Map) so an active battle survives a bot restart.
+  CREATE TABLE IF NOT EXISTS card_battles (
+    id           TEXT PRIMARY KEY,
+    guild_id     TEXT NOT NULL,
+    channel_id   TEXT NOT NULL,
+    message_id   TEXT,                              -- the live embed message
+    creator_id   TEXT NOT NULL,                     -- admin who dropped it
+    status       TEXT NOT NULL DEFAULT 'live',      -- 'live' | 'stopped'
+    pool         TEXT NOT NULL DEFAULT '[]',        -- JSON: undrawn cards remaining
+    pool_size    INTEGER NOT NULL DEFAULT 0,        -- gold cards available at drop
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_card_battles_status ON card_battles(status);
+
+  -- One row per member per battle (PK enforces the one-pull-per-battle rule).
+  -- The card + gold value are snapshotted here so results survive even if the
+  -- pool/card details later change upstream.
+  CREATE TABLE IF NOT EXISTS card_battle_pulls (
+    battle_id    TEXT NOT NULL,
+    discord_id   TEXT NOT NULL,
+    username     TEXT,
+    card_id      TEXT NOT NULL,
+    card_name    TEXT,
+    card_image   TEXT,
+    gold_value   INTEGER NOT NULL DEFAULT 0,
+    pulled_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (battle_id, discord_id),
+    FOREIGN KEY (battle_id) REFERENCES card_battles(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_card_battle_pulls_battle ON card_battle_pulls(battle_id);
+
   -- Admin-defined achievement badges. A badge is earned by having at least
   -- required_lineups total lineup entries SUMMED across the contests listed in
   -- contest_ids (a JSON array of Upshot contest IDs). The 12h sweep is add-only:
@@ -549,6 +587,86 @@ export function getGiveawayEntries(giveawayId) {
 export function countGiveawayEntries(giveawayId) {
   return db.prepare('SELECT COUNT(*) AS n FROM giveaway_entries WHERE giveaway_id = ?')
     .get(giveawayId).n;
+}
+
+// ── Card battles ("highest card wins") ──────────────────────
+
+export function createCardBattle(b) {
+  db.prepare(`
+    INSERT INTO card_battles (id, guild_id, channel_id, creator_id, pool, pool_size)
+    VALUES (@id, @guild_id, @channel_id, @creator_id, @pool, @pool_size)
+  `).run({
+    id: b.id,
+    guild_id: b.guildId,
+    channel_id: b.channelId,
+    creator_id: b.creatorId,
+    pool: JSON.stringify(b.pool || []),
+    pool_size: (b.pool || []).length,
+  });
+  return getCardBattle(b.id);
+}
+
+export function getCardBattle(id) {
+  return db.prepare('SELECT * FROM card_battles WHERE id = ?').get(id) || null;
+}
+
+export function setCardBattleMessageId(id, messageId) {
+  db.prepare('UPDATE card_battles SET message_id = ? WHERE id = ?').run(messageId, id);
+}
+
+export function setCardBattleStatus(id, status) {
+  db.prepare('UPDATE card_battles SET status = ? WHERE id = ?').run(status, id);
+}
+
+export function countCardBattlePulls(battleId) {
+  return db.prepare('SELECT COUNT(*) AS n FROM card_battle_pulls WHERE battle_id = ?')
+    .get(battleId).n;
+}
+
+// All pulls for a battle, ordered highest-gold first (ties broken by who pulled
+// first). Used to render the top-3 standings with tie-aware ranking.
+export function getCardBattlePulls(battleId) {
+  return db.prepare(
+    'SELECT * FROM card_battle_pulls WHERE battle_id = ? ORDER BY gold_value DESC, pulled_at ASC'
+  ).all(battleId);
+}
+
+/**
+ * Atomically pull one random card for a member. The whole read-pick-write runs
+ * in a single synchronous better-sqlite3 transaction, so concurrent clicks can
+ * never draw the same card or let one member pull twice.
+ * Returns one of:
+ *   { card, remaining }         — success (card removed from the pool, pull recorded)
+ *   { error: 'gone' }           — battle id unknown / deleted
+ *   { error: 'closed' }         — admin stopped it
+ *   { error: 'already', pull }  — member already pulled (pull = their existing row)
+ *   { error: 'empty' }          — every gold card has been pulled
+ */
+export function pullCardFromBattle(battleId, { discordId, username }) {
+  const txn = db.transaction(() => {
+    const row = db.prepare('SELECT status, pool FROM card_battles WHERE id = ?').get(battleId);
+    if (!row) return { error: 'gone' };
+    if (row.status !== 'live') return { error: 'closed' };
+
+    const existing = db.prepare(
+      'SELECT * FROM card_battle_pulls WHERE battle_id = ? AND discord_id = ?'
+    ).get(battleId, discordId);
+    if (existing) return { error: 'already', pull: existing };
+
+    const pool = JSON.parse(row.pool || '[]');
+    if (!pool.length) return { error: 'empty' };
+
+    const idx = Math.floor(Math.random() * pool.length);
+    const [card] = pool.splice(idx, 1);
+    db.prepare('UPDATE card_battles SET pool = ? WHERE id = ?').run(JSON.stringify(pool), battleId);
+    db.prepare(`
+      INSERT INTO card_battle_pulls (battle_id, discord_id, username, card_id, card_name, card_image, gold_value)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(battleId, discordId, username || null, card.id, card.name || null, card.image || null, Math.round(Number(card.goldValue) || 0));
+
+    return { card, remaining: pool.length };
+  });
+  return txn();
 }
 
 // ── Config (DB-backed, overrides .env) ──────────────────────

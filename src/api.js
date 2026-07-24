@@ -867,6 +867,65 @@ export async function getContestTop(contestId, n = 3) {
   }
 }
 
+/**
+ * Collect every GOLD card currently in play across all LIVE contests, for the
+ * "highest card wins" battle pool. Walks each live contest's standings, gathers
+ * the unique card IDs from every lineup, then fetches details (funnelled through
+ * the shared concurrency limiter — same fan-out shape as getUserContestLineups)
+ * and keeps only cards that are: prizeType GOLD, still open (deadline not passed),
+ * not instant-win, and carry a numeric points/gold value.
+ *
+ * Returns [{ id, name, image, goldValue }] (image = resolved Arweave URL, may be
+ * null). Best-effort: returns [] on any failure. Deadline-passed / non-gold cards
+ * are dropped so the pool only ever contains live gold cards.
+ */
+export async function getLiveContestGoldCards() {
+  try {
+    const contests = await getLiveContests();
+    if (!contests.length) return [];
+
+    // Every card entered in any live contest lineup — deduped across contests.
+    const standingsResults = await Promise.allSettled(
+      contests.map((c) => getContestStandings(c.id))
+    );
+    const cardIds = new Set();
+    for (const r of standingsResults) {
+      if (r.status !== 'fulfilled' || !r.value) continue;
+      for (const s of (r.value.standings || [])) {
+        for (const id of (s.lineup?.cardIds || [])) cardIds.add(id);
+      }
+    }
+    if (!cardIds.size) return [];
+
+    // Fetch details for each unique card. retries:2 mirrors getUserContestLineups
+    // (the global limiter keeps this off the API shield even for hundreds of cards).
+    const fetches = await Promise.allSettled(
+      [...cardIds].map(async (id) => getCardDetails(id, { retries: 2 }))
+    );
+
+    const gold = [];
+    for (const r of fetches) {
+      if (r.status !== 'fulfilled' || !r.value) continue;
+      const d = r.value;
+      if (isInstantWinCard(d)) continue;
+      if (!isCardStillOpen(d)) continue;
+      if (String(d.prizeType || '').toUpperCase() !== 'GOLD') continue;
+      const goldValue = Number(d.pointsValue);
+      if (!Number.isFinite(goldValue)) continue;
+      gold.push({
+        id: d.id,
+        name: d.name || d.id,
+        image: d.arweaveUrl || d.image || null,
+        goldValue,
+      });
+    }
+    return gold;
+  } catch (err) {
+    console.error('Upshot API: getLiveContestGoldCards failed:', err.message);
+    return [];
+  }
+}
+
 // Base for Lucky Shots / raffle requests. Defaults to the normal API, but can be
 // pointed at a local relay (e.g. the Upshot sniper CDP browser proxy) via
 // UPSHOT_RAFFLE_BASE when direct server-side requests are blocked by the shield.
