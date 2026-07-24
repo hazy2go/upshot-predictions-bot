@@ -1438,7 +1438,22 @@ export function buildCardBattleLive(battle, { pulls = 0, remaining = null } = {}
   children.push(separator());
   const meta = [`🎁 **Cards in the pool:** ${battle.pool_size}`, `🎴 **Pulled so far:** ${pulls}`];
   if (remaining != null) meta.push(`📦 **Left:** ${remaining}`);
+  const endMs = battle.ends_at ? Date.parse(battle.ends_at) : NaN;
+  if (Number.isFinite(endMs)) {
+    meta.push(stopped ? `🕒 **Ended:** <t:${Math.floor(endMs / 1000)}:R>` : `🕒 **Ends:** <t:${Math.floor(endMs / 1000)}:R>`);
+  }
   children.push(text(meta.join('\n')));
+
+  // Entry requirements, if any (arrays present when the battle row is hydrated).
+  const reqs = [];
+  const reqRoles = battle.required_roles || [];
+  const excRoles = battle.excluded_roles || [];
+  const excUsers = battle.excluded_users || [];
+  if (reqRoles.length) reqs.push(`✅ Must have: ${reqRoles.map(r => `<@&${r}>`).join(' or ')}`);
+  if (excRoles.length) reqs.push(`⛔ Barred roles: ${excRoles.map(r => `<@&${r}>`).join(', ')}`);
+  if (excUsers.length) reqs.push(`⛔ ${excUsers.length} member(s) excluded`);
+  if (battle.require_prediction) reqs.push('🔮 Must have made at least one prediction');
+  if (reqs.length) { children.push(separator()); children.push(text(reqs.map(r => `-# ${r}`).join('\n'))); }
 
   children.push(separator());
   children.push(actionRow(

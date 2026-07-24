@@ -576,6 +576,26 @@ export const commands = [
     .setName('cardbattle')
     .setDescription('Drop a "highest card wins" battle — members pull a random gold card (admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption(opt =>
+      opt.setName('duration')
+        .setDescription('Auto-stop + show results after this, e.g. 30m, 2h, 1d (min 1m, max 14d). Omit to stop manually.')
+    )
+    .addStringOption(opt =>
+      opt.setName('required-roles')
+        .setDescription('Mention role(s) a puller MUST have one of, e.g. @OG @Holder')
+    )
+    .addStringOption(opt =>
+      opt.setName('excluded-roles')
+        .setDescription('Mention role(s) that are barred from pulling')
+    )
+    .addStringOption(opt =>
+      opt.setName('excluded-users')
+        .setDescription('Mention specific members to exclude, e.g. @alice @bob')
+    )
+    .addBooleanOption(opt =>
+      opt.setName('require-prediction')
+        .setDescription('Only members who have made at least one prediction can pull')
+    )
     .addChannelOption(opt =>
       opt.setName('channel')
         .setDescription('Where to drop the battle (defaults to this channel)')

@@ -128,15 +128,20 @@ db.exec(`
   -- simultaneous clickers can never grab the same card. Kept in the DB (not an
   -- in-memory Map) so an active battle survives a bot restart.
   CREATE TABLE IF NOT EXISTS card_battles (
-    id           TEXT PRIMARY KEY,
-    guild_id     TEXT NOT NULL,
-    channel_id   TEXT NOT NULL,
-    message_id   TEXT,                              -- the live embed message
-    creator_id   TEXT NOT NULL,                     -- admin who dropped it
-    status       TEXT NOT NULL DEFAULT 'live',      -- 'live' | 'stopped'
-    pool         TEXT NOT NULL DEFAULT '[]',        -- JSON: undrawn cards remaining
-    pool_size    INTEGER NOT NULL DEFAULT 0,        -- gold cards available at drop
-    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    id            TEXT PRIMARY KEY,
+    guild_id      TEXT NOT NULL,
+    channel_id    TEXT NOT NULL,
+    message_id    TEXT,                             -- the live embed message
+    creator_id    TEXT NOT NULL,                    -- admin who dropped it
+    status        TEXT NOT NULL DEFAULT 'live',     -- 'live' | 'stopped'
+    pool          TEXT NOT NULL DEFAULT '[]',       -- JSON: undrawn cards remaining
+    pool_size     INTEGER NOT NULL DEFAULT 0,       -- gold cards available at drop
+    ends_at       TEXT,                             -- ISO; auto-stops + shows results when reached (NULL = manual)
+    required_roles  TEXT NOT NULL DEFAULT '[]',     -- JSON: puller must have ANY of these
+    excluded_roles  TEXT NOT NULL DEFAULT '[]',     -- JSON: puller must have NONE of these
+    excluded_users  TEXT NOT NULL DEFAULT '[]',     -- JSON: barred discord ids
+    require_prediction INTEGER NOT NULL DEFAULT 0,   -- 1 = must have ≥1 prediction ever
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
   CREATE INDEX IF NOT EXISTS idx_card_battles_status ON card_battles(status);
@@ -212,6 +217,11 @@ try { db.exec('ALTER TABLE predictions ADD COLUMN ownership_check TEXT'); } catc
 try { db.exec('ALTER TABLE predictions ADD COLUMN community_star_avg REAL'); } catch { /* already exists */ }
 try { db.exec('ALTER TABLE giveaways ADD COLUMN require_prediction INTEGER NOT NULL DEFAULT 0'); } catch { /* already exists / table absent */ }
 try { db.exec('ALTER TABLE giveaways ADD COLUMN required_pack TEXT'); } catch { /* already exists / table absent */ }
+try { db.exec('ALTER TABLE card_battles ADD COLUMN ends_at TEXT'); } catch { /* already exists / table absent */ }
+try { db.exec("ALTER TABLE card_battles ADD COLUMN required_roles TEXT NOT NULL DEFAULT '[]'"); } catch { /* already exists / table absent */ }
+try { db.exec("ALTER TABLE card_battles ADD COLUMN excluded_roles TEXT NOT NULL DEFAULT '[]'"); } catch { /* already exists / table absent */ }
+try { db.exec("ALTER TABLE card_battles ADD COLUMN excluded_users TEXT NOT NULL DEFAULT '[]'"); } catch { /* already exists / table absent */ }
+try { db.exec('ALTER TABLE card_battles ADD COLUMN require_prediction INTEGER NOT NULL DEFAULT 0'); } catch { /* already exists / table absent */ }
 
 // ── User queries ────────────────────────────────────────────
 
@@ -591,10 +601,23 @@ export function countGiveawayEntries(giveawayId) {
 
 // ── Card battles ("highest card wins") ──────────────────────
 
+function hydrateCardBattle(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    required_roles: JSON.parse(row.required_roles || '[]'),
+    excluded_roles: JSON.parse(row.excluded_roles || '[]'),
+    excluded_users: JSON.parse(row.excluded_users || '[]'),
+    require_prediction: !!row.require_prediction,
+  };
+}
+
 export function createCardBattle(b) {
   db.prepare(`
-    INSERT INTO card_battles (id, guild_id, channel_id, creator_id, pool, pool_size)
-    VALUES (@id, @guild_id, @channel_id, @creator_id, @pool, @pool_size)
+    INSERT INTO card_battles (id, guild_id, channel_id, creator_id, pool, pool_size,
+      ends_at, required_roles, excluded_roles, excluded_users, require_prediction)
+    VALUES (@id, @guild_id, @channel_id, @creator_id, @pool, @pool_size,
+      @ends_at, @required_roles, @excluded_roles, @excluded_users, @require_prediction)
   `).run({
     id: b.id,
     guild_id: b.guildId,
@@ -602,12 +625,24 @@ export function createCardBattle(b) {
     creator_id: b.creatorId,
     pool: JSON.stringify(b.pool || []),
     pool_size: (b.pool || []).length,
+    ends_at: b.endsAt || null,
+    required_roles: JSON.stringify(b.requiredRoles || []),
+    excluded_roles: JSON.stringify(b.excludedRoles || []),
+    excluded_users: JSON.stringify(b.excludedUsers || []),
+    require_prediction: b.requirePrediction ? 1 : 0,
   });
   return getCardBattle(b.id);
 }
 
 export function getCardBattle(id) {
-  return db.prepare('SELECT * FROM card_battles WHERE id = ?').get(id) || null;
+  return hydrateCardBattle(db.prepare('SELECT * FROM card_battles WHERE id = ?').get(id));
+}
+
+// Live battles whose timer has elapsed — the auto-stop sweep picks these up.
+export function getDueCardBattles(nowIso) {
+  return db.prepare(
+    "SELECT * FROM card_battles WHERE status = 'live' AND ends_at IS NOT NULL AND ends_at <= ?"
+  ).all(nowIso).map(hydrateCardBattle);
 }
 
 export function setCardBattleMessageId(id, messageId) {
