@@ -34,7 +34,7 @@ import {
   createGiveaway, getGiveaway, setGiveawayMessageId, setGiveawayStatus, setGiveawayWinners,
   getDueGiveaways, addGiveawayEntry, getGiveawayEntries, countGiveawayEntries,
   createCardBattle, getCardBattle, setCardBattleMessageId, setCardBattleStatus,
-  countCardBattlePulls, getCardBattlePulls, pullCardFromBattle,
+  countCardBattlePulls, getCardBattlePulls, pullCardFromBattle, getDueCardBattles,
   hasAnyPrediction,
   createBadgeDef, getBadgeDef, getAllBadgeDefs, deleteBadgeDef,
   grantBadge, revokeBadge, getUserBadges, countBadgeHolders, getBadgeHolders,
@@ -1832,10 +1832,33 @@ async function handleCardBattle(interaction) {
     return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
   }
   const targetChannel = interaction.options.getChannel('channel') || interaction.channel;
+  const durationRaw = interaction.options.getString('duration');
+  const requiredRolesRaw = interaction.options.getString('required-roles') || '';
+  const excludedRolesRaw = interaction.options.getString('excluded-roles') || '';
+  const excludedUsersRaw = interaction.options.getString('excluded-users') || '';
+  const requirePrediction = interaction.options.getBoolean('require-prediction') ?? false;
 
   // Building the pool scans the full card list (deferred/cached), so defer first
   // (ephemeral; the battle itself is posted separately).
   await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  // Optional timer — validate before the expensive pool build so we fail fast.
+  let endsAt = null;
+  if (durationRaw) {
+    const durationMs = parseDuration(durationRaw);
+    if (!durationMs) {
+      return interaction.editReply({ content: '❌ Couldn\'t read that duration. Use a number + unit like `30m`, `2h`, or `1d`.' });
+    }
+    if (durationMs < GIVEAWAY_MIN_MS || durationMs > GIVEAWAY_MAX_MS) {
+      return interaction.editReply({ content: '❌ Duration must be between **1 minute** and **14 days**.' });
+    }
+    endsAt = new Date(Date.now() + durationMs).toISOString();
+  }
+
+  // Parse role/user mentions out of the free-text options (same as /giveaway).
+  const requiredRoles = [...new Set([...requiredRolesRaw.matchAll(/<@&(\d+)>/g)].map(m => m[1]))];
+  const excludedRoles = [...new Set([...excludedRolesRaw.matchAll(/<@&(\d+)>/g)].map(m => m[1]))];
+  const excludedUsers = [...new Set([...excludedUsersRaw.matchAll(/<@!?(\d+)>/g)].map(m => m[1]))];
 
   const pool = await getLiveGoldCards();
   if (!pool.length) {
@@ -1851,6 +1874,11 @@ async function handleCardBattle(interaction) {
     channelId: targetChannel.id,
     creatorId: interaction.user.id,
     pool,
+    endsAt,
+    requiredRoles,
+    excludedRoles,
+    excludedUsers,
+    requirePrediction,
   });
 
   let posted;
@@ -1862,9 +1890,38 @@ async function handleCardBattle(interaction) {
   }
   setCardBattleMessageId(id, posted.id);
 
+  const bits = [];
+  if (endsAt) bits.push(`ends <t:${Math.floor(Date.parse(endsAt) / 1000)}:R> (auto-stops & shows results)`);
+  if (requiredRoles.length) bits.push(`must have ${requiredRoles.map(r => `<@&${r}>`).join(' or ')}`);
+  if (excludedRoles.length) bits.push(`${excludedRoles.length} excluded role(s)`);
+  if (excludedUsers.length) bits.push(`${excludedUsers.length} excluded member(s)`);
+  if (requirePrediction) bits.push('needs ≥1 prediction');
   return interaction.editReply({
-    content: `✅ Card battle dropped in <#${targetChannel.id}> with **${battle.pool_size}** live gold card${battle.pool_size === 1 ? '' : 's'} in the pool. Members can pull now — use **🛑 Stop** to close it and **🏆 Results** for the top 3.`,
+    content: `✅ Card battle dropped in <#${targetChannel.id}> with **${battle.pool_size}** live gold card${battle.pool_size === 1 ? '' : 's'}.`
+      + (bits.length ? `\n-# ${bits.join(' · ')}` : '')
+      + (endsAt ? '' : '\n-# Use **🛑 Stop** to close it and **🏆 Results** for the top 3.'),
+    allowedMentions: { parse: [] },
   });
+}
+
+// Eligibility gate for pulling (mirrors /giveaway entry rules). Returns an error
+// message string to show the member, or null when they're allowed to pull.
+function cardBattleEligibilityError(battle, interaction) {
+  const userId = interaction.user.id;
+  const member = interaction.member;
+  if (battle.excluded_users.includes(userId)) {
+    return '🚫 You\'re not eligible for this card battle.';
+  }
+  if (battle.excluded_roles.length && battle.excluded_roles.some(r => member.roles.cache.has(r))) {
+    return '🚫 One of your roles is excluded from this card battle.';
+  }
+  if (battle.required_roles.length && !battle.required_roles.some(r => member.roles.cache.has(r))) {
+    return `🚫 You need ${battle.required_roles.map(r => `<@&${r}>`).join(' or ')} to pull in this battle.`;
+  }
+  if (battle.require_prediction && !hasAnyPrediction(userId)) {
+    return '🚫 This battle is for active predictors — make at least one prediction first, then come back and pull.';
+  }
+  return null;
 }
 
 // Throttle live-count edits on the battle embed (mirrors the giveaway throttle).
@@ -1886,6 +1943,17 @@ async function refreshCardBattleMessage(battle, { force = false } = {}) {
 // A member taps "Pull a Card". The draw is a single atomic DB transaction, so no
 // two clicks can grab the same card and no one can pull twice.
 async function handleCardBattlePull(interaction, battleId) {
+  // Eligibility (roles / prediction requirement) is checked first — all synchronous
+  // (role cache + local DB), so the pull stays fast with no API round-trip.
+  const battle = getCardBattle(battleId);
+  if (!battle || battle.status !== 'live') {
+    return interaction.reply({ content: '⌛ This card battle is closed — no more pulls.', flags: ['Ephemeral'] });
+  }
+  const eligErr = cardBattleEligibilityError(battle, interaction);
+  if (eligErr) {
+    return interaction.reply({ content: eligErr, flags: ['Ephemeral'], allowedMentions: { parse: [] } });
+  }
+
   const result = pullCardFromBattle(battleId, {
     discordId: interaction.user.id,
     username: memberDisplayName(interaction),
@@ -1911,8 +1979,7 @@ async function handleCardBattlePull(interaction, battleId) {
     allowedMentions: { parse: [] },
   });
 
-  const battle = getCardBattle(battleId);
-  if (battle) refreshCardBattleMessage(battle).catch(() => {});
+  refreshCardBattleMessage(battle).catch(() => {});
 }
 
 // Admin taps "Stop" — freeze the battle so no one else can pull.
@@ -1950,6 +2017,17 @@ function rankCardBattleTiers(pulls, maxTiers = 3) {
   return tiers;
 }
 
+// Build the public top-3 results payload for a battle (shared by the Results
+// button and the auto-stop sweep).
+function cardBattleResultsPayload(battleId) {
+  const pulls = getCardBattlePulls(battleId);
+  const tiers = rankCardBattleTiers(pulls);
+  return {
+    ...buildCardBattleResults({ tiers, totalPulls: pulls.length }),
+    allowedMentions: { parse: [] },
+  };
+}
+
 // Admin taps "Results" — post the top-3 standings publicly in the channel.
 async function handleCardBattleResults(interaction, battleId) {
   if (!isAdmin(interaction.member)) {
@@ -1959,12 +2037,42 @@ async function handleCardBattleResults(interaction, battleId) {
   if (!battle) {
     return interaction.reply({ content: '❌ That battle no longer exists.', flags: ['Ephemeral'] });
   }
-  const pulls = getCardBattlePulls(battleId);
-  const tiers = rankCardBattleTiers(pulls);
-  return interaction.reply({
-    ...buildCardBattleResults({ tiers, totalPulls: pulls.length }),
-    allowedMentions: { parse: [] },
-  });
+  return interaction.reply(cardBattleResultsPayload(battleId));
+}
+
+// ── Card battle auto-stop sweep (timed battles) ─────────────
+const CARD_BATTLE_SWEEP_INTERVAL = 20 * 1000; // check for due battles every 20s
+let cardBattleSweepTimer = null;
+const cardBattlesStopping = new Set(); // ids being auto-stopped (overlap guard)
+
+// A timed battle's clock ran out: freeze it, update the embed, post the results.
+async function autoStopCardBattle(b) {
+  if (cardBattlesStopping.has(b.id)) return;
+  cardBattlesStopping.add(b.id);
+  try {
+    setCardBattleStatus(b.id, 'stopped');
+    await refreshCardBattleMessage(getCardBattle(b.id), { force: true });
+    const channel = await safeGetChannel(b.channel_id);
+    if (channel) await channel.send(cardBattleResultsPayload(b.id)).catch(() => {});
+  } catch (err) {
+    console.error(`Card battle auto-stop failed for ${b.id}:`, err.message);
+  } finally {
+    cardBattlesStopping.delete(b.id);
+  }
+}
+
+async function runCardBattleSweep() {
+  const due = getDueCardBattles(new Date().toISOString());
+  for (const b of due) await autoStopCardBattle(b);
+}
+
+async function safeRunCardBattleSweep() {
+  try {
+    await runCardBattleSweep();
+  } catch (err) {
+    console.error('Card battle sweep: fatal error:', err.message);
+  }
+  cardBattleSweepTimer = setTimeout(safeRunCardBattleSweep, CARD_BATTLE_SWEEP_INTERVAL);
 }
 
 // ── Card picker (pick a card to predict — no URL needed) ─────
@@ -5945,6 +6053,12 @@ client.once(Events.ClientReady, async () => {
   giveawaySweepTimer = setTimeout(safeRunGiveawaySweep, 30_000);
   console.log(`   Giveaway sweep: first check in 30s, then every 20s`);
 
+  // Start the card-battle auto-stop sweep (first run after 30s, then every 20s).
+  // Stops any timed battle whose clock ran out and posts its results — DB-backed,
+  // so it survives restarts.
+  cardBattleSweepTimer = setTimeout(safeRunCardBattleSweep, 30_000);
+  console.log(`   Card battle sweep: first check in 30s, then every 20s`);
+
   // Start the badge sweep (first run after 3 min, then every 12h). Auto-grants
   // contest-lineup badges to eligible linked users.
   badgeTimer = setTimeout(safeRunBadgeSweep, 180_000);
@@ -5975,6 +6089,7 @@ process.on('SIGTERM', () => {
   if (resolveTimer) clearTimeout(resolveTimer);
   if (tierTimer) clearTimeout(tierTimer);
   if (giveawaySweepTimer) clearTimeout(giveawaySweepTimer);
+  if (cardBattleSweepTimer) clearTimeout(cardBattleSweepTimer);
   client.destroy();
   process.exit(0);
 });
@@ -5983,6 +6098,7 @@ process.on('SIGINT', () => {
   if (resolveTimer) clearTimeout(resolveTimer);
   if (tierTimer) clearTimeout(tierTimer);
   if (giveawaySweepTimer) clearTimeout(giveawaySweepTimer);
+  if (cardBattleSweepTimer) clearTimeout(cardBattleSweepTimer);
   client.destroy();
   process.exit(0);
 });
