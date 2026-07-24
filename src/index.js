@@ -33,6 +33,8 @@ import {
   getStoreWatchState, setStoreWatchState,
   createGiveaway, getGiveaway, setGiveawayMessageId, setGiveawayStatus, setGiveawayWinners,
   getDueGiveaways, addGiveawayEntry, getGiveawayEntries, countGiveawayEntries,
+  createCardBattle, getCardBattle, setCardBattleMessageId, setCardBattleStatus,
+  countCardBattlePulls, getCardBattlePulls, pullCardFromBattle,
   hasAnyPrediction,
   createBadgeDef, getBadgeDef, getAllBadgeDefs, deleteBadgeDef,
   grantBadge, revokeBadge, getUserBadges, countBadgeHolders, getBadgeHolders,
@@ -51,6 +53,7 @@ import {
   buildContestLive, buildContestResults, buildContestList,
   buildRaffleLive, buildRaffleWinner, buildRaffleList,
   buildGiveawayLive, buildGiveawayEnded,
+  buildCardBattleLive, buildCardBattlePull, buildCardBattleResults,
   buildStoreListed, buildStoreList,
   buildAdminPanel, buildAdminPickChannel, buildAdminPickRole, ADMIN_SETTINGS_LIST,
   buildShotCallerPanel,
@@ -70,6 +73,7 @@ import {
   getUserProfile, getUserPacks, transferPack, refreshUpshotAccessToken,
   getContests, getContestTop, getRaffles, getRaffleDetail, getRaffleTop,
   getStorePacks, getStoreBundles, getContestLineupCounts,
+  getLiveContestGoldCards,
 } from './api.js';
 
 // ── Client ──────────────────────────────────────────────────
@@ -1809,6 +1813,160 @@ async function safeRunGiveawaySweep() {
   giveawaySweepTimer = setTimeout(safeRunGiveawaySweep, GIVEAWAY_SWEEP_INTERVAL);
 }
 
+// ── Card battle ("highest card wins") ───────────────────────
+
+function newCardBattleId() {
+  return `cb_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+}
+
+// Best display name for a member (server nickname > global name > username).
+function memberDisplayName(interaction) {
+  return interaction.member?.displayName
+    || interaction.user.globalName
+    || interaction.user.username;
+}
+
+// Admin drops a battle: collect the live gold-card pool, persist it, post the embed.
+async function handleCardBattle(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+  const targetChannel = interaction.options.getChannel('channel') || interaction.channel;
+
+  // Building the pool fans out over every live contest's cards — well past the 3s
+  // window — so defer first (ephemeral; the battle itself is posted separately).
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  const pool = await getLiveContestGoldCards();
+  if (!pool.length) {
+    return interaction.editReply({
+      content: '❌ No live gold cards to battle with right now — I couldn\'t find any GOLD cards in the current live contests (or the Upshot API is unreachable). Try again once a gold contest is live.',
+    });
+  }
+
+  const id = newCardBattleId();
+  const battle = createCardBattle({
+    id,
+    guildId: interaction.guildId,
+    channelId: targetChannel.id,
+    creatorId: interaction.user.id,
+    pool,
+  });
+
+  let posted;
+  try {
+    posted = await targetChannel.send({ ...buildCardBattleLive(battle, { pulls: 0, remaining: battle.pool_size }), allowedMentions: { parse: [] } });
+  } catch (e) {
+    setCardBattleStatus(id, 'stopped');
+    return interaction.editReply({ content: `❌ Couldn't post the battle in <#${targetChannel.id}>: ${e.message}` });
+  }
+  setCardBattleMessageId(id, posted.id);
+
+  return interaction.editReply({
+    content: `✅ Card battle dropped in <#${targetChannel.id}> with **${battle.pool_size}** live gold card${battle.pool_size === 1 ? '' : 's'} in the pool. Members can pull now — use **🛑 Stop** to close it and **🏆 Results** for the top 3.`,
+  });
+}
+
+// Throttle live-count edits on the battle embed (mirrors the giveaway throttle).
+const cardBattleCountEditAt = new Map(); // battleId -> last edit ts
+async function refreshCardBattleMessage(battle, { force = false } = {}) {
+  if (!battle.message_id) return;
+  const last = cardBattleCountEditAt.get(battle.id) || 0;
+  if (!force && Date.now() - last < 5000) return;
+  cardBattleCountEditAt.set(battle.id, Date.now());
+  const channel = await safeGetChannel(battle.channel_id);
+  if (!channel) return;
+  const msg = await safeGetMessage(channel, battle.message_id);
+  if (!msg) return;
+  const pulls = countCardBattlePulls(battle.id);
+  const remaining = Math.max(0, battle.pool_size - pulls);
+  await msg.edit({ ...buildCardBattleLive(battle, { pulls, remaining }), allowedMentions: { parse: [] } }).catch(() => {});
+}
+
+// A member taps "Pull a Card". The draw is a single atomic DB transaction, so no
+// two clicks can grab the same card and no one can pull twice.
+async function handleCardBattlePull(interaction, battleId) {
+  const result = pullCardFromBattle(battleId, {
+    discordId: interaction.user.id,
+    username: memberDisplayName(interaction),
+  });
+
+  if (result.error === 'gone' || result.error === 'closed') {
+    return interaction.reply({ content: '⌛ This card battle is closed — no more pulls.', flags: ['Ephemeral'] });
+  }
+  if (result.error === 'already') {
+    const p = result.pull;
+    return interaction.reply({
+      content: `✅ You already pulled **${p.card_name || 'a card'}** worth **${Math.round(p.gold_value).toLocaleString('en-US')}** 🪙 — one pull per battle.`,
+      flags: ['Ephemeral'],
+    });
+  }
+  if (result.error === 'empty') {
+    return interaction.reply({ content: '📦 Every card has been pulled — the pool is empty!', flags: ['Ephemeral'] });
+  }
+
+  // Success — announce the pull publicly.
+  await interaction.reply({
+    ...buildCardBattlePull({ displayName: memberDisplayName(interaction), card: result.card }),
+    allowedMentions: { parse: [] },
+  });
+
+  const battle = getCardBattle(battleId);
+  if (battle) refreshCardBattleMessage(battle).catch(() => {});
+}
+
+// Admin taps "Stop" — freeze the battle so no one else can pull.
+async function handleCardBattleStop(interaction, battleId) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+  const battle = getCardBattle(battleId);
+  if (!battle) {
+    return interaction.reply({ content: '❌ That battle no longer exists.', flags: ['Ephemeral'] });
+  }
+  if (battle.status === 'stopped') {
+    return interaction.reply({ content: '⏹️ This battle is already stopped.', flags: ['Ephemeral'] });
+  }
+  setCardBattleStatus(battleId, 'stopped');
+  await refreshCardBattleMessage(getCardBattle(battleId), { force: true });
+  return interaction.reply({ content: '🛑 Battle stopped — no more pulls. Tap **🏆 Results** to reveal the top 3.', flags: ['Ephemeral'] });
+}
+
+// Rank pulls into the top-3 tiers, ties sharing a rank (dense rank over distinct
+// gold values). Returns [{ rank, gold, entries: [{ displayName, cardName }] }].
+function rankCardBattleTiers(pulls, maxTiers = 3) {
+  const tiers = [];
+  let rank = 0;
+  let lastGold = null;
+  for (const p of pulls) {
+    if (p.gold_value !== lastGold) {
+      if (tiers.length >= maxTiers) break;
+      rank += 1;
+      lastGold = p.gold_value;
+      tiers.push({ rank, gold: p.gold_value, entries: [] });
+    }
+    tiers[tiers.length - 1].entries.push({ displayName: p.username || 'Someone', cardName: p.card_name });
+  }
+  return tiers;
+}
+
+// Admin taps "Results" — post the top-3 standings publicly in the channel.
+async function handleCardBattleResults(interaction, battleId) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+  const battle = getCardBattle(battleId);
+  if (!battle) {
+    return interaction.reply({ content: '❌ That battle no longer exists.', flags: ['Ephemeral'] });
+  }
+  const pulls = getCardBattlePulls(battleId);
+  const tiers = rankCardBattleTiers(pulls);
+  return interaction.reply({
+    ...buildCardBattleResults({ tiers, totalPulls: pulls.length }),
+    allowedMentions: { parse: [] },
+  });
+}
+
 // ── Card picker (pick a card to predict — no URL needed) ─────
 
 // Per-user cache of the full predictable-card list so the pagination buttons can
@@ -3543,6 +3701,17 @@ async function handleButton(interaction) {
   // Giveaway entry
   if (interaction.customId.startsWith('gw_enter:')) {
     return handleGiveawayEnter(interaction, interaction.customId.slice('gw_enter:'.length));
+  }
+
+  // Card battle ("highest card wins")
+  if (interaction.customId.startsWith('cardbattle_pull:')) {
+    return handleCardBattlePull(interaction, interaction.customId.slice('cardbattle_pull:'.length));
+  }
+  if (interaction.customId.startsWith('cardbattle_stop:')) {
+    return handleCardBattleStop(interaction, interaction.customId.slice('cardbattle_stop:'.length));
+  }
+  if (interaction.customId.startsWith('cardbattle_results:')) {
+    return handleCardBattleResults(interaction, interaction.customId.slice('cardbattle_results:'.length));
   }
 
   // Contest navigation
@@ -5604,6 +5773,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'setup': return await handleSetup(interaction);
         case 'sendpack': return await handleSendPack(interaction);
         case 'giveaway': return await handleGiveaway(interaction);
+        case 'cardbattle': return await handleCardBattle(interaction);
         case 'process-tiers': return await handleProcessTiers(interaction);
         case 'shotcallers': {
           const sub = interaction.options.getSubcommand();

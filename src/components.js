@@ -1416,6 +1416,78 @@ export function buildUserCancelConfirm(prediction) {
   };
 }
 
+// ── Card battle ("highest card wins") ────────────────────────
+
+// The dropped embed with the public Pull button + admin Stop / Results buttons.
+// When the battle is stopped the Pull button is disabled and the header flips.
+export function buildCardBattleLive(battle, { pulls = 0, remaining = null } = {}) {
+  const stopped = battle.status === 'stopped';
+  const children = [];
+  children.push(text(stopped ? '## 🎴 Highest Card Wins — 🛑 Closed' : '## 🎴 Highest Card Wins'));
+  children.push(text(stopped
+    ? '-# Pulls are closed. Tap **🏆 Results** to see the top cards.'
+    : '**Tap the button to pull one random gold card — highest gold value wins!**\nOne pull per person. Everyone sees what you get.'));
+
+  children.push(separator());
+  const meta = [`🎁 **Cards in the pool:** ${battle.pool_size}`, `🎴 **Pulled so far:** ${pulls}`];
+  if (remaining != null) meta.push(`📦 **Left:** ${remaining}`);
+  children.push(text(meta.join('\n')));
+
+  children.push(separator());
+  children.push(actionRow(
+    button(`cardbattle_pull:${battle.id}`, '🎴 Pull a Card', ButtonStyle.Success, stopped ? { disabled: true } : {}),
+    button(`cardbattle_stop:${battle.id}`, '🛑 Stop', ButtonStyle.Danger, stopped ? { disabled: true } : {}),
+    button(`cardbattle_results:${battle.id}`, '🏆 Results', ButtonStyle.Secondary),
+  ));
+
+  return { components: [container(Colors.Gold, children)], flags: 1 << 15 };
+}
+
+// Public reveal posted when a member pulls a card.
+export function buildCardBattlePull({ displayName, card }) {
+  const children = [];
+  children.push(text(`## 🎴 ${displayName} pulled a card!`));
+  children.push(text(`### ${(card.name || 'Gold Card').replace(/[\r\n]+/g, ' ')}`));
+
+  const img = eventImage(card.image);
+  if (img) children.push({ type: CT.MediaGallery, items: [{ media: { url: img } }] });
+
+  children.push(separator());
+  children.push(text(`🪙 **Gold value:** ${Math.round(Number(card.goldValue) || 0).toLocaleString('en-US')}`));
+
+  return { components: [container(Colors.Gold, children)], flags: 1 << 15 };
+}
+
+// Top-3 standings. `tiers` = [{ rank, gold, entries: [{ displayName, cardName }] }],
+// pre-ranked with ties sharing a rank (dense rank, top 3 distinct gold values).
+export function buildCardBattleResults({ tiers = [], totalPulls = 0 } = {}) {
+  const MEDALS = ['🥇', '🥈', '🥉'];
+  const children = [];
+  children.push(text('## 🏆 Highest Card Wins — Results'));
+
+  if (!tiers.length) {
+    children.push(text('-# No one pulled a card this round.'));
+    return { components: [container(Colors.Gold, children)], flags: 1 << 15 };
+  }
+
+  for (const tier of tiers) {
+    children.push(separator());
+    const badge = MEDALS[tier.rank - 1] || `#${tier.rank}`;
+    const goldStr = Math.round(Number(tier.gold) || 0).toLocaleString('en-US');
+    const header = tier.entries.length > 1
+      ? `${badge} **${goldStr}** 🪙 — tie (${tier.entries.length})`
+      : `${badge} **${goldStr}** 🪙`;
+    children.push(text(header));
+    for (const e of tier.entries) {
+      children.push(text(`• **${e.displayName}** — ${(e.cardName || 'Gold Card').replace(/[\r\n]+/g, ' ')}`));
+    }
+  }
+
+  children.push(separator());
+  children.push(text(`-# ${totalPulls} total pull${totalPulls === 1 ? '' : 's'}.`));
+  return { components: [container(Colors.Gold, children)], flags: 1 << 15 };
+}
+
 // ── Delete confirmation ──────────────────────────────────────
 
 export function buildDeleteConfirm(predictionId) {

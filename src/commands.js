@@ -571,4 +571,14 @@ export const commands = [
             .setAutocomplete(true)
         )
     ),
+
+  new SlashCommandBuilder()
+    .setName('cardbattle')
+    .setDescription('Drop a "highest card wins" battle — members pull a random gold card (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addChannelOption(opt =>
+      opt.setName('channel')
+        .setDescription('Where to drop the battle (defaults to this channel)')
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+    ),
 ];
