@@ -31,6 +31,13 @@ function button(customId, label, style = ButtonStyle.Secondary, options = {}) {
   };
 }
 
+// Upshot value fields (pointsValue, prizePool, scores) are micro-units: 1e6 = 1
+// unit. Format a stored gold value for display, e.g. 941666666 -> "941.67".
+export function formatGold(microUnits) {
+  const n = Number(microUnits) || 0;
+  return (n / 1_000_000).toLocaleString('en-US', { maximumFractionDigits: 2 });
+}
+
 // Link-style button: opens a URL instead of firing an interaction (no custom_id).
 function linkButton(url, label) {
   return { type: CT.Button, style: ButtonStyle.Link, url, label };
@@ -1453,7 +1460,7 @@ export function buildCardBattlePull({ displayName, card }) {
   if (img) children.push({ type: CT.MediaGallery, items: [{ media: { url: img } }] });
 
   children.push(separator());
-  children.push(text(`🪙 **Gold value:** ${Math.round(Number(card.goldValue) || 0).toLocaleString('en-US')}`));
+  children.push(text(`🪙 **Gold value:** ${formatGold(card.goldValue)}`));
 
   return { components: [container(Colors.Gold, children)], flags: 1 << 15 };
 }
@@ -1473,7 +1480,7 @@ export function buildCardBattleResults({ tiers = [], totalPulls = 0 } = {}) {
   for (const tier of tiers) {
     children.push(separator());
     const badge = MEDALS[tier.rank - 1] || `#${tier.rank}`;
-    const goldStr = Math.round(Number(tier.gold) || 0).toLocaleString('en-US');
+    const goldStr = formatGold(tier.gold);
     const header = tier.entries.length > 1
       ? `${badge} **${goldStr}** 🪙 — tie (${tier.entries.length})`
       : `${badge} **${goldStr}** 🪙`;

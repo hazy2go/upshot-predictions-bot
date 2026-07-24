@@ -53,7 +53,7 @@ import {
   buildContestLive, buildContestResults, buildContestList,
   buildRaffleLive, buildRaffleWinner, buildRaffleList,
   buildGiveawayLive, buildGiveawayEnded,
-  buildCardBattleLive, buildCardBattlePull, buildCardBattleResults,
+  buildCardBattleLive, buildCardBattlePull, buildCardBattleResults, formatGold,
   buildStoreListed, buildStoreList,
   buildAdminPanel, buildAdminPickChannel, buildAdminPickRole, ADMIN_SETTINGS_LIST,
   buildShotCallerPanel,
@@ -1897,7 +1897,7 @@ async function handleCardBattlePull(interaction, battleId) {
   if (result.error === 'already') {
     const p = result.pull;
     return interaction.reply({
-      content: `✅ You already pulled **${p.card_name || 'a card'}** worth **${Math.round(p.gold_value).toLocaleString('en-US')}** 🪙 — one pull per battle.`,
+      content: `✅ You already pulled **${p.card_name || 'a card'}** worth **${formatGold(p.gold_value)}** 🪙 — one pull per battle.`,
       flags: ['Ephemeral'],
     });
   }
