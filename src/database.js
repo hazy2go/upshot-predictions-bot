@@ -922,6 +922,39 @@ export function getMessageActivity(guildId, discordId) {
   ).get(guildId, discordId) || null;
 }
 
+// Retrospective backfill (the /scan-messages history scan). entries:
+// [{ discordId, count, lastAt, channelId }] where lastAt is a SQLite datetime
+// string ('YYYY-MM-DD HH:MM:SS', UTC) so it compares with datetime('now').
+// Uses MAX so it never REDUCES a live count and is safe to re-run (idempotent):
+// the scanned window includes recent messages, so the scanned total is normally
+// ≥ whatever live tracking has accumulated. Runs in one transaction.
+export function bulkUpsertMessageCounts(guildId, entries) {
+  const stmt = db.prepare(`
+    INSERT INTO message_activity (guild_id, discord_id, message_count, last_message_at, last_channel_id)
+    VALUES (@guild_id, @discord_id, @count, @last_at, @channel_id)
+    ON CONFLICT(guild_id, discord_id) DO UPDATE SET
+      message_count   = MAX(message_count, excluded.message_count),
+      last_message_at = MAX(COALESCE(last_message_at, ''), COALESCE(excluded.last_message_at, '')),
+      last_channel_id = COALESCE(excluded.last_channel_id, last_channel_id)
+  `);
+  const run = db.transaction((rows) => {
+    for (const r of rows) {
+      stmt.run({
+        guild_id: guildId,
+        discord_id: r.discordId,
+        count: r.count,
+        last_at: r.lastAt || null,
+        channel_id: r.channelId || null,
+      });
+    }
+  });
+  run(entries);
+  db.prepare(
+    "INSERT OR IGNORE INTO bot_state (key, value) VALUES (?, datetime('now'))"
+  ).run(`msg_tracking_since_${guildId}`);
+  return entries.length;
+}
+
 // When message tracking first started for this guild (set on the first recorded
 // message). Null until then. Lets the panel state "since <date>" plainly.
 export function getMessageTrackingSince(guildId) {

@@ -38,7 +38,7 @@ import {
   hasAnyPrediction,
   createBadgeDef, getBadgeDef, getAllBadgeDefs, deleteBadgeDef,
   grantBadge, revokeBadge, getUserBadges, countBadgeHolders, getBadgeHolders,
-  recordMessage, getMessageActivity, getMessageTrackingSince,
+  recordMessage, getMessageActivity, getMessageTrackingSince, bulkUpsertMessageCounts,
 } from './database.js';
 
 import { rateWithAI, MODEL as NIM_MODEL } from './nim.js';
@@ -5753,6 +5753,120 @@ async function safeRunTierRollover() {
 // this is purely additive. Every setting reads/writes through the same getters
 // and setConfig the /setup subcommands use, so the two stay in sync.
 
+// ── Retrospective message scan (/scan-messages) ─────────────
+// Discord exposes no historical per-user message count, so the min-messages gate
+// would otherwise only see activity since tracking began. This pages channel
+// history and tallies per member into message_activity (via bulkUpsertMessageCounts).
+
+const messageScanInProgress = new Set(); // guildIds currently scanning (overlap guard)
+
+// Format epoch ms as a SQLite datetime string ('YYYY-MM-DD HH:MM:SS', UTC) so it
+// compares correctly with the datetime('now') values live tracking writes.
+function toSqlDatetime(ms) {
+  return new Date(ms).toISOString().replace('T', ' ').slice(0, 19);
+}
+
+async function scanGuildMessages(guild, { days = 90, onProgress } = {}) {
+  const cutoffMs = days > 0 ? Date.now() - days * 86_400_000 : 0;
+  const me = guild.members.me || await guild.members.fetchMe().catch(() => null);
+  await guild.channels.fetch().catch(() => {});
+
+  const canRead = (ch) => {
+    try { return !!(ch?.viewable && me && ch.permissionsFor(me)?.has('ReadMessageHistory')); }
+    catch { return false; }
+  };
+  const targets = [...guild.channels.cache.values()]
+    .filter(c => (c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement) && canRead(c));
+  // Include currently-active threads (archived threads are not scanned).
+  try {
+    const active = await guild.channels.fetchActiveThreads();
+    for (const t of active.threads.values()) if (canRead(t)) targets.push(t);
+  } catch { /* no thread access — skip */ }
+
+  const counts = new Map(); // userId -> { count, lastMs, lastChannel }
+  const PER_CHANNEL_CAP = 200_000;
+  const TOTAL_CAP = 2_000_000;
+  let totalMsgs = 0, channelsScanned = 0, channelsSkipped = 0, capped = false, channelsDone = 0;
+
+  for (const ch of targets) {
+    let before; let chMsgs = 0;
+    try {
+      while (true) {
+        const batch = await ch.messages.fetch({ limit: 100, ...(before ? { before } : {}) });
+        if (!batch.size) break;
+        let reachedCutoff = false;
+        for (const m of batch.values()) {
+          if (cutoffMs && m.createdTimestamp < cutoffMs) { reachedCutoff = true; continue; }
+          if (m.author?.bot || m.system) continue;
+          totalMsgs++; chMsgs++;
+          const e = counts.get(m.author.id) || { count: 0, lastMs: 0, lastChannel: null };
+          e.count++;
+          if (m.createdTimestamp > e.lastMs) { e.lastMs = m.createdTimestamp; e.lastChannel = ch.id; }
+          counts.set(m.author.id, e);
+        }
+        before = batch.last()?.id; // oldest id in the batch → page further back
+        if (reachedCutoff || batch.size < 100) break;
+        if (chMsgs >= PER_CHANNEL_CAP || totalMsgs >= TOTAL_CAP) { capped = true; break; }
+        onProgress?.({ totalMsgs, channelsDone, channelsTotal: targets.length, members: counts.size });
+      }
+      channelsScanned++;
+    } catch { channelsSkipped++; }
+    channelsDone++;
+    onProgress?.({ totalMsgs, channelsDone, channelsTotal: targets.length, members: counts.size });
+    if (totalMsgs >= TOTAL_CAP) { capped = true; break; }
+  }
+  return { counts, totalMsgs, channelsScanned, channelsSkipped, capped };
+}
+
+async function handleScanMessages(interaction) {
+  if (!isAdmin(interaction.member)) return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  const guild = interaction.guild;
+  if (!guild) return interaction.reply({ content: '❌ Run this in a server.', flags: ['Ephemeral'] });
+  if (messageScanInProgress.has(guild.id)) {
+    return interaction.reply({ content: '⏳ A message scan is already running for this server — let it finish first.', flags: ['Ephemeral'] });
+  }
+  const days = interaction.options.getInteger('days') ?? 90;
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+  messageScanInProgress.add(guild.id);
+  const started = Date.now();
+  let lastEdit = 0;
+  const onProgress = (s) => {
+    if (Date.now() - lastEdit < 4000) return;
+    lastEdit = Date.now();
+    interaction.editReply({
+      content: `🔍 Scanning history… **${s.totalMsgs.toLocaleString('en-US')}** messages · **${s.channelsDone}/${s.channelsTotal}** channels · **${s.members}** members so far.`,
+    }).catch(() => {});
+  };
+
+  try {
+    const res = await scanGuildMessages(guild, { days, onProgress });
+    const entries = [...res.counts.entries()].map(([discordId, e]) => ({
+      discordId, count: e.count, lastAt: e.lastMs ? toSqlDatetime(e.lastMs) : null, channelId: e.lastChannel,
+    }));
+    if (entries.length) bulkUpsertMessageCounts(guild.id, entries);
+
+    const mins = ((Date.now() - started) / 60000).toFixed(1);
+    const lines = [
+      `✅ **Message scan complete** (${mins} min).`,
+      `• Scanned **${res.totalMsgs.toLocaleString('en-US')}** messages across **${res.channelsScanned}** channel(s)${res.channelsSkipped ? ` · ${res.channelsSkipped} skipped (no read access)` : ''}.`,
+      `• Backfilled counts for **${entries.length}** member(s).`,
+      days > 0 ? `• Window: last **${days}** days.` : '• Window: **all history** (up to the scan cap).',
+    ];
+    if (res.capped) lines.push('⚠️ Hit the scan cap — the oldest messages weren\'t all counted. Ping me if you need the cap raised.');
+    lines.push('-# The min-messages gate now reflects history. Live tracking continues from here (re-running is safe — counts never go down).');
+    const content = lines.join('\n');
+    // A long scan can outlive the 15-min interaction token — fall back to a channel post.
+    try { await interaction.editReply({ content }); }
+    catch { await interaction.channel?.send({ content, allowedMentions: { parse: [] } }).catch(() => {}); }
+  } catch (err) {
+    console.error('Message scan failed:', err.message);
+    await interaction.editReply({ content: `❌ Scan failed: ${err.message}` }).catch(() => {});
+  } finally {
+    messageScanInProgress.delete(guild.id);
+  }
+}
+
 function gatherAdminCfg(guildId) {
   const token = getUpshotToken(guildId);
   let expiresInMin = null;
@@ -5825,6 +5939,7 @@ async function handleAdminHelp(interaction) {
     ['🔧 Utilities', [
       '`/lookup-wallets file` — .txt of names → CSV of wallets/profiles',
       '`/process-tiers [month]` — award top-10 leaderboard tiers for a month',
+      '`/scan-messages [days]` — backfill member message counts from history (for the min-messages predict gate)',
       '`/shotcallers panel|config` — Shot Caller monitoring',
     ]],
   ];
@@ -6010,6 +6125,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'giveaway': return await handleGiveaway(interaction);
         case 'cardbattle': return await handleCardBattle(interaction);
         case 'process-tiers': return await handleProcessTiers(interaction);
+        case 'scan-messages': return await handleScanMessages(interaction);
         case 'shotcallers': {
           const sub = interaction.options.getSubcommand();
           if (sub === 'config') return await handleShotCallersConfig(interaction);
