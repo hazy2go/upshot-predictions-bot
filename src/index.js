@@ -5786,6 +5786,11 @@ async function scanGuildMessages(guild, { days = 90, onProgress } = {}) {
   const counts = new Map(); // userId -> { count, lastMs, lastChannel }
   const PER_CHANNEL_CAP = 200_000;
   const TOTAL_CAP = 2_000_000;
+  // Deliberately pace history fetches: back-to-back fetches saturate Discord's
+  // GLOBAL rate limit and starve other interactions' replies (they miss the 3s
+  // ack window → 10062 "Unknown interaction"). ~120ms ≈ 8 req/s leaves plenty of
+  // global headroom for live commands while a scan runs.
+  const THROTTLE_MS = 120;
   let totalMsgs = 0, channelsScanned = 0, channelsSkipped = 0, capped = false, channelsDone = 0;
 
   for (const ch of targets) {
@@ -5808,6 +5813,7 @@ async function scanGuildMessages(guild, { days = 90, onProgress } = {}) {
         if (reachedCutoff || batch.size < 100) break;
         if (chMsgs >= PER_CHANNEL_CAP || totalMsgs >= TOTAL_CAP) { capped = true; break; }
         onProgress?.({ totalMsgs, channelsDone, channelsTotal: targets.length, members: counts.size });
+        await sleep(THROTTLE_MS); // yield global REST capacity to live interactions
       }
       channelsScanned++;
     } catch { channelsSkipped++; }
@@ -6218,6 +6224,13 @@ client.on(Events.InteractionCreate, async interaction => {
       }
     }
   } catch (error) {
+    // 10062 (Unknown interaction) / 40060 (already acknowledged) are benign: the
+    // interaction expired before we could respond (usually the bot was briefly
+    // busy) or was double-delivered. Nothing to reply to and nothing to alert on.
+    if (error?.code === 10062 || error?.code === 40060) {
+      console.warn(`Interaction expired before response (${error.code}) — skipping.`);
+      return;
+    }
     console.error('Interaction error:', error);
     const reply = { content: '❌ Something went wrong. Please try again.', flags: ['Ephemeral'] };
     try {
