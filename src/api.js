@@ -579,7 +579,7 @@ async function filterOutExpiredCards(cards) {
   for (const c of cards) {
     if (c.event) {
       if (!eventDeadlinePassed({ resolvedAt: c.event.resolvedAt, eventDate: c.event.eventDate, status: c.event.status })) {
-        out.push({ id: c.id, name: c.name, inContest: c.inContest });
+        out.push({ id: c.id, name: c.name, inContest: c.inContest, eventDate: c.event.eventDate || null });
       }
     } else {
       needFetch.push(c);
@@ -593,7 +593,7 @@ async function filterOutExpiredCards(cards) {
     for (let j = 0; j < chunk.length; j++) {
       const details = results[j].status === 'fulfilled' ? results[j].value : null;
       if (eventDeadlinePassed(details)) continue;
-      out.push({ id: chunk[j].id, name: details?.name || chunk[j].name, inContest: chunk[j].inContest });
+      out.push({ id: chunk[j].id, name: details?.name || chunk[j].name, inContest: chunk[j].inContest, eventDate: details?.eventDate || null });
     }
   }
   return out;

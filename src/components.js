@@ -602,6 +602,10 @@ const ADMIN_SETTINGS = [
   { key: 'admin_role',          label: 'Admin role',          kind: 'role',    emoji: '👮' },
   { key: 'max_daily',           label: 'Max predictions / day', kind: 'int',   emoji: '📆' },
   { key: 'max_open',            label: 'Max open predictions',  kind: 'int',   emoji: '📂' },
+  { key: 'predict_required_roles',    label: 'Predict: required role(s)',     kind: 'roles', emoji: '🎭' },
+  { key: 'predict_min_messages',      label: 'Predict: min messages',         kind: 'int',   emoji: '💬' },
+  { key: 'predict_min_account_age',   label: 'Predict: min account age (days)', kind: 'int', emoji: '🕰' },
+  { key: 'predict_current_month_only', label: 'Predict: current month only',  kind: 'bool',  emoji: '📅' },
   { key: 'upshot_token',        label: 'Upshot token (packs/giveaways)', kind: 'token', emoji: '🔑' },
   { key: 'owner_id',            label: 'Lock /sendpack & /giveaway to me', kind: 'owner', emoji: '🔒' },
 ];
@@ -630,6 +634,7 @@ export function buildAdminPanel(cfg) {
     `🎰 Lucky Shots: ${chan(ch.luckyshots)}`,
     `🛒 Store: ${chan(ch.store)}`,
   ].join('\n')));
+  const pg = cfg.predictGates || {};
   children.push(text([
     '**Settings**',
     `👮 Admin role: ${cfg.adminRole ? `<@&${cfg.adminRole}>` : 'server admins'}`,
@@ -637,6 +642,12 @@ export function buildAdminPanel(cfg) {
     `📆 Max daily: **${cfg.maxDaily}** · 📂 Max open: **${cfg.maxOpen}**`,
     `🔑 Upshot token: ${tokenLine}`,
     `🗂 Categories: ${cfg.categories?.length ? cfg.categories.join(', ') : '—'}`,
+  ].join('\n')));
+  children.push(text([
+    '**Prediction gates** (admins bypass)',
+    `🎭 Required role(s): ${pg.roles?.length ? pg.roles.map(r => `<@&${r}>`).join(' ') : 'anyone'}`,
+    `💬 Min messages: **${pg.minMessages || 'off'}** · 🕰 Min account age: **${pg.minAccountAge ? pg.minAccountAge + 'd' : 'off'}**`,
+    `📅 Current-month-only: **${pg.currentMonthOnly ? 'on' : 'off'}**`,
   ].join('\n')));
   children.push(separator());
 
@@ -698,6 +709,25 @@ export function buildAdminPickRole() {
         custom_id: 'admin_setrole',
         placeholder: 'Select a role…',
         min_values: 1, max_values: 1,
+      }] },
+      actionRow(button('admin_back', '← Back', ButtonStyle.Secondary)),
+    ])],
+    flags: (1 << 15) | (1 << 6),
+  };
+}
+
+// Sub-view: pick one or MORE roles for a setting (multi RoleSelect + Back).
+// min_values 0 lets the admin clear the requirement by submitting none.
+export function buildAdminPickRoles(setting) {
+  return {
+    components: [container(Colors.Admin, [
+      text(`## ${setting.emoji} Set ${setting.label}`),
+      text('-# Pick one or more roles (a member needs ANY of them). Select none and submit to clear.'),
+      { type: CT.ActionRow, components: [{
+        type: CT.RoleSelect,
+        custom_id: `admin_setroles:${setting.key}`,
+        placeholder: 'Select role(s)…',
+        min_values: 0, max_values: 25,
       }] },
       actionRow(button('admin_back', '← Back', ButtonStyle.Secondary)),
     ])],
