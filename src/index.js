@@ -5850,7 +5850,15 @@ async function handleScanMessages(interaction) {
     const entries = [...res.counts.entries()].map(([discordId, e]) => ({
       discordId, count: e.count, lastAt: e.lastMs ? toSqlDatetime(e.lastMs) : null, channelId: e.lastChannel,
     }));
-    if (entries.length) bulkUpsertMessageCounts(guild.id, entries);
+    // Write in chunks with an event-loop yield between them. One big synchronous
+    // better-sqlite3 transaction over tens of thousands of members can block the
+    // loop for seconds on a Pi — long enough for concurrent interactions to
+    // expire (10062). Chunking keeps the loop responsive.
+    const WRITE_CHUNK = 1000;
+    for (let i = 0; i < entries.length; i += WRITE_CHUNK) {
+      bulkUpsertMessageCounts(guild.id, entries.slice(i, i + WRITE_CHUNK));
+      if (i + WRITE_CHUNK < entries.length) await sleep(0);
+    }
 
     const mins = ((Date.now() - started) / 60000).toFixed(1);
     const lines = [
@@ -6228,7 +6236,9 @@ client.on(Events.InteractionCreate, async interaction => {
     // interaction expired before we could respond (usually the bot was briefly
     // busy) or was double-delivered. Nothing to reply to and nothing to alert on.
     if (error?.code === 10062 || error?.code === 40060) {
-      console.warn(`Interaction expired before response (${error.code}) — skipping.`);
+      const cmd = interaction.commandName || interaction.customId || 'unknown';
+      const ageMs = interaction.createdTimestamp ? Date.now() - interaction.createdTimestamp : '?';
+      console.warn(`Interaction expired before response (${error.code}) on \`${cmd}\` after ${ageMs}ms${messageScanInProgress?.size ? ' [scan running]' : ''} — skipping.`);
       return;
     }
     console.error('Interaction error:', error);
