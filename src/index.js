@@ -55,7 +55,7 @@ import {
   buildGiveawayLive, buildGiveawayEnded,
   buildCardBattleLive, buildCardBattlePull, buildCardBattleResults, formatGold,
   buildStoreListed, buildStoreList,
-  buildAdminPanel, buildAdminPickChannel, buildAdminPickRole, ADMIN_SETTINGS_LIST,
+  buildAdminPanel, buildAdminPickChannel, buildAdminPickRole, buildAdminPickRoles, ADMIN_SETTINGS_LIST,
   buildShotCallerPanel,
 } from './components.js';
 
@@ -344,6 +344,66 @@ function getMaxDaily(guildId) {
 
 function getMaxOpen(guildId) {
   return parseInt(cfg(guildId, 'max_open', 'MAX_OPEN_PREDICTIONS') || '5', 10);
+}
+
+// ── Prediction eligibility gates (admin-configurable) ────────
+// All bypassed for admins (see predictionMemberGateError / isAdmin).
+function getPredictRequiredRoles(guildId) {
+  const raw = getConfig(guildId, 'predict_required_roles');
+  return raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : [];
+}
+function getPredictMinMessages(guildId) {
+  return parseInt(getConfig(guildId, 'predict_min_messages') || '0', 10) || 0;
+}
+function getPredictMinAccountAgeDays(guildId) {
+  return parseInt(getConfig(guildId, 'predict_min_account_age') || '0', 10) || 0;
+}
+// "Current month only" defaults ON (the feature is a hard requirement); admins
+// can flip it off from the panel.
+function getPredictCurrentMonthOnly(guildId) {
+  const v = getConfig(guildId, 'predict_current_month_only');
+  return v == null ? true : (v === '1' || v === 'true');
+}
+
+// Member-based eligibility (role / message count / account age). Returns an error
+// message to show the member, or null when they may predict. Admins always pass.
+function predictionMemberGateError(interaction) {
+  const member = interaction.member;
+  if (!member || isAdmin(member)) return null;
+  const guildId = interaction.guildId;
+
+  const roles = getPredictRequiredRoles(guildId);
+  if (roles.length && !roles.some(r => member.roles.cache.has(r))) {
+    return `🚫 You need ${roles.map(r => `<@&${r}>`).join(' or ')} to make predictions.`;
+  }
+
+  const minMsg = getPredictMinMessages(guildId);
+  if (minMsg > 0) {
+    const count = getMessageActivity(guildId, member.id)?.message_count || 0;
+    if (count < minMsg) {
+      return `🚫 You need at least **${minMsg}** messages in this server to make predictions — you have **${count}**. Keep chatting and come back.`;
+    }
+  }
+
+  const minAgeDays = getPredictMinAccountAgeDays(guildId);
+  if (minAgeDays > 0) {
+    const ageDays = Math.floor((Date.now() - interaction.user.createdTimestamp) / 86_400_000);
+    if (ageDays < minAgeDays) {
+      return `🚫 Your Discord account must be at least **${minAgeDays}** days old to make predictions — yours is **${ageDays}** day${ageDays === 1 ? '' : 's'} old.`;
+    }
+  }
+  return null;
+}
+
+// True if an event resolves in a LATER calendar month than now (UTC). Cards in
+// the current month (or already past — those are closed elsewhere) are allowed.
+function resolvesAfterThisMonth(eventDateIso) {
+  if (!eventDateIso) return false; // unknown date — don't block (submit backstop covers open/closed)
+  const d = new Date(eventDateIso);
+  if (Number.isNaN(d.getTime())) return false;
+  const now = new Date();
+  const monthIdx = (y, m) => y * 12 + m;
+  return monthIdx(d.getUTCFullYear(), d.getUTCMonth()) > monthIdx(now.getUTCFullYear(), now.getUTCMonth());
 }
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -704,6 +764,11 @@ async function showPredictModal(interaction, { presetCardId = null, presetCardNa
   if (!profile) {
     // Show profile-link modal first — prediction modal follows after submit
     return showLinkProfileModal(interaction);
+  }
+
+  const gateErr = predictionMemberGateError(interaction);
+  if (gateErr) {
+    return interaction.reply({ content: gateErr, flags: ['Ephemeral'], allowedMentions: { parse: [] } });
   }
 
   const maxDaily = getMaxDaily(interaction.guildId);
@@ -2129,7 +2194,12 @@ async function handleCardPicker(interaction) {
   const cards = await getPredictableCards(profile.wallet_address);
   // Hide cards that already have an open prediction (one per card, globally) —
   // this is the "no backtracking" win: you only see cards you can actually post.
-  const available = cards.filter(c => !hasUnresolvedPredictionForCard(c.id));
+  // Also hide later-month cards when the current-month-only gate is on (admins
+  // still see everything — they bypass the gate).
+  const monthGated = getPredictCurrentMonthOnly(interaction.guildId) && !isAdmin(interaction.member);
+  const available = cards.filter(c =>
+    !hasUnresolvedPredictionForCard(c.id)
+    && !(monthGated && resolvesAfterThisMonth(c.eventDate)));
 
   if (available.length === 0) {
     cardPickerCache.delete(interaction.user.id);
@@ -2318,6 +2388,12 @@ async function handlePredictUrlModalSubmit(interaction) {
 
   await interaction.deferReply({ flags: ['Ephemeral'] });
 
+  // Member eligibility (role / messages / account age) — admins bypass.
+  const gateErr = predictionMemberGateError(interaction);
+  if (gateErr) {
+    return interaction.editReply({ content: gateErr, allowedMentions: { parse: [] } });
+  }
+
   // Fail fast on the daily/open caps before anything else.
   const maxDaily = getMaxDaily(interaction.guildId);
   if (countUserDailyPredictions(interaction.user.id) >= maxDaily) {
@@ -2351,6 +2427,10 @@ async function handlePredictUrlModalSubmit(interaction) {
   // means the deadline hit, even if the calendar date alone looks fine.
   if (!isCardStillOpen(details)) {
     return interaction.editReply({ content: `❌ This card's prediction window has closed — its event is past the open phase${deadline ? ` (deadline **${deadline}**)` : ''}. You can't predict on it — pick another card.` });
+  }
+  // Current-month-only gate (admins bypass): block cards resolving in a later month.
+  if (getPredictCurrentMonthOnly(interaction.guildId) && !isAdmin(interaction.member) && resolvesAfterThisMonth(details.eventDate)) {
+    return interaction.editReply({ content: `❌ You can only predict on cards resolving **this month**. This card resolves later${deadline ? ` (**${deadline}**)` : ''} — pick a current-month card.` });
   }
 
   // All good — show the card with a "Predict" button (reuses the My Cards detail
@@ -3439,6 +3519,15 @@ async function handlePredictModalSubmit(interaction) {
     });
   }
 
+  // Current-month-only gate (admins bypass) — authoritative backstop for every
+  // submit path. Only enforced when we have the event date.
+  if (getPredictCurrentMonthOnly(guildId) && !isAdmin(interaction.member)
+      && cardDetailsForCheck && resolvesAfterThisMonth(cardDetailsForCheck.eventDate)) {
+    return interaction.editReply({
+      content: `❌ You can only predict on cards resolving **this month**. This card resolves later${deadlineFormatted && deadlineFormatted !== 'TBD' ? ` (**${deadlineFormatted}**)` : ''} — pick a current-month card.`,
+    });
+  }
+
   // Check for duplicate — reject if anyone has an unresolved prediction for the same card
   if (cardId) {
     const existing = hasUnresolvedPredictionForCard(cardId);
@@ -3452,6 +3541,10 @@ async function handlePredictModalSubmit(interaction) {
   // modals while under the cap and submit them all — only this check, right
   // before createPrediction, is authoritative (the modal-open check is just a
   // fast UX bail-out).
+  const gateErr = predictionMemberGateError(interaction);
+  if (gateErr) {
+    return interaction.editReply({ content: gateErr, allowedMentions: { parse: [] } });
+  }
   const maxDaily = getMaxDaily(guildId);
   if (countUserDailyPredictions(interaction.user.id) >= maxDaily) {
     return interaction.editReply({ content: `❌ You've reached the daily limit of **${maxDaily}** predictions. Try again tomorrow.` });
@@ -5682,6 +5775,12 @@ function gatherAdminCfg(guildId) {
     maxOpen: getMaxOpen(guildId),
     categories: getCategoryList(guildId),
     token: { set: !!token, expiresInMin },
+    predictGates: {
+      roles: getPredictRequiredRoles(guildId),
+      minMessages: getPredictMinMessages(guildId),
+      minAccountAge: getPredictMinAccountAgeDays(guildId),
+      currentMonthOnly: getPredictCurrentMonthOnly(guildId),
+    },
   };
 }
 
@@ -5746,17 +5845,30 @@ async function handleAdminConfigure(interaction) {
 
   if (setting.kind === 'channel') return interaction.update(buildAdminPickChannel(setting));
   if (setting.kind === 'role') return interaction.update(buildAdminPickRole());
+  if (setting.kind === 'roles') return interaction.update(buildAdminPickRoles(setting));
   if (setting.kind === 'owner') {
     setConfig(interaction.guildId, 'owner_id', interaction.user.id);
     return interaction.update(buildAdminPanel(gatherAdminCfg(interaction.guildId)));
   }
+  if (setting.kind === 'bool') {
+    // Toggle immediately and re-render. Only current-month-only uses this today.
+    const cur = getPredictCurrentMonthOnly(interaction.guildId);
+    setConfig(interaction.guildId, setting.key, cur ? '0' : '1');
+    return interaction.update(buildAdminPanel(gatherAdminCfg(interaction.guildId)));
+  }
   if (setting.kind === 'int') {
-    const current = setting.key === 'max_daily' ? getMaxDaily(interaction.guildId) : getMaxOpen(interaction.guildId);
-    const modal = new ModalBuilder().setCustomId(`admin_limit:${setting.key}`).setTitle(setting.label);
+    const currentByKey = {
+      max_daily: getMaxDaily(interaction.guildId),
+      max_open: getMaxOpen(interaction.guildId),
+      predict_min_messages: getPredictMinMessages(interaction.guildId),
+      predict_min_account_age: getPredictMinAccountAgeDays(interaction.guildId),
+    };
+    const current = currentByKey[setting.key] ?? 0;
+    const modal = new ModalBuilder().setCustomId(`admin_limit:${setting.key}`).setTitle(setting.label.slice(0, 45));
     modal.addComponents(new ActionRowBuilder().addComponents(
-      new TextInputBuilder().setCustomId('value').setLabel(setting.label)
+      new TextInputBuilder().setCustomId('value').setLabel(setting.label.slice(0, 45))
         .setPlaceholder(String(current)).setValue(String(current))
-        .setStyle(TextInputStyle.Short).setMaxLength(3).setRequired(true)));
+        .setStyle(TextInputStyle.Short).setMaxLength(6).setRequired(true)));
     return interaction.showModal(modal);
   }
   if (setting.kind === 'token') {
@@ -5784,12 +5896,27 @@ async function handleAdminSetRole(interaction) {
   return interaction.update(buildAdminPanel(gatherAdminCfg(interaction.guildId)));
 }
 
+// Multi-role setting (e.g. predict_required_roles). Empty selection = clear.
+async function handleAdminSetRoles(interaction) {
+  if (!isAdmin(interaction.member)) return interaction.reply({ content: '❌ Admins only.', flags: ['Ephemeral'] });
+  const key = interaction.customId.split(':')[1];
+  if (key) setConfig(interaction.guildId, key, (interaction.values || []).join(','));
+  return interaction.update(buildAdminPanel(gatherAdminCfg(interaction.guildId)));
+}
+
+// Numeric settings. Caps/floors per key — prediction gates allow 0 (= disabled).
+const ADMIN_INT_LIMITS = {
+  max_daily: [1, 20],
+  max_open: [1, 50],
+  predict_min_messages: [0, 100000],
+  predict_min_account_age: [0, 3650],
+};
 async function handleAdminLimitModal(interaction) {
   const key = interaction.customId.split(':')[1];
-  const max = key === 'max_daily' ? 20 : 50;
+  const [min, max] = ADMIN_INT_LIMITS[key] || [0, 100000];
   const val = parseInt(interaction.fields.getTextInputValue('value'), 10);
-  if (!Number.isInteger(val) || val < 1 || val > max) {
-    return interaction.reply({ content: `❌ Enter a whole number between 1 and ${max}.`, flags: ['Ephemeral'] });
+  if (!Number.isInteger(val) || val < min || val > max) {
+    return interaction.reply({ content: `❌ Enter a whole number between ${min} and ${max}.`, flags: ['Ephemeral'] });
   }
   setConfig(interaction.guildId, key, val);
   return interaction.update(buildAdminPanel(gatherAdminCfg(interaction.guildId)));
@@ -5965,6 +6092,9 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isRoleSelectMenu?.()) {
       if (interaction.customId === 'admin_setrole') {
         return await handleAdminSetRole(interaction);
+      }
+      if (interaction.customId.startsWith('admin_setroles:')) {
+        return await handleAdminSetRoles(interaction);
       }
       if (interaction.customId.startsWith('leaderboard_role_select:')) {
         const monthKey = interaction.customId.slice('leaderboard_role_select:'.length);
