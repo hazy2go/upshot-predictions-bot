@@ -573,6 +573,17 @@ export const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName('scan-messages')
+    .setDescription('Backfill member message counts from server history (for the min-messages gate) (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addIntegerOption(opt =>
+      opt.setName('days')
+        .setDescription('How many days of history to scan (0 = as far back as possible). Default 90.')
+        .setMinValue(0)
+        .setMaxValue(3650)
+    ),
+
+  new SlashCommandBuilder()
     .setName('cardbattle')
     .setDescription('Drop a "highest card wins" battle — members pull a random gold card (admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
