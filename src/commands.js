@@ -426,6 +426,18 @@ export const commands = [
       opt.setName('require-prediction')
         .setDescription('Only members who have made at least one prediction can enter')
     )
+    .addIntegerOption(opt =>
+      opt.setName('min-account-age')
+        .setDescription('Minimum Discord account age in days to enter (e.g. 30)')
+        .setMinValue(0)
+        .setMaxValue(3650)
+    )
+    .addIntegerOption(opt =>
+      opt.setName('min-messages')
+        .setDescription('Minimum messages sent in this server to enter (uses the message database)')
+        .setMinValue(0)
+        .setMaxValue(100000)
+    )
     .addStringOption(opt =>
       opt.setName('required-pack')
         .setDescription('Only members holding this pack can enter — pick from the store list')

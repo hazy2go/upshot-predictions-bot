@@ -105,6 +105,8 @@ db.exec(`
     excluded_users  TEXT NOT NULL DEFAULT '[]',        -- JSON: barred discord ids
     require_prediction INTEGER NOT NULL DEFAULT 0,     -- 1 = must have ≥1 prediction ever
     required_pack   TEXT,                              -- entrant must hold this pack (name or id) in their Upshot inventory
+    min_account_age_days INTEGER NOT NULL DEFAULT 0,   -- entrant's Discord account must be ≥ this many days old (0 = off)
+    min_messages    INTEGER NOT NULL DEFAULT 0,        -- entrant must have ≥ this many server messages (0 = off)
     ends_at         TEXT NOT NULL,                     -- ISO timestamp
     status          TEXT NOT NULL DEFAULT 'live',      -- 'live' | 'drawn' | 'cancelled'
     winner_ids      TEXT NOT NULL DEFAULT '[]',        -- JSON: discord ids drawn
@@ -217,6 +219,8 @@ try { db.exec('ALTER TABLE predictions ADD COLUMN ownership_check TEXT'); } catc
 try { db.exec('ALTER TABLE predictions ADD COLUMN community_star_avg REAL'); } catch { /* already exists */ }
 try { db.exec('ALTER TABLE giveaways ADD COLUMN require_prediction INTEGER NOT NULL DEFAULT 0'); } catch { /* already exists / table absent */ }
 try { db.exec('ALTER TABLE giveaways ADD COLUMN required_pack TEXT'); } catch { /* already exists / table absent */ }
+try { db.exec('ALTER TABLE giveaways ADD COLUMN min_account_age_days INTEGER NOT NULL DEFAULT 0'); } catch { /* already exists / table absent */ }
+try { db.exec('ALTER TABLE giveaways ADD COLUMN min_messages INTEGER NOT NULL DEFAULT 0'); } catch { /* already exists / table absent */ }
 try { db.exec('ALTER TABLE card_battles ADD COLUMN ends_at TEXT'); } catch { /* already exists / table absent */ }
 try { db.exec("ALTER TABLE card_battles ADD COLUMN required_roles TEXT NOT NULL DEFAULT '[]'"); } catch { /* already exists / table absent */ }
 try { db.exec("ALTER TABLE card_battles ADD COLUMN excluded_roles TEXT NOT NULL DEFAULT '[]'"); } catch { /* already exists / table absent */ }
@@ -531,15 +535,17 @@ function hydrateGiveaway(row) {
     winner_ids: JSON.parse(row.winner_ids || '[]'),
     require_prediction: !!row.require_prediction,
     required_pack: row.required_pack || null,
+    min_account_age_days: row.min_account_age_days || 0,
+    min_messages: row.min_messages || 0,
   };
 }
 
 export function createGiveaway(g) {
   db.prepare(`
     INSERT INTO giveaways (id, guild_id, channel_id, creator_id, pack_id, pack_name,
-      winners_count, description, required_roles, excluded_roles, excluded_users, require_prediction, required_pack, ends_at)
+      winners_count, description, required_roles, excluded_roles, excluded_users, require_prediction, required_pack, min_account_age_days, min_messages, ends_at)
     VALUES (@id, @guild_id, @channel_id, @creator_id, @pack_id, @pack_name,
-      @winners_count, @description, @required_roles, @excluded_roles, @excluded_users, @require_prediction, @required_pack, @ends_at)
+      @winners_count, @description, @required_roles, @excluded_roles, @excluded_users, @require_prediction, @required_pack, @min_account_age_days, @min_messages, @ends_at)
   `).run({
     id: g.id,
     guild_id: g.guildId,
@@ -554,6 +560,8 @@ export function createGiveaway(g) {
     excluded_users: JSON.stringify(g.excludedUsers || []),
     require_prediction: g.requirePrediction ? 1 : 0,
     required_pack: g.requiredPack || null,
+    min_account_age_days: g.minAccountAgeDays || 0,
+    min_messages: g.minMessages || 0,
     ends_at: g.endsAt,
   });
   return getGiveaway(g.id);

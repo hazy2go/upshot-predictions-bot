@@ -1602,6 +1602,8 @@ async function handleGiveaway(interaction) {
   const excludedRolesRaw = interaction.options.getString('excluded-roles') || '';
   const excludedUsersRaw = interaction.options.getString('excluded-users') || '';
   const requirePrediction = interaction.options.getBoolean('require-prediction') ?? false;
+  const minAccountAgeDays = interaction.options.getInteger('min-account-age') ?? 0;
+  const minMessages = interaction.options.getInteger('min-messages') ?? 0;
   const requiredPack = interaction.options.getString('required-pack')?.trim() || null;
   const targetChannel = interaction.options.getChannel('channel') || interaction.channel;
 
@@ -1664,6 +1666,8 @@ async function handleGiveaway(interaction) {
     excludedUsers,
     requirePrediction,
     requiredPack,
+    minAccountAgeDays,
+    minMessages,
     endsAt,
   });
 
@@ -1727,6 +1731,26 @@ async function handleGiveawayEnter(interaction, giveawayId) {
   }
   if (g.require_prediction && !hasAnyPrediction(userId)) {
     return interaction.editReply({ content: '🚫 This giveaway is for active predictors — make at least one prediction first, then come back and enter.' });
+  }
+
+  // Account age gate — Discord account must be at least N days old.
+  if (g.min_account_age_days > 0) {
+    const ageDays = Math.floor((Date.now() - interaction.user.createdTimestamp) / 86_400_000);
+    if (ageDays < g.min_account_age_days) {
+      return interaction.editReply({
+        content: `🚫 Your Discord account must be at least **${g.min_account_age_days}** days old to enter — yours is **${ageDays}** day${ageDays === 1 ? '' : 's'} old.`,
+      });
+    }
+  }
+
+  // Message-count gate — entrant must have sent at least N messages in this server.
+  if (g.min_messages > 0) {
+    const count = getMessageActivity(interaction.guildId, userId)?.message_count || 0;
+    if (count < g.min_messages) {
+      return interaction.editReply({
+        content: `🚫 You need at least **${g.min_messages}** messages in this server to enter — you have **${count}**. Keep chatting and come back.`,
+      });
+    }
   }
 
   // Wallet connection is mandatory — the pack is auto-sent there on draw (and
