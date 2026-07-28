@@ -1417,8 +1417,7 @@ async function handleSendPack(interaction) {
   if (packs.length === 0) {
     return interaction.editReply({ content: 'You have no unopened packs to send (or the Upshot API is unreachable).' });
   }
-  const match = packs.find(p => p.name.toLowerCase() === packQuery.toLowerCase())
-    || packs.find(p => p.packId === packQuery);
+  const match = resolveUserPack(packs, packQuery);
   if (!match) {
     const list = packs.map(p => `• ${p.name} ×${p.quantity}`).join('\n');
     return interaction.editReply({ content: `❌ You don't have a pack named **${packQuery}**. Your packs:\n${list}` });
@@ -1581,6 +1580,22 @@ function newGiveawayId() {
 
 const DEFAULT_GIVEAWAY_BLURB = '🎉 We\'re giving away a pack! Hit **Enter** below for your shot. A winner is drawn when the timer ends and the pack is sent straight to their Upshot wallet.';
 
+// Resolve a /giveaway or /sendpack `pack` option to a pack in the user's
+// inventory. Autocomplete submits the packId as the value, but tolerate the
+// display label "Name (×N)" arriving instead (suggestion not clicked, or an
+// older client), by stripping a trailing "(×N)"/"×N" quantity suffix and
+// matching on name.
+function resolveUserPack(packs, query) {
+  const raw = (query || '').trim();
+  const stripped = raw.replace(/\s*\(?\s*[x×]\s*\d+\s*\)?\s*$/i, '').trim();
+  const lc = stripped.toLowerCase();
+  return packs.find(p => p.packId === raw)
+    || packs.find(p => p.name?.toLowerCase() === raw.toLowerCase())
+    || packs.find(p => p.name?.toLowerCase() === lc)
+    || (lc ? packs.find(p => p.name?.toLowerCase().includes(lc)) : null)
+    || null;
+}
+
 // True if a getUserPacks() list contains the admin-specified required pack,
 // matched case-insensitively by name or exactly by pack id. No requirement → true.
 function holdsRequiredPack(packs, required) {
@@ -1635,8 +1650,7 @@ async function handleGiveaway(interaction) {
   if (packs.length === 0) {
     return interaction.editReply({ content: 'You have no unopened packs to give away (or the Upshot API is unreachable).' });
   }
-  const match = packs.find(p => p.name.toLowerCase() === packQuery.toLowerCase())
-    || packs.find(p => p.packId === packQuery);
+  const match = resolveUserPack(packs, packQuery);
   if (!match) {
     const list = packs.map(p => `• ${p.name} ×${p.quantity}`).join('\n');
     return interaction.editReply({ content: `❌ You don't have a pack named **${packQuery}**. Your packs:\n${list}` });
