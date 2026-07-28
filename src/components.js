@@ -455,6 +455,12 @@ function giveawayRules(g) {
   if (g.require_prediction) {
     lines.push('📈 **Must have made at least one prediction**');
   }
+  if (g.min_account_age_days) {
+    lines.push(`🕰 **Account age:** at least ${g.min_account_age_days} day${g.min_account_age_days === 1 ? '' : 's'} old`);
+  }
+  if (g.min_messages) {
+    lines.push(`💬 **Messages in server:** at least ${g.min_messages}`);
+  }
   if (g.required_pack) {
     lines.push(`🎴 **Must hold pack:** ${g.required_pack}`);
   }
