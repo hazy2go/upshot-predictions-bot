@@ -590,6 +590,34 @@ export function getDueGiveaways(nowIso) {
     .all(nowIso).map(hydrateGiveaway);
 }
 
+// All still-running giveaways in a guild, soonest-ending first — powers the
+// /giveaway-edit picker.
+export function getLiveGiveaways(guildId) {
+  return db.prepare("SELECT * FROM giveaways WHERE guild_id = ? AND status = 'live' ORDER BY ends_at ASC")
+    .all(guildId).map(hydrateGiveaway);
+}
+
+// Patch selected columns on a giveaway. Only whitelisted keys are written; array
+// fields (required_roles/excluded_roles/excluded_users) are JSON-encoded here.
+export function updateGiveawayFields(id, patch) {
+  const JSON_COLS = new Set(['required_roles', 'excluded_roles', 'excluded_users']);
+  const ALLOWED = new Set([
+    'description', 'winners_count', 'ends_at', 'require_prediction', 'required_pack',
+    'min_account_age_days', 'min_messages', ...JSON_COLS,
+  ]);
+  const sets = [];
+  const params = {};
+  for (const [key, val] of Object.entries(patch)) {
+    if (!ALLOWED.has(key) || val === undefined) continue;
+    sets.push(`${key} = @${key}`);
+    params[key] = JSON_COLS.has(key) ? JSON.stringify(val || []) : val;
+  }
+  if (!sets.length) return getGiveaway(id);
+  params.id = id;
+  db.prepare(`UPDATE giveaways SET ${sets.join(', ')} WHERE id = @id`).run(params);
+  return getGiveaway(id);
+}
+
 export function addGiveawayEntry(giveawayId, discordId) {
   const res = db.prepare(
     'INSERT OR IGNORE INTO giveaway_entries (giveaway_id, discord_id) VALUES (?, ?)'

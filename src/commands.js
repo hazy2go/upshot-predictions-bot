@@ -450,6 +450,72 @@ export const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName('giveaway-edit')
+    .setDescription('Edit or control a live giveaway — change settings, end early, or cancel (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption(opt =>
+      opt.setName('giveaway')
+        .setDescription('Which live giveaway to edit')
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('action')
+        .setDescription('End it now (draw winners) or cancel it (no draw). Leave blank to just edit settings.')
+        .addChoices(
+          { name: 'End now — draw winner(s) immediately', value: 'end-now' },
+          { name: 'Cancel — close with no winner', value: 'cancel' },
+        )
+    )
+    .addStringOption(opt =>
+      opt.setName('duration')
+        .setDescription('New time from now, e.g. 30m, 2h, 1d — resets the end time (min 1m, max 14d)')
+    )
+    .addIntegerOption(opt =>
+      opt.setName('winners')
+        .setDescription('New number of winners')
+        .setMinValue(1)
+        .setMaxValue(50)
+    )
+    .addStringOption(opt =>
+      opt.setName('description')
+        .setDescription('New blurb shown on the giveaway')
+    )
+    .addStringOption(opt =>
+      opt.setName('required-roles')
+        .setDescription('Role(s) an entrant MUST have one of — or "none" to clear')
+    )
+    .addStringOption(opt =>
+      opt.setName('excluded-roles')
+        .setDescription('Role(s) barred from entering — or "none" to clear')
+    )
+    .addStringOption(opt =>
+      opt.setName('excluded-users')
+        .setDescription('Member(s) to exclude — or "none" to clear')
+    )
+    .addBooleanOption(opt =>
+      opt.setName('require-prediction')
+        .setDescription('Only members with at least one prediction can enter')
+    )
+    .addIntegerOption(opt =>
+      opt.setName('min-account-age')
+        .setDescription('Minimum Discord account age in days (0 to disable)')
+        .setMinValue(0)
+        .setMaxValue(3650)
+    )
+    .addIntegerOption(opt =>
+      opt.setName('min-messages')
+        .setDescription('Minimum messages in this server (0 to disable)')
+        .setMinValue(0)
+        .setMaxValue(100000)
+    )
+    .addStringOption(opt =>
+      opt.setName('required-pack')
+        .setDescription('Only members holding this pack can enter — or "none" to clear')
+        .setAutocomplete(true)
+    ),
+
+  new SlashCommandBuilder()
     .setName('lookup-wallets')
     .setDescription('Upload a .txt of Discord names → CSV of their wallet + Upshot profile (admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)

@@ -32,7 +32,8 @@ import {
   getRaffleWatchState, setRaffleWatchState,
   getStoreWatchState, setStoreWatchState,
   createGiveaway, getGiveaway, setGiveawayMessageId, setGiveawayStatus, setGiveawayWinners,
-  getDueGiveaways, addGiveawayEntry, getGiveawayEntries, countGiveawayEntries,
+  getDueGiveaways, getLiveGiveaways, updateGiveawayFields,
+  addGiveawayEntry, getGiveawayEntries, countGiveawayEntries,
   createCardBattle, getCardBattle, setCardBattleMessageId, setCardBattleStatus,
   countCardBattlePulls, getCardBattlePulls, pullCardFromBattle, getDueCardBattles,
   hasAnyPrediction,
@@ -52,7 +53,7 @@ import {
   buildCardPicker, buildCardPickerEmpty, buildCardDetail,
   buildContestLive, buildContestResults, buildContestList,
   buildRaffleLive, buildRaffleWinner, buildRaffleList,
-  buildGiveawayLive, buildGiveawayEnded,
+  buildGiveawayLive, buildGiveawayEnded, buildGiveawayCancelled,
   buildCardBattleLive, buildCardBattlePull, buildCardBattleResults, formatGold,
   buildStoreListed, buildStoreList,
   buildAdminPanel, buildAdminPickChannel, buildAdminPickRole, buildAdminPickRoles, ADMIN_SETTINGS_LIST,
@@ -1900,6 +1901,141 @@ async function drawGiveaway(g) {
   } finally {
     giveawaysDrawing.delete(g.id);
   }
+}
+
+// Compact "ends in" label for the /giveaway-edit picker.
+function fmtDurationShort(ms) {
+  if (ms <= 0) return 'now';
+  const mins = Math.round(ms / 60000);
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 48) return `${hrs}h`;
+  return `${Math.round(hrs / 24)}d`;
+}
+
+// Autocomplete for /giveaway-edit: the `giveaway` option lists live giveaways in
+// this guild; the `required-pack` option reuses the store-pack autocomplete.
+async function handleGiveawayEditAutocomplete(interaction) {
+  try {
+    const focused = interaction.options.getFocused(true);
+    if (focused.name === 'required-pack') return await handleRequiredPackAutocomplete(interaction);
+    const q = (focused.value || '').toLowerCase();
+    const choices = getLiveGiveaways(interaction.guildId)
+      .filter(g => !q || g.pack_name.toLowerCase().includes(q))
+      .slice(0, 25)
+      .map(g => {
+        const count = countGiveawayEntries(g.id);
+        const endsIn = fmtDurationShort(Date.parse(g.ends_at) - Date.now());
+        const label = `${g.pack_name} · ${count} entrant${count === 1 ? '' : 's'} · ends in ${endsIn}`.slice(0, 100);
+        return { name: label, value: g.id };
+      });
+    return await interaction.respond(choices);
+  } catch {
+    try { return await interaction.respond([]); } catch { /* interaction expired */ }
+  }
+}
+
+async function handleGiveawayEdit(interaction) {
+  if (!canSendPack(interaction)) {
+    return interaction.reply({ content: '❌ Only the configured pack owner can manage giveaways.', flags: ['Ephemeral'] });
+  }
+  const id = interaction.options.getString('giveaway', true);
+  const action = interaction.options.getString('action');
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  const g = getGiveaway(id);
+  if (!g || g.guild_id !== interaction.guildId) {
+    return interaction.editReply({ content: '❌ Couldn\'t find that giveaway. Pick one from the list.' });
+  }
+  if (g.status !== 'live') {
+    return interaction.editReply({ content: `❌ That giveaway is already **${g.status}** — nothing to change.` });
+  }
+
+  // Control actions take precedence over field edits.
+  if (action === 'cancel') {
+    setGiveawayStatus(id, 'cancelled');
+    const channel = await safeGetChannel(g.channel_id);
+    if (channel && g.message_id) {
+      const msg = await safeGetMessage(channel, g.message_id);
+      if (msg) await msg.edit({ ...buildGiveawayCancelled(g), allowedMentions: { parse: [] } }).catch(() => {});
+    }
+    return interaction.editReply({ content: `🚫 Cancelled the **${g.pack_name}** giveaway — no winner drawn.` });
+  }
+  if (action === 'end-now') {
+    await interaction.editReply({ content: `⏳ Ending the **${g.pack_name}** giveaway now and drawing the winner(s)…` });
+    await drawGiveaway(g);
+    return interaction.editReply({ content: `✅ Drew the **${g.pack_name}** giveaway early — see the channel and admin log for the result.` });
+  }
+
+  // Otherwise: apply field edits. Only options that were actually passed change.
+  const patch = {};
+  const changes = [];
+  const CLEAR = new Set(['none', 'clear', 'off', '-']);
+  const isClear = s => CLEAR.has(s.trim().toLowerCase());
+  const parseRoles = raw => [...new Set([...raw.matchAll(/<@&(\d+)>/g)].map(m => m[1]))];
+  const parseUsers = raw => [...new Set([...raw.matchAll(/<@!?(\d+)>/g)].map(m => m[1]))];
+
+  const durationRaw = interaction.options.getString('duration');
+  if (durationRaw != null) {
+    const durationMs = parseDuration(durationRaw);
+    if (!durationMs) return interaction.editReply({ content: '❌ Couldn\'t read that duration. Use e.g. `30m`, `2h`, `1d`.' });
+    if (durationMs < GIVEAWAY_MIN_MS || durationMs > GIVEAWAY_MAX_MS) {
+      return interaction.editReply({ content: '❌ Duration must be between **1 minute** and **14 days**.' });
+    }
+    patch.ends_at = new Date(Date.now() + durationMs).toISOString();
+    changes.push(`⏱ now ends <t:${Math.floor(Date.parse(patch.ends_at) / 1000)}:R>`);
+  }
+
+  const winners = interaction.options.getInteger('winners');
+  if (winners != null) { patch.winners_count = winners; changes.push(`🏆 winners → ${winners}`); }
+
+  const description = interaction.options.getString('description');
+  if (description != null) { patch.description = description.trim() || DEFAULT_GIVEAWAY_BLURB; changes.push('📝 description updated'); }
+
+  const requirePrediction = interaction.options.getBoolean('require-prediction');
+  if (requirePrediction != null) { patch.require_prediction = requirePrediction ? 1 : 0; changes.push(`📈 require prediction → ${requirePrediction ? 'on' : 'off'}`); }
+
+  const minAge = interaction.options.getInteger('min-account-age');
+  if (minAge != null) { patch.min_account_age_days = minAge; changes.push(minAge ? `🕰 min account age → ${minAge}d` : '🕰 account-age gate off'); }
+
+  const minMsg = interaction.options.getInteger('min-messages');
+  if (minMsg != null) { patch.min_messages = minMsg; changes.push(minMsg ? `💬 min messages → ${minMsg}` : '💬 message gate off'); }
+
+  const rRoles = interaction.options.getString('required-roles');
+  if (rRoles != null) {
+    patch.required_roles = isClear(rRoles) ? [] : parseRoles(rRoles);
+    changes.push(patch.required_roles.length
+      ? `✅ required roles → ${patch.required_roles.map(r => `<@&${r}>`).join(' or ')}`
+      : '✅ required roles cleared');
+  }
+  const xRoles = interaction.options.getString('excluded-roles');
+  if (xRoles != null) {
+    patch.excluded_roles = isClear(xRoles) ? [] : parseRoles(xRoles);
+    changes.push(patch.excluded_roles.length ? '🚫 excluded roles updated' : '🚫 excluded roles cleared');
+  }
+  const xUsers = interaction.options.getString('excluded-users');
+  if (xUsers != null) {
+    patch.excluded_users = isClear(xUsers) ? [] : parseUsers(xUsers);
+    changes.push(patch.excluded_users.length ? '🚫 excluded users updated' : '🚫 excluded users cleared');
+  }
+  const rPack = interaction.options.getString('required-pack');
+  if (rPack != null) {
+    patch.required_pack = isClear(rPack) ? null : rPack.trim();
+    changes.push(patch.required_pack ? `🎴 required pack → ${patch.required_pack}` : '🎴 required pack cleared');
+  }
+
+  if (!changes.length) {
+    return interaction.editReply({ content: 'ℹ️ Nothing to change — pass an `action`, or at least one setting to edit.' });
+  }
+
+  const updated = updateGiveawayFields(id, patch);
+  await refreshGiveawayMessage(updated, { force: true });
+
+  return interaction.editReply({
+    content: `✅ Updated the **${updated.pack_name}** giveaway:\n` + changes.map(c => `• ${c}`).join('\n'),
+    allowedMentions: { parse: [] },
+  });
 }
 
 async function runGiveawaySweep() {
@@ -6142,6 +6278,7 @@ client.on(Events.InteractionCreate, async interaction => {
           ? await handleRequiredPackAutocomplete(interaction)
           : await handleSendPackAutocomplete(interaction);
       }
+      if (interaction.commandName === 'giveaway-edit') return await handleGiveawayEditAutocomplete(interaction);
       if (interaction.commandName === 'badge') return await handleBadgeAutocomplete(interaction);
       return;
     }
@@ -6175,6 +6312,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'setup': return await handleSetup(interaction);
         case 'sendpack': return await handleSendPack(interaction);
         case 'giveaway': return await handleGiveaway(interaction);
+        case 'giveaway-edit': return await handleGiveawayEdit(interaction);
         case 'cardbattle': return await handleCardBattle(interaction);
         case 'process-tiers': return await handleProcessTiers(interaction);
         case 'scan-messages': return await handleScanMessages(interaction);
