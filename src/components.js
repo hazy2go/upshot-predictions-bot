@@ -506,6 +506,16 @@ export function buildGiveawayEnded(g, winnerIds = []) {
   return { components: [container(winnerIds.length ? Colors.Hit : Colors.Fail, children)], flags: 1 << 15 };
 }
 
+export function buildGiveawayCancelled(g) {
+  const children = [
+    text('## 🎁 Pack Giveaway — Cancelled'),
+    text(`### ${g.pack_name}`),
+    separator(),
+    text('🚫 This giveaway was cancelled by an admin — no winner was drawn.'),
+  ];
+  return { components: [container(Colors.Fail, children)], flags: 1 << 15 };
+}
+
 // ── Store (packs + bundles) announcements ───────────────────
 //
 // `item` is the normalized shape from api.getStorePacks()/getStoreBundles():
