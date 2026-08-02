@@ -15,7 +15,7 @@ import Database from 'better-sqlite3';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import 'dotenv/config';
-import { sqlTimeToIso } from '../src/referralPush.js';
+import { sqlTimeToIso, normalizePredictionStatus } from '../src/referralPush.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -43,11 +43,21 @@ const links = db.prepare(`
   ORDER BY linked_at ASC
 `).all().map(r => ({ ...r, linkedAt: sqlTimeToIso(r.linkedAt), method: 'pasted' }));
 
+// `status` is normalized to the server's three-value vocabulary in JS rather
+// than as a SQL CASE, so the backfill and the live push share one source of
+// truth (src/referralPush.js) and can never drift apart. Sending the raw
+// column would be a correctness bug: the server reads anything that isn't
+// 'pending'/'deleted' as vetted, so raw 'pending_verification' would count an
+// unreviewed submission toward rewards.
 const predictions = db.prepare(`
-  SELECT id AS predictionId, author_id AS discordId, created_at AS createdAt
+  SELECT id AS predictionId, author_id AS discordId, created_at AS createdAt, status
   FROM predictions
   ORDER BY id ASC
-`).all().map(r => ({ ...r, createdAt: sqlTimeToIso(r.createdAt) }));
+`).all().map(r => ({
+  ...r,
+  createdAt: sqlTimeToIso(r.createdAt),
+  status: normalizePredictionStatus(r.status),
+}));
 
 const withWallet = links.filter(l => l.wallet).length;
 console.log(`DB: ${DB_PATH}`);
