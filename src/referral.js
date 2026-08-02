@@ -1,10 +1,14 @@
 // ── Referral integration ────────────────────────────────────
 //
-// Talks to the standalone upshot-referral web server, which owns the
-// referral DB and the public leaderboard page. This module is the Discord
-// half: it tracks which invite a new member used, posts a Verify panel in
-// the configured channel, and credits referrals once the new member has
-// (a) linked their Upshot profile in this bot and (b) owns ≥1 Pack.
+// Talks to the standalone upshot-referral web server, which owns the referral
+// DB and the public invites site. This module is the Discord half: it tracks
+// which invite a new member used and reports it via /api/referral-used.
+//
+// As of the v2.1 cutover (2026-08) the bot does NOT credit referrals. The
+// server's sweeper does that automatically once a referee qualifies (linked
+// profile + pack + activity), so the old "tap Verify" panel is now just a
+// signpost to the invites site. Qualification data reaches the server through
+// the pushes in referralPush.js, not through this file.
 //
 // Env vars consumed (all optional — missing config disables the feature):
 //   REFERRAL_API_URL          e.g. http://127.0.0.1:3002
@@ -16,46 +20,26 @@ import {
   Events, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder,
 } from 'discord.js';
 
-import { getUpshotProfile } from './database.js';
-import { extractWallet } from './api.js';
+// NOTE: the pack-ownership check that used to live here is gone with the v1
+// verify flow — the referral server's sweeper now evaluates that itself from
+// the wallet the bot pushes via /api/bot/wallet-linked.
 
-const UPSHOT_API_BASE = 'https://api-mainnet.upshotcards.net/api/v1';
-
-// Returns { current, history, error } for a wallet's pack balances.
-//   current  — sum of currently-owned (quantity > 0) packs
-//   history  — total distinct pack rows ever recorded (qty > 0 OR qty = 0).
-//              A non-zero history with current=0 means the wallet HAS held
-//              packs before — they bought one and opened/transferred it.
-//   error    — true if the API call failed (treat as unknown, ask user to retry)
-async function getPackSignal(walletAddress) {
-  try {
-    const res = await fetch(`${UPSHOT_API_BASE}/packs/balances/${walletAddress}`, {
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!res.ok) return { current: 0, history: 0, error: true };
-    const json = await res.json();
-    const data = json?.data || {};
-    let current = 0;
-    let history = 0;
-    for (const entry of Object.values(data)) {
-      history++;
-      const q = parseInt(entry?.quantity ?? 0, 10);
-      if (q > 0) current += q;
-    }
-    return { current, history, error: false };
-  } catch (err) {
-    console.error(`[referral] getPackSignal(${walletAddress}) failed:`, err.message);
-    return { current: 0, history: 0, error: true };
-  }
-}
-
+// Kept only so stale panels still in the channel (or pinned elsewhere) route to
+// the "moved" notice instead of dead-ending. Nothing posts this button anymore.
 const VERIFY_BUTTON_ID = 'upshot_verify_account';
-const VERIFY_COOLDOWN_MS = 10_000;
-const PANEL_TITLE = 'Verify Your Upshot Profile';
+
+const PANEL_TITLE = 'Referrals Are Automatic Now';
+// v1's title. postVerifyPanel matches on BOTH so the existing "press Verify"
+// panel gets edited in place at boot rather than left sitting above a new one.
+const LEGACY_PANEL_TITLE = 'Verify Your Upshot Profile';
+
+// Public invites site. REFERRAL_API_URL happens to be the same public origin
+// today, but it's the API base by contract and could be an internal address —
+// a Discord link button with a non-https URL makes the whole panel post fail,
+// so fall back to the known public site rather than risking that.
+const DEFAULT_INVITES_URL = 'https://upshotinvites.hazypi.xyz';
 
 const cachedInvites = new Map();          // code -> uses
-const verifyButtonCooldowns = new Map();  // userId -> timestamp
-const verifyInProgress = new Set();       // userId
 
 function env(key) {
   const v = process.env[key];
@@ -98,21 +82,31 @@ function buildVerifyEmbed() {
     .setTitle(PANEL_TITLE)
     .setDescription(
       '**Welcome to the Upshot community!**\n\n' +
-      'To get your referral credited, you need to:\n' +
-      '**1.** Link your Upshot profile with this bot — open the **Upshot Predictions** panel and tap **📇 My Cards**. It\'ll walk you through pasting your profile URL.\n' +
+      'There\'s no Verify button anymore — referrals are credited **automatically**.\n\n' +
+      'To qualify, just:\n' +
+      '**1.** Link your Upshot profile — either on the invites site below, or right here by tapping **📇 My Cards** on the **Upshot Predictions** panel.\n' +
       '**2.** Own **at least one Pack** on Upshot. Grab one at [upshot.cards](https://upshot.cards) — you don\'t have to open it, you just need to own it.\n\n' +
-      'When both are done, press **Verify** below.'
+      'That\'s it. You\'ll be credited within ~15 minutes of qualifying, and you can track your progress — plus grab your own invite link to start referring — on the site.'
     )
     .setColor(0xFF6B35);
+}
+
+// The public invites site, for the panel's link button and the "moved" notice.
+function getInvitesSiteUrl() {
+  const explicit = env('REFERRAL_BASE_URL');
+  if (explicit && /^https:\/\//i.test(explicit)) return explicit;
+  const api = getReferralApiUrl();
+  if (api && /^https:\/\//i.test(api)) return api;
+  return DEFAULT_INVITES_URL;
 }
 
 function buildVerifyRow() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(VERIFY_BUTTON_ID)
-      .setLabel('Verify')
-      .setStyle(ButtonStyle.Primary)
-      .setEmoji('🃏')
+      .setLabel('Open the invites site')
+      .setStyle(ButtonStyle.Link)
+      .setURL(getInvitesSiteUrl())
+      .setEmoji('🔗')
   );
 }
 
@@ -128,10 +122,13 @@ async function postVerifyPanel(client) {
   const row = buildVerifyRow();
   try {
     const messages = await channel.messages.fetch({ limit: 20 });
+    // Match the v1 title too: the old "press Verify" panel must be EDITED into
+    // the new one, not left in the channel above a second post telling people
+    // the opposite.
     const existing = messages.find(m =>
       m.author.id === client.user.id &&
       m.embeds.length > 0 &&
-      m.embeds[0].title === PANEL_TITLE
+      (m.embeds[0].title === PANEL_TITLE || m.embeds[0].title === LEGACY_PANEL_TITLE)
     );
     if (existing) {
       await existing.edit({ embeds: [embed], components: [row] });
@@ -201,139 +198,27 @@ async function onGuildMemberAdd(member) {
   }
 }
 
-// ── Verify button handler ───────────────────────────────────
-
+// ── Stale Verify button ─────────────────────────────────────
+//
+// v1's "tap Verify to get credited" flow is retired: the referral server now
+// credits automatically via its sweeper once the referee qualifies, and
+// POST /api/verify-account no longer credits anything (it answers
+// { verified:false, moved:true }). The bot no longer calls it at all.
+//
+// The button is no longer rendered anywhere, but old panel messages can linger
+// — pinned, in another channel, or if the boot-time panel edit failed — so a
+// press must land somewhere sensible rather than silently failing.
 async function handleVerifyButton(interaction) {
   if (!interaction.isButton() || interaction.customId !== VERIFY_BUTTON_ID) return false;
-  if (!isEnabled()) {
-    await interaction.reply({ content: 'Referral verification isn\'t configured.', flags: 64 }).catch(() => {});
-    return true;
-  }
 
-  const userId = interaction.user.id;
-
-  if (verifyInProgress.has(userId)) {
-    await interaction.reply({
-      content: 'Your verification is already being processed, please wait.',
-      flags: 64,
-    }).catch(() => {});
-    return true;
-  }
-
-  const lastPress = verifyButtonCooldowns.get(userId);
-  if (lastPress && Date.now() - lastPress < VERIFY_COOLDOWN_MS) {
-    const remaining = Math.ceil((VERIFY_COOLDOWN_MS - (Date.now() - lastPress)) / 1000);
-    await interaction.reply({
-      content: `Please wait ${remaining} seconds before trying again.`,
-      flags: 64,
-    }).catch(() => {});
-    return true;
-  }
-  verifyButtonCooldowns.set(userId, Date.now());
-  verifyInProgress.add(userId);
-
-  try {
-    await interaction.deferReply({ flags: 64 });
-  } catch {
-    verifyInProgress.delete(userId);
-    return true;
-  }
-
-  try {
-    // 1. Pending-referral check
-    const pendingRes = await apiFetch(`/api/check-pending/${userId}`);
-    if (pendingRes?.networkError) {
-      await interaction.editReply({ content: '⚠️ The referral service is offline right now. An admin needs to start it — try again in a minute.' });
-      return true;
-    }
-    if (!pendingRes || !pendingRes.ok) {
-      console.error('[referral] check-pending failed:', pendingRes?.status);
-      await interaction.editReply({ content: '⚠️ Something went wrong. Please try again later.' });
-      return true;
-    }
-    const pendingData = await pendingRes.json();
-    if (!pendingData.hasPending) {
-      await interaction.editReply({
-        content: '📋 **No pending referral found.** You either weren\'t invited via a tracked link, or your referral has already been credited.',
-      });
-      return true;
-    }
-
-    // 2. Linked-profile check (local DB)
-    const profile = getUpshotProfile(userId);
-    if (!profile || !profile.upshot_url) {
-      await interaction.editReply({
-        content: '❌ **Your Upshot profile isn\'t linked yet.**\n\nHead to <#1486279374599618671>, tap **📇 My Cards** on the prediction bot panel, and paste your profile URL from [upshot.cards](https://upshot.cards). Then come back here and press Verify again.',
-      });
-      return true;
-    }
-
-    const wallet = extractWallet(profile.wallet_address) || extractWallet(profile.upshot_url);
-    if (!wallet) {
-      await interaction.editReply({
-        content: '❌ **We couldn\'t read a wallet address from your linked profile.**\n\nRe-link your profile (it should be a `https://upshot.cards/profile/0x…` URL) and try again.',
-      });
-      return true;
-    }
-
-    // 3. Pack ownership / history check (Upshot API).
-    //    A wallet passes if it currently holds >=1 pack OR has ever held one
-    //    (a qty=0 row in /packs/balances still proves prior ownership).
-    const { current, history, error } = await getPackSignal(wallet);
-    if (error) {
-      await interaction.editReply({
-        content: '⚠️ **Couldn\'t reach the Upshot API right now.** Give it a minute and press Verify again.',
-      });
-      return true;
-    }
-    if (history === 0) {
-      await interaction.editReply({
-        content: '❌ **No Packs found on this wallet.**\n\nGrab at least one Pack at [upshot.cards](https://upshot.cards) — you don\'t have to open it, you just need to own it once. Then press Verify again.',
-      });
-      return true;
-    }
-    const packCount = current; // for the success message
-    const packStatusNote = current > 0
-      ? `${current} pack${current === 1 ? '' : 's'} owned`
-      : 'pack history confirmed';
-
-    // 4. Credit referral
-    const verifyRes = await apiFetch('/api/verify-account', {
-      method: 'POST',
-      body: JSON.stringify({ newMemberId: userId, upshotWallet: wallet }),
-    });
-    if (verifyRes?.networkError) {
-      await interaction.editReply({ content: '⚠️ The referral service went offline mid-verify. Try again in a minute.' });
-      return true;
-    }
-    if (!verifyRes || !verifyRes.ok) {
-      console.error('[referral] verify-account failed:', verifyRes?.status);
-      await interaction.editReply({ content: '⚠️ Something went wrong. Please try again later.' });
-      return true;
-    }
-    const data = await verifyRes.json();
-    if (!data.verified) {
-      await interaction.editReply({
-        content: '⚠️ Something went wrong while crediting. Please try again later.',
-      });
-      return true;
-    }
-
-    const baseUrl = env('REFERRAL_BASE_URL') || getReferralApiUrl();
-    const shortWallet = `${wallet.slice(0, 6)}…${wallet.slice(-4)}`;
-    await interaction.editReply({
-      content:
-        `✅ **Verified!** Your referral has been credited (linked wallet \`${shortWallet}\`, ${packStatusNote}).\n\n` +
-        `Want to earn rewards yourself? Head to **${baseUrl}** to grab your own invite link and start referring.`,
-    });
-  } catch (err) {
-    console.error('[referral] verify handler failed:', err.message);
-    await interaction.editReply({
-      content: '⚠️ Something went wrong. Please try again later.',
-    }).catch(() => {});
-  } finally {
-    verifyInProgress.delete(userId);
-  }
+  const site = getInvitesSiteUrl();
+  await interaction.reply({
+    content:
+      '✅ **No need to verify anymore — referrals are automatic.**\n\n' +
+      `Just link your Upshot profile (here via **📇 My Cards**, or on the site) and own at least one Pack. You'll be credited within ~15 minutes of qualifying.\n\n` +
+      `Track your progress and grab your own invite link: ${site}`,
+    flags: 64,
+  }).catch(() => {});
   return true;
 }
 
