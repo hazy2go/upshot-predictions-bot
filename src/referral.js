@@ -20,6 +20,11 @@ import {
   Events, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder,
 } from 'discord.js';
 
+import {
+  hasPreexistingSnapshot, savePreexistingSnapshot, isPreexistingMember,
+  getPreexistingSnapshotMeta,
+} from './database.js';
+
 // NOTE: the pack-ownership check that used to live here is gone with the v1
 // verify flow — the referral server's sweeper now evaluates that itself from
 // the wallet the bot pushes via /api/bot/wallet-linked.
@@ -140,6 +145,48 @@ async function postVerifyPanel(client) {
   }
 }
 
+// ── Launch snapshot: who was already here ───────────────────
+//
+// Referrals should only count genuinely new people. The server handles account
+// age, self-referrals and rejoins of anyone already counted; the one case only
+// the bot can judge is "was this account already a member before the program?",
+// which needs the guild roster.
+//
+// Taken ONCE and never refreshed — that's the whole point. A rebuild later
+// would capture people who joined THROUGH the program and wrongly mark them
+// pre-existing.
+async function ensurePreexistingSnapshot(guild) {
+  if (hasPreexistingSnapshot(guild.id)) return;
+
+  let members;
+  try {
+    members = await guild.members.fetch();
+  } catch (err) {
+    console.error(`[referral] launch snapshot: member fetch failed for ${guild.name} — will retry next boot:`, err.message);
+    return;
+  }
+
+  const ids = [...members.keys()];
+  const expected = guild.memberCount ?? ids.length;
+
+  // Refuse to persist an obviously partial roster. A short snapshot silently
+  // omits real pre-existing members, who would then be credited as new
+  // referrals — the failure mode with no admin-visible trace. Bailing means we
+  // retry on the next boot; over-flagging (the other direction) at least shows
+  // up in the admin panel with an Accept override.
+  if (!ids.length || ids.length < expected * 0.9) {
+    console.error(`[referral] launch snapshot: got ${ids.length}/${expected} members — looks partial, NOT saving. Will retry next boot.`);
+    return;
+  }
+
+  const saved = savePreexistingSnapshot(guild.id, ids, {
+    guildId: guild.id,
+    guildName: guild.name,
+    guildMemberCount: expected,
+  });
+  console.log(`[referral] launch snapshot: recorded ${saved} pre-existing member(s) for ${guild.name} — these will never count as referrals`);
+}
+
 // ── Invite cache + member-join tracking ─────────────────────
 
 async function cacheInvitesForGuild(guild) {
@@ -178,6 +225,17 @@ async function onGuildMemberAdd(member) {
       return;
     }
 
+    // Flag rejoins of people who predate the program. Only sent when a snapshot
+    // actually exists — otherwise the field is omitted entirely rather than sent
+    // as `false`, which would assert "definitely new" on no evidence.
+    // Still POSTed when true: the server records the rejection so it shows in
+    // the admin panel with an Accept override, rather than vanishing.
+    const snapshotTaken = hasPreexistingSnapshot(member.guild.id);
+    const preexisting = snapshotTaken ? isPreexistingMember(member.user.id) : null;
+    if (preexisting) {
+      console.log(`[referral] ${member.user.tag} was already a member at launch — flagging preexisting (no credit)`);
+    }
+
     const res = await apiFetch('/api/referral-used', {
       method: 'POST',
       body: JSON.stringify({
@@ -186,6 +244,7 @@ async function onGuildMemberAdd(member) {
         newMemberTag: member.user.tag,
         inviterId: usedInvite.inviter?.id,
         inviterTag: usedInvite.inviter?.tag,
+        ...(preexisting === null ? {} : { preexisting }),
       }),
     });
     if (res?.networkError) {
@@ -236,7 +295,10 @@ export function registerReferralHandlers(client) {
       ? [client.guilds.cache.get(guildId)].filter(Boolean)
       : Array.from(client.guilds.cache.values());
 
-    for (const g of guilds) await cacheInvitesForGuild(g);
+    for (const g of guilds) {
+      await cacheInvitesForGuild(g);
+      await ensurePreexistingSnapshot(g);
+    }
     await postVerifyPanel(client);
   });
 
