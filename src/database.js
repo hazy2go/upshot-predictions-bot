@@ -258,6 +258,79 @@ export function getDbPath() {
   return dbPath;
 }
 
+// One row per known user — everyone with a linked profile PLUS everyone who has
+// ever made a prediction (they may never have linked). Bundles the profile, the
+// month's stats, open-prediction count and all-time totals in a single query so
+// a full-server export doesn't run N queries per user. Rank is not included:
+// callers layer it on from getLeaderboard() so it matches the board exactly.
+export function getAllUserExportRows(monthKey) {
+  return db.prepare(`
+    WITH ids AS (
+      SELECT discord_id AS discord_id FROM users
+      UNION
+      SELECT author_id FROM predictions
+    ),
+    month AS (
+      SELECT
+        author_id,
+        COUNT(*) AS prediction_count,
+        SUM(CASE WHEN outcome IS NOT NULL THEN total_points ELSE 0 END) AS total_points,
+        SUM(CASE WHEN outcome = 'hit' THEN 1 ELSE 0 END) AS hits,
+        SUM(CASE WHEN outcome = 'fail' THEN 1 ELSE 0 END) AS fails,
+        SUM(CASE WHEN outcome IS NOT NULL THEN 1 ELSE 0 END) AS resolved,
+        AVG(star_rating) AS avg_rating
+      FROM predictions WHERE month_key = ? GROUP BY author_id
+    ),
+    open_preds AS (
+      SELECT author_id, COUNT(*) AS open_count
+      FROM predictions WHERE status = 'rated' AND outcome IS NULL GROUP BY author_id
+    ),
+    lifetime AS (
+      SELECT
+        author_id,
+        COUNT(*) AS all_time_predictions,
+        SUM(CASE WHEN outcome IS NOT NULL THEN total_points ELSE 0 END) AS all_time_points,
+        SUM(CASE WHEN outcome = 'hit' THEN 1 ELSE 0 END) AS all_time_hits,
+        SUM(CASE WHEN outcome IS NOT NULL THEN 1 ELSE 0 END) AS all_time_resolved,
+        MAX(created_at) AS last_prediction_at
+      FROM predictions GROUP BY author_id
+    )
+    SELECT
+      ids.discord_id,
+      u.upshot_url,
+      u.wallet_address,
+      u.linked_at,
+      COALESCE(m.prediction_count, 0) AS prediction_count,
+      COALESCE(m.total_points, 0) AS total_points,
+      COALESCE(m.hits, 0) AS hits,
+      COALESCE(m.fails, 0) AS fails,
+      COALESCE(m.resolved, 0) AS resolved,
+      m.avg_rating AS avg_rating,
+      COALESCE(o.open_count, 0) AS open_count,
+      COALESCE(l.all_time_predictions, 0) AS all_time_predictions,
+      COALESCE(l.all_time_points, 0) AS all_time_points,
+      COALESCE(l.all_time_hits, 0) AS all_time_hits,
+      COALESCE(l.all_time_resolved, 0) AS all_time_resolved,
+      l.last_prediction_at,
+      (SELECT COUNT(*) FROM tier_awards t WHERE t.discord_id = ids.discord_id) AS tier,
+      (SELECT COUNT(*) FROM user_badges ub WHERE ub.discord_id = ids.discord_id) AS badge_count
+    FROM ids
+    LEFT JOIN users u ON u.discord_id = ids.discord_id
+    LEFT JOIN month m ON m.author_id = ids.discord_id
+    LEFT JOIN open_preds o ON o.author_id = ids.discord_id
+    LEFT JOIN lifetime l ON l.author_id = ids.discord_id
+    ORDER BY COALESCE(m.total_points, 0) DESC, COALESCE(l.all_time_points, 0) DESC
+  `).all(monthKey);
+}
+
+// Every prediction in a month, oldest first — the row-per-prediction companion
+// to getAllUserExportRows(). Images stay as raw JSON: this feeds a CSV, not the UI.
+export function getMonthPredictions(monthKey) {
+  return db.prepare(
+    'SELECT * FROM predictions WHERE month_key = ? ORDER BY id ASC'
+  ).all(monthKey);
+}
+
 // ── Prediction CRUD ─────────────────────────────────────────
 
 export function createPrediction({ authorId, title, category, description, deadline, proofType, tweetUrl, images, status, cardId, cardImage, ownershipCheck }) {

@@ -526,6 +526,32 @@ export const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName('export-users')
+    .setDescription('Download every user\'s info (profile, stats, predictions) as a CSV (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption(opt =>
+      opt.setName('month')
+        .setDescription('Month for the stats columns as YYYY-MM (default: this month)')
+        .setRequired(false)
+    )
+    .addStringOption(opt =>
+      opt.setName('who')
+        .setDescription('Which users to include (default: everyone known to the bot)')
+        .setRequired(false)
+        .addChoices(
+          { name: 'Everyone known to the bot', value: 'all' },
+          { name: 'Linked profile + wallet detected', value: 'wallet' },
+          { name: 'Linked Upshot profile (wallet optional)', value: 'linked' },
+          { name: 'Only users with predictions this month', value: 'active' },
+        )
+    )
+    .addBooleanOption(opt =>
+      opt.setName('predictions')
+        .setDescription('Also attach a second CSV with one row per prediction')
+        .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
     .setName('process-tiers')
     .setDescription('Award top-10 leaderboard tiers for a month now (admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
