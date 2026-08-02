@@ -26,6 +26,7 @@ import {
   countUserUnresolved, getUserOpenPredictions, getUserUnresolvedPredictions, hasUnresolvedPredictionForCard,
   getUnresolvedRatedPredictions, getResolvedCount, getUnresolvedCount,
   getProfileByWallet, getProfileByUrl, getAllUsers, getDbPath,
+  getAllUserExportRows, getMonthPredictions,
   upsertCommunityVote, getCommunityVoteSummary,
   getPendingVerificationPredictions, getUnratedVerifiedPredictions, getRatedActivePredictions,
   getContestWatchState, setContestWatchState,
@@ -1129,6 +1130,15 @@ async function handleProcessTiers(interaction) {
   await interaction.editReply({ content: lines.join('\n'), allowedMentions: { parse: [] } });
 }
 
+// Rows (arrays of cells) → CSV text, quoting only what needs it.
+function toCsv(rows) {
+  const escape = (v) => {
+    const s = String(v ?? '');
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  return rows.map(r => r.map(escape).join(',')).join('\n');
+}
+
 async function handleLeaderboardExport(interaction, monthKey) {
   if (!/^\d{4}-\d{2}$/.test(monthKey)) {
     return interaction.reply({ content: '❌ Invalid month.', flags: ['Ephemeral'] });
@@ -1162,13 +1172,123 @@ async function handleLeaderboardExport(interaction, monthKey) {
     ]);
   }
 
-  const escape = (v) => {
-    const s = String(v ?? '');
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  const csv = rows.map(r => r.map(escape).join(',')).join('\n');
+  const csv = toCsv(rows);
   const file = new AttachmentBuilder(Buffer.from(csv, 'utf8'), { name: `leaderboard-${monthKey}.csv` });
   await interaction.editReply({ content: `📥 Leaderboard export for **${monthKey}** (${entries.length} entries)`, files: [file] });
+}
+
+// Bulk version of `/setup user-info`: one CSV row per user instead of paging
+// through members one at a time. Everything comes from a single aggregate query
+// plus one leaderboard read for ranks, so the cost is flat no matter how many
+// members there are. Optionally attaches a second CSV with one row per prediction.
+async function handleExportUsers(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+
+  const monthInput = interaction.options.getString('month')?.trim() || currentMonthKey();
+  if (!/^\d{4}-\d{2}$/.test(monthInput)) {
+    return interaction.reply({ content: '❌ Invalid month. Use `YYYY-MM` (e.g. `2026-03`).', flags: ['Ephemeral'] });
+  }
+  const who = interaction.options.getString('who') || 'all';
+  const withPredictions = interaction.options.getBoolean('predictions') ?? false;
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  // One bulk member fetch beats a per-user REST call; names come from cache after.
+  await interaction.guild?.members.fetch().catch(() => {});
+
+  const all = getAllUserExportRows(monthInput);
+  const users = all.filter(r => {
+    if (who === 'wallet') return !!r.wallet_address;
+    if (who === 'linked') return !!r.upshot_url;
+    if (who === 'active') return r.prediction_count > 0;
+    return true;
+  });
+
+  if (users.length === 0) {
+    return interaction.editReply(`❌ No users matched **${who}** for **${monthInput}**.`);
+  }
+
+  // Rank straight off the leaderboard so the CSV agrees with the posted board.
+  const ranks = new Map(getLeaderboard(monthInput, 1000).map((e, i) => [e.author_id, i + 1]));
+  const maxOpen = getMaxOpen(interaction.guildId);
+
+  const rows = [[
+    'discord_id', 'username', 'display_name', 'upshot_url', 'wallet_address', 'linked_at',
+    'month', 'rank', 'points', 'predictions', 'hits', 'fails', 'resolved', 'hit_rate_pct',
+    'avg_rating', 'open_predictions', 'max_open', 'all_time_predictions', 'all_time_points',
+    'all_time_hits', 'all_time_resolved', 'all_time_hit_rate_pct', 'last_prediction_at',
+    'tier', 'badges',
+  ]];
+
+  for (const r of users) {
+    const member = interaction.guild?.members.cache.get(r.discord_id);
+    const user = member?.user || client.users.cache.get(r.discord_id);
+    rows.push([
+      r.discord_id,
+      user?.username || '',
+      member?.displayName || user?.globalName || '',
+      r.upshot_url || '',
+      r.wallet_address || '',
+      r.linked_at || '',
+      monthInput,
+      ranks.get(r.discord_id) || '',
+      r.total_points,
+      r.prediction_count,
+      r.hits,
+      r.fails,
+      r.resolved,
+      r.resolved > 0 ? Math.round((r.hits / r.resolved) * 100) : 0,
+      r.avg_rating != null ? r.avg_rating.toFixed(2) : '',
+      r.open_count,
+      maxOpen,
+      r.all_time_predictions,
+      r.all_time_points,
+      r.all_time_hits,
+      r.all_time_resolved,
+      r.all_time_resolved > 0 ? Math.round((r.all_time_hits / r.all_time_resolved) * 100) : 0,
+      r.last_prediction_at || '',
+      r.tier,
+      r.badge_count,
+    ]);
+  }
+
+  const files = [
+    new AttachmentBuilder(Buffer.from(toCsv(rows), 'utf8'), { name: `users-${monthInput}.csv` }),
+  ];
+
+  let predictionNote = '';
+  if (withPredictions) {
+    const keep = new Set(users.map(u => u.discord_id));
+    const preds = getMonthPredictions(monthInput).filter(p => keep.has(p.author_id));
+    const predRows = [[
+      'id', 'author_id', 'username', 'title', 'category', 'deadline', 'status', 'outcome',
+      'star_rating', 'total_points', 'ownership_verified', 'card_id', 'tweet_url',
+      'created_at', 'month',
+    ]];
+    for (const p of preds) {
+      const user = interaction.guild?.members.cache.get(p.author_id)?.user || client.users.cache.get(p.author_id);
+      predRows.push([
+        p.id, p.author_id, user?.username || '', p.title, p.category, p.deadline, p.status,
+        p.outcome || '', p.star_rating ?? '', p.total_points, p.ownership_verified ? 'yes' : 'no',
+        p.card_id || '', p.tweet_url || '', p.created_at, p.month_key,
+      ]);
+    }
+    files.push(new AttachmentBuilder(Buffer.from(toCsv(predRows), 'utf8'), { name: `predictions-${monthInput}.csv` }));
+    predictionNote = ` + **${preds.length}** prediction row(s)`;
+  }
+
+  const scope = {
+    all: 'everyone known to the bot',
+    wallet: 'linked profiles with a detected wallet',
+    linked: 'linked profiles',
+    active: 'users active this month',
+  }[who];
+  await interaction.editReply({
+    content: `📥 User export for **${monthInput}** — **${users.length}** user(s) (${scope})${predictionNote}.`,
+    files,
+  });
 }
 
 // Resolve a list of Discord names (one per line, from an uploaded .txt) to their
@@ -1255,11 +1375,7 @@ async function handleLookupWallets(interaction) {
     linked++;
   }
 
-  const escape = (v) => {
-    const s = String(v ?? '');
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  const csv = rows.map(r => r.map(escape).join(',')).join('\n');
+  const csv = toCsv(rows);
   const file = new AttachmentBuilder(Buffer.from(csv, 'utf8'), { name: 'wallet-lookup.csv' });
   await interaction.editReply({
     content: [
@@ -6117,14 +6233,24 @@ async function handleAdminHelp(interaction) {
       '`/resolve id outcome` — set a prediction Hit/Fail',
       '`/refresh [id] [all]` — re-sync prediction embeds/buttons',
     ]],
-    ['🎁 Packs', [
+    ['🎁 Packs & events', [
       '`/sendpack users pack quantity` — send Upshot pack(s) to member(s)',
       '`/giveaway pack duration …` — run a pack giveaway (react to enter, auto-drawn)',
+      '`/giveaway-edit giveaway …` — change settings, end early, or cancel a live giveaway',
+      '`/cardbattle [duration] …` — drop a "highest card wins" battle (members pull a random gold card)',
     ]],
     ['🏅 Badges', [
       '`/badge create` · `list` · `holders` · `delete` · `check` · `grant` · `revoke`',
     ]],
+    ['🧹 Members & data (`/setup …`)', [
+      '`user-info user` — one member\'s profile, stats & predictions (use `/export-users` for everyone)',
+      '`export-db` — download the raw database file',
+      '`auto-verify-all` · `auto-rate-all` · `recheck-all-ratings` · `check-all-resolutions` — bulk AI/API sweeps (review before applying)',
+      '`reset-user` · `reset-all` · `undo-last` · `delete-profile` · `delete-all-profiles` — danger zone',
+      '`upshot-token` — set the token used to send packs · `owner` — restrict `/sendpack` to you',
+    ]],
     ['🔧 Utilities', [
+      '`/export-users [month] [who] [predictions]` — every user\'s info as a CSV (all / wallet-detected / linked / active)',
       '`/lookup-wallets file` — .txt of names → CSV of wallets/profiles',
       '`/process-tiers [month]` — award top-10 leaderboard tiers for a month',
       '`/scan-messages [days]` — backfill member message counts from history (for the min-messages predict gate)',
@@ -6322,6 +6448,7 @@ client.on(Events.InteractionCreate, async interaction => {
           return await handleShotCallers(interaction);
         }
         case 'lookup-wallets': return await handleLookupWallets(interaction);
+        case 'export-users': return await handleExportUsers(interaction);
         case 'badge': {
           switch (interaction.options.getSubcommand()) {
             case 'create': return await handleBadgeCreate(interaction);
