@@ -64,6 +64,16 @@ db.exec(`
     value TEXT
   );
 
+  -- Everyone who was already in the guild when the referral program went live.
+  -- Referrals must only count genuinely new people, and "was this account
+  -- already a member?" is a question only the bot can answer (it needs the
+  -- guild roster). Captured ONCE and never refreshed — see savePreexistingSnapshot.
+  CREATE TABLE IF NOT EXISTS preexisting_members (
+    discord_id   TEXT PRIMARY KEY,
+    guild_id     TEXT NOT NULL,
+    snapshot_at  TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
   CREATE TABLE IF NOT EXISTS community_votes (
     prediction_id  INTEGER NOT NULL,
     voter_id       TEXT NOT NULL,
@@ -1098,6 +1108,54 @@ export function getBadgeHolders(badgeId) {
   return db.prepare(
     'SELECT discord_id, source, awarded_by, awarded_at FROM user_badges WHERE badge_id = ? ORDER BY awarded_at DESC'
   ).all(badgeId);
+}
+
+// ── Pre-existing members (referral program launch snapshot) ─
+//
+// The referral server rejects referrals for people who were already in the
+// guild before the program launched. Only the bot can answer that, so it
+// snapshots the roster ONCE and flags matching joins on the way in.
+
+const PREEXISTING_KEY = (guildId) => `preexisting_snapshot_${guildId}`;
+
+// Metadata row, not the member list — its presence is what makes the snapshot
+// "already taken". Returns { at, count, guildMemberCount } or null.
+export function getPreexistingSnapshotMeta(guildId) {
+  const row = db.prepare('SELECT value FROM bot_state WHERE key = ?').get(PREEXISTING_KEY(guildId));
+  if (!row?.value) return null;
+  try { return JSON.parse(row.value); } catch { return null; }
+}
+
+export function hasPreexistingSnapshot(guildId) {
+  return getPreexistingSnapshotMeta(guildId) != null;
+}
+
+// Persist the launch roster. Writing the member rows and the metadata marker in
+// ONE transaction matters: a crash between them would leave a half-snapshot
+// that reads as "never taken" and would be rebuilt later — capturing people who
+// joined THROUGH the program as if they predated it.
+export function savePreexistingSnapshot(guildId, discordIds, meta = {}) {
+  const ids = [...new Set((discordIds || []).filter(Boolean).map(String))];
+  const insert = db.prepare(
+    'INSERT OR IGNORE INTO preexisting_members (discord_id, guild_id) VALUES (?, ?)'
+  );
+  const marker = db.prepare('INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)');
+
+  db.transaction(() => {
+    for (const id of ids) insert.run(id, guildId);
+    marker.run(PREEXISTING_KEY(guildId), JSON.stringify({
+      at: new Date().toISOString(),
+      count: ids.length,
+      ...meta,
+    }));
+  })();
+
+  return ids.length;
+}
+
+// Was this account already in the guild when the program launched?
+export function isPreexistingMember(discordId) {
+  return !!db.prepare('SELECT 1 FROM preexisting_members WHERE discord_id = ?').get(String(discordId));
 }
 
 // ── Message activity (forward-only, for /shotcallers) ───────
