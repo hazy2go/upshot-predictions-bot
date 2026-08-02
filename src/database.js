@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { pushToReferral, sqlTimeToIso } from './referralPush.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const dbPath = resolve(__dirname, '..', 'data', 'predictions.db');
@@ -235,7 +236,23 @@ export function linkUpshot(discordId, upshotUrl, walletAddress = null) {
     VALUES (?, ?, ?)
     ON CONFLICT(discord_id) DO UPDATE SET upshot_url = excluded.upshot_url, wallet_address = COALESCE(excluded.wallet_address, wallet_address), linked_at = datetime('now')
   `);
-  return stmt.run(discordId, upshotUrl, walletAddress);
+  const result = stmt.run(discordId, upshotUrl, walletAddress);
+
+  // Tell the referral server about the link (fire-and-forget; never throws).
+  // Re-links push again — the server upserts on discordId, so that's a no-op.
+  // `method: 'pasted'` because today's link is a self-asserted URL paste; the
+  // server tracks how a link was established so it can require a signed link
+  // for reward eligibility later. Read linked_at back from the row rather than
+  // stamping Date.now(), so the pushed timestamp is exactly what's stored.
+  pushToReferral('/api/bot/wallet-linked', {
+    discordId,
+    wallet: walletAddress,
+    upshotUrl,
+    method: 'pasted',
+    linkedAt: sqlTimeToIso(getUpshotProfile(discordId)?.linked_at) || new Date().toISOString(),
+  });
+
+  return result;
 }
 
 export function getUpshotProfile(discordId) {
@@ -351,7 +368,18 @@ export function createPrediction({ authorId, title, category, description, deadl
   `);
 
   const result = stmt.run(authorId, title, category, description, deadline, proofType, tweetUrl || null, JSON.stringify(images || []), initialStatus, monthKey, cardId || null, cardImage || null, ownershipCheck || null);
-  return getPrediction(result.lastInsertRowid);
+  const row = getPrediction(result.lastInsertRowid);
+
+  // Referral-server activity signal (fire-and-forget; never throws). Only fires
+  // after the insert succeeded. predictionId is the bot's predictions.id, which
+  // the server uses as its idempotency key.
+  pushToReferral('/api/bot/prediction', {
+    discordId: authorId,
+    predictionId: Number(result.lastInsertRowid),
+    createdAt: sqlTimeToIso(row?.created_at) || new Date().toISOString(),
+  });
+
+  return row;
 }
 
 export function getPrediction(id) {
