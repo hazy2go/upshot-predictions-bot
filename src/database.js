@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { pushToReferral, sqlTimeToIso } from './referralPush.js';
+import { pushToReferral, pushManyToReferral, sqlTimeToIso, normalizePredictionStatus } from './referralPush.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const dbPath = resolve(__dirname, '..', 'data', 'predictions.db');
@@ -373,10 +373,15 @@ export function createPrediction({ authorId, title, category, description, deadl
   // Referral-server activity signal (fire-and-forget; never throws). Only fires
   // after the insert succeeded. predictionId is the bot's predictions.id, which
   // the server uses as its idempotency key.
+  // `status` is normalized, never the raw column: the server's vetted test is
+  // status != 'pending', so a raw 'pending_verification' would be counted as
+  // vetted. Read from initialStatus rather than hardcoding 'pending' — callers
+  // may seed a prediction at a later state.
   pushToReferral('/api/bot/prediction', {
     discordId: authorId,
     predictionId: Number(result.lastInsertRowid),
     createdAt: sqlTimeToIso(row?.created_at) || new Date().toISOString(),
+    status: normalizePredictionStatus(initialStatus),
   });
 
   return row;
@@ -401,6 +406,13 @@ export function updatePrediction(id, updates) {
   const entries = Object.entries(updates).filter(([k]) => allowed.includes(k));
   if (entries.length === 0) return;
 
+  // Snapshot before the write so the referral push below can tell a real status
+  // transition from a no-op re-save, and can send the ORIGINAL created_at
+  // (the server keys on predictionId; createdAt must not drift on update).
+  const before = updates.status !== undefined
+    ? db.prepare('SELECT author_id, status, created_at FROM predictions WHERE id = ?').get(id)
+    : null;
+
   // Serialize images if present
   const processedEntries = entries.map(([k, v]) => {
     if (k === 'images' && Array.isArray(v)) return [k, JSON.stringify(v)];
@@ -411,11 +423,34 @@ export function updatePrediction(id, updates) {
   const values = processedEntries.map(([, v]) => v);
 
   db.prepare(`UPDATE predictions SET ${setClause} WHERE id = ?`).run(...values, id);
+
+  // Vet-step signal. Hooked HERE rather than in each admin handler because every
+  // status transition in the bot funnels through this one function — manual
+  // rating, auto-rate-all, recheck-all-ratings, auto-resolve — so a future path
+  // can't forget to report. Fires on any raw status change (including
+  // rated→hit/fail, which both normalize to 'verified'): the server upserts on
+  // predictionId, so the repeats are harmless and let a push that failed during
+  // an outage self-heal on the next transition.
+  // Deletions are NOT routed here — they're hard DELETEs and go to
+  // /api/bot/prediction-deleted from the delete functions below.
+  if (before && before.status !== updates.status) {
+    pushToReferral('/api/bot/prediction', {
+      discordId: before.author_id,
+      predictionId: Number(id),
+      createdAt: sqlTimeToIso(before.created_at),
+      status: normalizePredictionStatus(updates.status),
+    });
+  }
+
   return getPrediction(id);
 }
 
 export function deletePrediction(id) {
-  return db.prepare('DELETE FROM predictions WHERE id = ?').run(id);
+  const res = db.prepare('DELETE FROM predictions WHERE id = ?').run(id);
+  // Rows are hard-deleted here, so a re-run backfill can never report this —
+  // the retraction push is the server's ONLY chance to learn about it.
+  if (res.changes > 0) pushToReferral('/api/bot/prediction-deleted', { predictionId: Number(id) });
+  return res;
 }
 
 
@@ -917,16 +952,38 @@ export function getCommunityVoteSummary(predictionId) {
 
 // ── Reset / Delete functions ──────────────────────────────────
 
+// NOTE on /api/bot/user-reset: the referral server offers a one-call cascade
+// (mark ALL of a user's predictions deleted + unlink them). We deliberately
+// don't use it here — this reset is MONTH-SCOPED and leaves the profile linked,
+// so the cascade would over-retract: it would unlink a still-linked member and
+// bury predictions from other months that are still very much alive. Capturing
+// the exact ids and retracting them individually keeps the server's picture
+// identical to the bot's.
 export function resetUser(authorId, monthKey) {
-  return db.prepare(
+  const ids = db.prepare(
+    'SELECT id FROM predictions WHERE author_id = ? AND month_key = ?'
+  ).all(authorId, monthKey).map(r => r.id);
+
+  const res = db.prepare(
     'DELETE FROM predictions WHERE author_id = ? AND month_key = ?'
   ).run(authorId, monthKey);
+
+  pushManyToReferral('/api/bot/prediction-deleted', ids.map(id => ({ predictionId: Number(id) })));
+  return res;
 }
 
 export function resetAllUsers(monthKey) {
-  return db.prepare(
+  // Same reasoning as resetUser, at scale: month-scoped, nobody gets unlinked.
+  // Can be hundreds of rows, so the batch helper paces the retractions instead
+  // of firing them all at once.
+  const ids = db.prepare('SELECT id FROM predictions WHERE month_key = ?').all(monthKey).map(r => r.id);
+
+  const res = db.prepare(
     'DELETE FROM predictions WHERE month_key = ?'
   ).run(monthKey);
+
+  pushManyToReferral('/api/bot/prediction-deleted', ids.map(id => ({ predictionId: Number(id) })));
+  return res;
 }
 
 export function deleteLastPrediction(authorId) {
@@ -935,15 +992,25 @@ export function deleteLastPrediction(authorId) {
   ).get(authorId);
   if (!last) return { changes: 0, id: null };
   db.prepare('DELETE FROM predictions WHERE id = ?').run(last.id);
+  pushToReferral('/api/bot/prediction-deleted', { predictionId: Number(last.id) });
   return { changes: 1, id: last.id };
 }
 
 export function deleteUserProfile(discordId) {
-  return db.prepare('DELETE FROM users WHERE discord_id = ?').run(discordId);
+  const res = db.prepare('DELETE FROM users WHERE discord_id = ?').run(discordId);
+  // Genuine unlink-to-nothing. (A re-link to a DIFFERENT wallet needs no
+  // retraction — the normal /api/bot/wallet-linked push overwrites, keyed on
+  // discordId.) Predictions are intentionally left alone: dropping the profile
+  // doesn't delete their prediction history here.
+  if (res.changes > 0) pushToReferral('/api/bot/wallet-unlinked', { discordId });
+  return res;
 }
 
 export function deleteAllProfiles() {
-  return db.prepare('DELETE FROM users').run();
+  const ids = db.prepare('SELECT discord_id FROM users').all().map(r => r.discord_id);
+  const res = db.prepare('DELETE FROM users').run();
+  pushManyToReferral('/api/bot/wallet-unlinked', ids.map(discordId => ({ discordId })));
+  return res;
 }
 
 export function removeCategory(guildId, category) {
