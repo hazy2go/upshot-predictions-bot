@@ -29,6 +29,55 @@ function releaseSlot() {
   else _inFlight--;
 }
 
+// Global RATE limiter, on top of the concurrency limiter above. Capping
+// parallelism alone is not enough: 4 slots recycling as fast as the API answers
+// is ~18 req/s sustained, and Upshot's shield budgets on REQUESTS PER SECOND,
+// not on how many are in flight.
+//
+// Measured from the Pi, 2026-08-05:
+//   • concurrency 4, unpaced (~18 req/s): 429s from request ~28 (~3s in), then
+//     dropped connections. 300 requests → 100 OK, 59× 429, 141 reset/socket.
+//     Every one of those resets is a "fetch failed" line in the error log.
+//   • paced: 2, 4, 6 and 8 req/s each held 100% over 30s.
+// So the ceiling sits somewhere just under ~10 req/s. Default 4 keeps a 2×
+// margin; raise UPSHOT_MAX_RPS if Upshot ever loosens up.
+//
+// A long sweep is slower this way, but it returns data instead of nulls.
+//
+// Token bucket: BURST tokens available immediately (so a single My Cards tap
+// stays snappy), refilling at MAX_RPS/second for anything sustained.
+const MAX_RPS = Math.max(0.5, parseFloat(process.env.UPSHOT_MAX_RPS || '4'));
+const BURST = Math.max(1, Math.ceil(MAX_RPS * 2));
+let _tokens = BURST;
+let _lastRefill = Date.now();
+
+// Shared cooldown. When the shield pushes back (429, or a reset that means it
+// already stopped talking to us), EVERY caller waits — not just the one that
+// got hit. Per-request backoff alone doesn't help here: the other workers keep
+// firing into a closing door, which is what turns a soft 429 into a wave of
+// connection resets.
+let _pausedUntil = 0;
+const MAX_PAUSE_MS = 8000; // keep a Discord interaction alive through a pause
+
+function pauseAllRequests(ms) {
+  const until = Date.now() + Math.min(MAX_PAUSE_MS, Math.max(0, ms));
+  if (until > _pausedUntil) _pausedUntil = until;
+}
+
+async function takeToken() {
+  for (;;) {
+    const now = Date.now();
+    if (now < _pausedUntil) { await sleep(_pausedUntil - now); continue; }
+    const elapsed = (now - _lastRefill) / 1000;
+    if (elapsed > 0) {
+      _tokens = Math.min(BURST, _tokens + elapsed * MAX_RPS);
+      _lastRefill = now;
+    }
+    if (_tokens >= 1) { _tokens -= 1; return; }
+    await sleep(Math.ceil(1000 / MAX_RPS));
+  }
+}
+
 // Bounded cache set: the bot is a long-running process, so a plain Map keyed by
 // card id / wallet / contest grows without limit (TTL governs whether a hit is
 // *used*, never frees the entry). cacheSet evicts the oldest entry once the map
@@ -72,6 +121,7 @@ async function fetchRetry(url, { timeout = 10_000, retries = 2, headers } = {}) 
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
+      await takeToken();
       await acquireSlot();
       let res;
       try {
@@ -82,19 +132,25 @@ async function fetchRetry(url, { timeout = 10_000, retries = 2, headers } = {}) 
       } finally {
         releaseSlot();
       }
-      if ((res.status === 429 || res.status >= 500) && attempt < retries) {
+      if (res.status === 429 || res.status >= 500) {
         const retryAfter = Number(res.headers.get('retry-after'));
         const wait = Number.isFinite(retryAfter) && retryAfter > 0
           ? Math.min(5000, retryAfter * 1000)
           : Math.min(2000, 250 * 2 ** attempt) + Math.random() * 100;
-        await sleep(wait);
-        continue;
+        // Hold every other caller back too, not just this one — and only on 429,
+        // since a 5xx is the origin struggling rather than us being throttled.
+        if (res.status === 429) pauseAllRequests(wait);
+        if (attempt < retries) { await sleep(wait); continue; }
       }
       return res;
     } catch (err) {
       lastErr = err;
+      // A thrown error here is a dropped/reset connection or a timeout — on this
+      // API that means the shield has already cut us off, so back everyone off.
+      const wait = Math.min(2000, 250 * 2 ** attempt) + Math.random() * 100;
+      pauseAllRequests(wait);
       if (attempt >= retries) break;
-      await sleep(Math.min(2000, 250 * 2 ** attempt) + Math.random() * 100);
+      await sleep(wait);
     }
   }
   throw lastErr;
