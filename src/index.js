@@ -2486,10 +2486,18 @@ async function handleCardPicker(interaction) {
   // this is the "no backtracking" win: you only see cards you can actually post.
   // Also hide later-month cards when the current-month-only gate is on (admins
   // still see everything — they bypass the gate).
+  //
+  // `unknownEvent` cards are hidden under the gate too. Their detail lookup
+  // failed, so we know neither their name (they render as a raw card ID) nor
+  // their resolution month — meaning the gate can't prove they're current-month,
+  // and picking one only ever ends in the submit-time rejection. Showing an
+  // ID-named card the member can't actually use is worse than omitting it; the
+  // list rebuilds on the next tap, and /predict with a URL still reaches any
+  // card directly.
   const monthGated = getPredictCurrentMonthOnly(interaction.guildId) && !isAdmin(interaction.member);
   const available = cards.filter(c =>
     !hasUnresolvedPredictionForCard(c.id)
-    && !(monthGated && resolvesAfterThisMonth(c.eventDate)));
+    && !(monthGated && (c.unknownEvent || resolvesAfterThisMonth(c.eventDate))));
 
   if (available.length === 0) {
     cardPickerCache.delete(interaction.user.id);

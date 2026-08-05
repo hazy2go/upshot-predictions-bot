@@ -570,7 +570,10 @@ export function isInstantWinCard(cardLike) {
  * fetching each would take minutes and trip the API shield). Only cards WITHOUT
  * an embedded event (contest-lineup cards) fall back to a bounded getCardDetails
  * lookup. Cards whose lookup fails are kept (the submit flow rejects expired
- * stragglers as a backstop). Returns { id, name, inContest } entries.
+ * stragglers as a backstop) but flagged `unknownEvent: true` — we know nothing
+ * about when they resolve, so the caller's current-month gate can't evaluate
+ * them and must decide for itself whether to show them.
+ * Returns { id, name, inContest, eventDate, unknownEvent } entries.
  */
 async function filterOutExpiredCards(cards) {
   const out = [];
@@ -593,7 +596,16 @@ async function filterOutExpiredCards(cards) {
     for (let j = 0; j < chunk.length; j++) {
       const details = results[j].status === 'fulfilled' ? results[j].value : null;
       if (eventDeadlinePassed(details)) continue;
-      out.push({ id: chunk[j].id, name: details?.name || chunk[j].name, inContest: chunk[j].inContest, eventDate: details?.eventDate || null });
+      out.push({
+        id: chunk[j].id,
+        name: details?.name || chunk[j].name,
+        inContest: chunk[j].inContest,
+        eventDate: details?.eventDate || null,
+        // No details at all = the lookup failed (shield block / timeout), not a
+        // card that genuinely has no date. Callers use this to tell "resolves
+        // later" apart from "we couldn't find out".
+        unknownEvent: !details,
+      });
     }
   }
   return out;
@@ -763,7 +775,14 @@ export async function getPredictableCards(walletAddress) {
     result = await filterOutExpiredCards([...byId.values()]);
   } catch (err) {
     console.error(`Upshot API: getPredictableCards deadline filter(${walletAddress}) failed:`, err.message);
-    result = [...byId.values()];
+    // The whole filter fell over, so no card here has a verified resolution date.
+    result = [...byId.values()].map(c => ({
+      id: c.id,
+      name: c.name,
+      inContest: c.inContest,
+      eventDate: c.event?.eventDate || null,
+      unknownEvent: !c.event?.eventDate,
+    }));
   }
 
   // Cache only useful, COMPLETE results — don't pin an empty list (likely a
