@@ -1232,10 +1232,14 @@ export function buildLeaderboard(entries, monthLabel, options = {}) {
   // Discord mentions occasionally render as raw <@id> when the client hasn't
   // cached the user — show the server nickname alongside so the row is always
   // readable. Escape markdown so names like `**foo**` can't warp the layout.
+  // Capped at 20 chars: a long nickname would otherwise push the stats onto a
+  // third line on phones, where rows wrap around ~40 characters.
   const nameOf = (e) => {
     const n = names[e.author_id];
     if (!n) return null;
-    return n.replace(/[\\`*_~|]/g, '\\$&').replace(/[\r\n]+/g, ' ');
+    const clean = n.replace(/[\r\n]+/g, ' ').trim();
+    const short = clean.length > 20 ? `${clean.slice(0, 19)}…` : clean;
+    return short.replace(/[\\`*_~|]/g, '\\$&');
   };
   const num = (n) => Number(n || 0).toLocaleString('en-US');
   const hitPct = (e) => (e.resolved > 0 ? Math.round((e.hits / e.resolved) * 100) : null);
@@ -1255,10 +1259,15 @@ export function buildLeaderboard(entries, monthLabel, options = {}) {
       const e = entries[i];
       const n = nameOf(e);
       const pct = hitPct(e);
-      descLines.push(`${medals[i]}  **<@${e.author_id}>**${n ? ` · ${n}` : ''}  —  **${num(e.total_points)}** pts`);
+      // Two short lines rather than one wide one — mobile clients wrap around
+      // ~40 characters, and a single combined row breaks in the middle of the
+      // stats. Keeping the mention + name alone on top means the wrap, when it
+      // happens, falls between name and stats instead of mid-number.
+      descLines.push(`${medals[i]} **<@${e.author_id}>**${n ? ` · ${n}` : ''}`);
       descLines.push(
-        `-# ${pct === null ? '▱▱▱▱▱▱▱▱▱▱  awaiting first resolve' : `${hitRateBar(pct)}  ${pct}% hit`}`
-        + `  ·  ${num(e.prediction_count)} pred${profileSuffix(e)}`
+        `-# **${num(e.total_points)}** pts · ${num(e.prediction_count)} pred · `
+        + (pct === null ? 'not resolved yet' : `${pct}% ${hitRateBar(pct)}`)
+        + profileSuffix(e)
       );
     }
   }
@@ -1270,8 +1279,8 @@ export function buildLeaderboard(entries, monthLabel, options = {}) {
     const n = nameOf(e);
     const pct = hitPct(e);
     restLines.push(
-      `\`${`#${i + 1}`.padStart(3, ' ')}\`  <@${e.author_id}>${n ? ` · ${n}` : ''}`
-      + `  ·  **${num(e.total_points)}** pts  ·  ${num(e.prediction_count)} pred  ·  ${pct === null ? '—' : `${pct}%`}`
+      `\`${`#${i + 1}`.padStart(3, ' ')}\` <@${e.author_id}>${n ? ` · ${n}` : ''}`
+      + ` · **${num(e.total_points)}** pts · ${num(e.prediction_count)} pred · ${pct === null ? '—' : `${pct}%`}`
       + profileSuffix(e)
     );
   }
