@@ -1218,10 +1218,18 @@ export function buildAdminCard(prediction, upshotUrl) {
 // ── Leaderboard ──────────────────────────────────────────────
 
 export function buildLeaderboard(entries, monthLabel, options = {}) {
-  const { showProfiles = false, exportMonthKey = null } = options;
+  const { showProfiles = false, exportMonthKey = null, names = {} } = options;
   const profileSuffix = (e) => {
     if (!showProfiles) return '';
     return e.upshot_url ? ` · [Upshot](${e.upshot_url})` : ' · *no Upshot*';
+  };
+  // Discord mentions occasionally render as raw <@id> when the client hasn't
+  // cached the user — show the server nickname alongside so the row is always
+  // readable. Escape markdown so names like `**foo**` can't warp the layout.
+  const nameSuffix = (e) => {
+    const n = names[e.author_id];
+    if (!n) return '';
+    return ` (${n.replace(/[\\`*_~|]/g, '\\$&').replace(/[\r\n]+/g, ' ')})`;
   };
 
   const lines = ['*Monthly standings · Rewards distributed at month end*', ''];
@@ -1236,7 +1244,7 @@ export function buildLeaderboard(entries, monthLabel, options = {}) {
       const e = top3[i];
       const hitRate = e.resolved > 0 ? Math.round((e.hits / e.resolved) * 100) : 0;
       lines.push(
-        `${medals[i]} **<@${e.author_id}>** — **${e.total_points}** pts · ${e.prediction_count} pred · ${hitRate}% hit${profileSuffix(e)}`
+        `${medals[i]} **<@${e.author_id}>**${nameSuffix(e)} — **${e.total_points}** pts · ${e.prediction_count} pred · ${hitRate}% hit${profileSuffix(e)}`
       );
     }
 
@@ -1246,7 +1254,7 @@ export function buildLeaderboard(entries, monthLabel, options = {}) {
         const e = entries[i];
         const hitRate = e.resolved > 0 ? Math.round((e.hits / e.resolved) * 100) : 0;
         lines.push(
-          `\`#${i + 1}\` <@${e.author_id}> · ${e.prediction_count} pred · ${hitRate}% hit · **${e.total_points}** pts${profileSuffix(e)}`
+          `\`#${i + 1}\` <@${e.author_id}>${nameSuffix(e)} · ${e.prediction_count} pred · ${hitRate}% hit · **${e.total_points}** pts${profileSuffix(e)}`
         );
       }
     }
