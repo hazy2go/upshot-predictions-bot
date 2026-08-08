@@ -667,9 +667,29 @@ async function syncPredictionEmbeds(predictionId, guildId) {
   }
 }
 
+/**
+ * Resolve server display names for leaderboard rows. Discord's `<@id>` mention
+ * sometimes renders raw when the client hasn't cached the user, so we print the
+ * nickname next to it. Returns { [discordId]: displayName } — missing members
+ * are simply omitted and the row falls back to the mention alone.
+ */
+async function resolveMemberNames(guild, ids) {
+  const names = {};
+  if (!guild) return names;
+  for (const id of new Set(ids)) {
+    const member = guild.members.cache.get(id)
+      || await guild.members.fetch(id).catch(() => null);
+    const name = member?.displayName || member?.user?.globalName || member?.user?.username;
+    if (name) names[id] = name;
+  }
+  return names;
+}
+
 async function refreshLeaderboard(guildId) {
   const entries = getLeaderboard(currentMonthKey());
-  const payload = buildLeaderboard(entries, currentMonthLabel());
+  const guild = await client.guilds.fetch(guildId).catch(() => null);
+  const names = await resolveMemberNames(guild, entries.map(e => e.author_id));
+  const payload = buildLeaderboard(entries, currentMonthLabel(), { names });
   const channelId = getLeaderboardChannelId(guildId);
   if (!channelId) return null;
   const channel = await safeGetChannel(channelId);
@@ -1043,14 +1063,18 @@ async function handlePastLeaderboard(interaction) {
     return interaction.reply({ content: '❌ Invalid format. Use `YYYY-MM` (e.g. `2026-03`).', flags: ['Ephemeral'] });
   }
 
+  // Deferred: resolving display names can mean a REST fetch per uncached member.
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
   const entries = getLeaderboard(monthInput, 10).map(e => ({
     ...e,
     upshot_url: getUpshotProfile(e.author_id)?.upshot_url || null,
   }));
   const [yyyy, mm] = monthInput.split('-');
   const label = new Date(parseInt(yyyy), parseInt(mm) - 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-  const payload = buildLeaderboard(entries, label, { showProfiles: true, exportMonthKey: monthInput });
-  await interaction.reply({ ...payload, flags: MessageFlags.Ephemeral });
+  const names = await resolveMemberNames(interaction.guild, entries.map(e => e.author_id));
+  const payload = buildLeaderboard(entries, label, { showProfiles: true, exportMonthKey: monthInput, names });
+  await interaction.editReply(payload);
 }
 
 async function handleLeaderboardGrantRole(interaction, monthKey) {
@@ -2765,9 +2789,12 @@ async function handleCardSelect(interaction) {
 }
 
 async function handleCurrentLeaderboard(interaction) {
+  // Deferred: resolving display names can mean a REST fetch per uncached member.
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   const entries = getLeaderboard(currentMonthKey());
-  const payload = buildLeaderboard(entries, currentMonthLabel());
-  await interaction.reply({ ...payload, flags: MessageFlags.Ephemeral });
+  const names = await resolveMemberNames(interaction.guild, entries.map(e => e.author_id));
+  const payload = buildLeaderboard(entries, currentMonthLabel(), { names });
+  await interaction.editReply(payload);
 }
 
 // Download a Discord CDN attachment into a buffer so we can re-upload it as a
