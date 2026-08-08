@@ -686,14 +686,15 @@ async function resolveMemberNames(guild, ids) {
 }
 
 async function refreshLeaderboard(guildId) {
-  const entries = getLeaderboard(currentMonthKey());
-  const guild = await client.guilds.fetch(guildId).catch(() => null);
-  const names = await resolveMemberNames(guild, entries.map(e => e.author_id));
-  const payload = buildLeaderboard(entries, currentMonthLabel(), { names });
   const channelId = getLeaderboardChannelId(guildId);
   if (!channelId) return null;
   const channel = await safeGetChannel(channelId);
   if (!channel) return null;
+
+  const entries = getLeaderboard(currentMonthKey());
+  const guild = await client.guilds.fetch(guildId).catch(() => null);
+  const names = await resolveMemberNames(guild, entries.map(e => e.author_id));
+  const payload = buildLeaderboard(entries, currentMonthLabel(), { names });
 
   const existingId = getLeaderboardMessageId(guildId);
   if (existingId) {
@@ -6627,7 +6628,11 @@ client.once(Events.ClientReady, async () => {
   // already-posted panels without an admin having to re-post them.
   for (const [guildId] of client.guilds.cache) {
     await refreshPanels(guildId).catch(e => console.error('Panel refresh failed:', e.message));
+    // Same for the standings message — it goes stale while the bot is down, and
+    // layout changes should land without waiting for the next rating.
+    await refreshLeaderboard(guildId).catch(e => console.error('Leaderboard refresh failed:', e.message));
   }
+  console.log(`   Panels + leaderboard re-rendered for ${client.guilds.cache.size} guild(s)`);
 
   // Start auto-resolve timer (first run after 1 minute to let bot settle)
   setTimeout(safeRunAutoResolve, 60_000);

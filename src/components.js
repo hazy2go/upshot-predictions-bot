@@ -1217,6 +1217,12 @@ export function buildAdminCard(prediction, upshotUrl) {
 
 // ── Leaderboard ──────────────────────────────────────────────
 
+// Ten-segment hit-rate meter for the podium rows.
+function hitRateBar(pct) {
+  const filled = Math.max(0, Math.min(10, Math.round(pct / 10)));
+  return '▰'.repeat(filled) + '▱'.repeat(10 - filled);
+}
+
 export function buildLeaderboard(entries, monthLabel, options = {}) {
   const { showProfiles = false, exportMonthKey = null, names = {} } = options;
   const profileSuffix = (e) => {
@@ -1226,47 +1232,107 @@ export function buildLeaderboard(entries, monthLabel, options = {}) {
   // Discord mentions occasionally render as raw <@id> when the client hasn't
   // cached the user — show the server nickname alongside so the row is always
   // readable. Escape markdown so names like `**foo**` can't warp the layout.
-  const nameSuffix = (e) => {
+  const nameOf = (e) => {
     const n = names[e.author_id];
-    if (!n) return '';
-    return ` (${n.replace(/[\\`*_~|]/g, '\\$&').replace(/[\r\n]+/g, ' ')})`;
+    if (!n) return null;
+    return n.replace(/[\\`*_~|]/g, '\\$&').replace(/[\r\n]+/g, ' ');
   };
+  const num = (n) => Number(n || 0).toLocaleString('en-US');
+  const hitPct = (e) => (e.resolved > 0 ? Math.round((e.hits / e.resolved) * 100) : null);
 
-  const lines = ['*Monthly standings · Rewards distributed at month end*', ''];
+  const medals = ['🥇', '🥈', '🥉'];
+  const fields = [];
 
+  // ── Podium (top 3): name row + a subtext stat line with a hit-rate meter ──
+  const descLines = [];
   if (entries.length === 0) {
-    lines.push('*No rated predictions this month yet.*');
+    descLines.push('### 🎯 No rated predictions yet');
+    descLines.push('-# The board opens as soon as the first call gets rated. Tap **📇 My Cards** to make yours.');
   } else {
-    const medals = ['🥇', '🥈', '🥉'];
-    const top3 = entries.slice(0, 3);
-
-    for (let i = 0; i < top3.length; i++) {
-      const e = top3[i];
-      const hitRate = e.resolved > 0 ? Math.round((e.hits / e.resolved) * 100) : 0;
-      lines.push(
-        `${medals[i]} **<@${e.author_id}>**${nameSuffix(e)} — **${e.total_points}** pts · ${e.prediction_count} pred · ${hitRate}% hit${profileSuffix(e)}`
+    descLines.push('-# Monthly standings · rewards distributed at month end');
+    descLines.push('');
+    for (let i = 0; i < Math.min(3, entries.length); i++) {
+      const e = entries[i];
+      const n = nameOf(e);
+      const pct = hitPct(e);
+      descLines.push(`${medals[i]}  **<@${e.author_id}>**${n ? ` · ${n}` : ''}  —  **${num(e.total_points)}** pts`);
+      descLines.push(
+        `-# ${pct === null ? '▱▱▱▱▱▱▱▱▱▱  awaiting first resolve' : `${hitRateBar(pct)}  ${pct}% hit`}`
+        + `  ·  ${num(e.prediction_count)} pred${profileSuffix(e)}`
       );
-    }
-
-    if (entries.length > 3) {
-      lines.push('');
-      for (let i = 3; i < entries.length; i++) {
-        const e = entries[i];
-        const hitRate = e.resolved > 0 ? Math.round((e.hits / e.resolved) * 100) : 0;
-        lines.push(
-          `\`#${i + 1}\` <@${e.author_id}>${nameSuffix(e)} · ${e.prediction_count} pred · ${hitRate}% hit · **${e.total_points}** pts${profileSuffix(e)}`
-        );
-      }
     }
   }
 
-  // Embed descriptions cap at 4096 chars — trim trailing standings to fit.
-  let description = lines.join('\n');
+  // ── The rest of the field, chunked into ≤1024-char fields ──
+  const restLines = [];
+  for (let i = 3; i < entries.length; i++) {
+    const e = entries[i];
+    const n = nameOf(e);
+    const pct = hitPct(e);
+    restLines.push(
+      `\`${`#${i + 1}`.padStart(3, ' ')}\`  <@${e.author_id}>${n ? ` · ${n}` : ''}`
+      + `  ·  **${num(e.total_points)}** pts  ·  ${num(e.prediction_count)} pred  ·  ${pct === null ? '—' : `${pct}%`}`
+      + profileSuffix(e)
+    );
+  }
+  if (restLines.length) {
+    let chunk = [];
+    let len = 0;
+    const flush = () => {
+      if (!chunk.length) return;
+      fields.push({
+        name: fields.length === 0 ? '📋 Standings' : '\u200b',
+        value: chunk.join('\n'),
+      });
+      chunk = [];
+      len = 0;
+    };
+    const MAX_STANDING_FIELDS = 3; // keeps the embed readable and leaves field slots free
+    for (const line of restLines) {
+      if (len + line.length + 1 > 1024) {
+        if (fields.length + 1 >= MAX_STANDING_FIELDS) break; // the pending chunk is the last one
+        flush();
+      }
+      chunk.push(line);
+      len += line.length + 1;
+    }
+    const shown = fields.reduce((acc, f) => acc + f.value.split('\n').length, 0) + chunk.length;
+    let hidden = restLines.length - shown;
+    if (hidden > 0) {
+      // Field values cap at 1024 — drop rows until the "…more" note fits.
+      const NOTE_LEN = 32;
+      while (chunk.length && len + NOTE_LEN > 1024) {
+        len -= chunk.pop().length + 1;
+        hidden++;
+      }
+      chunk.push(`-# …and ${hidden} more.`);
+    }
+    flush();
+  }
+
+  // ── Summary strip ──
+  if (entries.length > 0) {
+    const totalPreds = entries.reduce((a, e) => a + Number(e.prediction_count || 0), 0);
+    const totalResolved = entries.reduce((a, e) => a + Number(e.resolved || 0), 0);
+    const totalHits = entries.reduce((a, e) => a + Number(e.hits || 0), 0);
+    fields.push(
+      { name: '👥 Players', value: `**${num(entries.length)}**`, inline: true },
+      { name: '🎯 Predictions', value: `**${num(totalPreds)}**`, inline: true },
+      {
+        name: '📈 Avg hit rate',
+        value: totalResolved > 0 ? `**${Math.round((totalHits / totalResolved) * 100)}%**` : '**—**',
+        inline: true,
+      },
+    );
+  }
+
+  // Embed descriptions cap at 4096 chars — trim trailing lines to fit.
+  let description = descLines.join('\n');
   if (description.length > 4096) {
     const note = '\n-# …more standings hidden (list too long to display).';
     const kept = [];
     let len = 0;
-    for (const line of lines) {
+    for (const line of descLines) {
       if (len + line.length + 1 + note.length > 4096) break;
       kept.push(line);
       len += line.length + 1;
@@ -1276,9 +1342,11 @@ export function buildLeaderboard(entries, monthLabel, options = {}) {
 
   const embed = {
     color: Colors.Leaderboard,
+    author: { name: 'Upshot Predictions · Season Standings' },
     title: `🏆 ${monthLabel} Leaderboard`,
     description,
-    footer: { text: 'Updated in real-time · Tap 📇 My Cards to play · 📊 My Stats for your standings' },
+    fields,
+    footer: { text: 'Updated in real-time · 📇 My Cards to play · 📊 My Stats for your standings' },
     timestamp: new Date().toISOString(),
   };
 
