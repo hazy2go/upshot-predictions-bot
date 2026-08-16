@@ -118,6 +118,9 @@ db.exec(`
     required_pack   TEXT,                              -- entrant must hold this pack (name or id) in their Upshot inventory
     min_account_age_days INTEGER NOT NULL DEFAULT 0,   -- entrant's Discord account must be ≥ this many days old (0 = off)
     min_messages    INTEGER NOT NULL DEFAULT 0,        -- entrant must have ≥ this many server messages (0 = off)
+    min_tweets      INTEGER NOT NULL DEFAULT 0,        -- entrant must have shared ≥ this many tweets in the window (0 = off)
+    tweet_window_hours INTEGER NOT NULL DEFAULT 0,     -- rolling lookback for min_tweets, in hours
+    tweet_channel_id TEXT,                             -- the tweet-share channel this giveaway counts from (snapshot of the guild setting)
     ends_at         TEXT NOT NULL,                     -- ISO timestamp
     status          TEXT NOT NULL DEFAULT 'live',      -- 'live' | 'drawn' | 'cancelled'
     winner_ids      TEXT NOT NULL DEFAULT '[]',        -- JSON: discord ids drawn
@@ -220,6 +223,24 @@ db.exec(`
     last_channel_id TEXT,
     PRIMARY KEY (guild_id, discord_id)
   );
+
+  -- Tweets (x.com / twitter.com status links) shared in the guild's configured
+  -- tweet-share channel. One row per distinct tweet PER GUILD: the primary key is
+  -- (guild_id, tweet_id), so the first member to post a given tweet owns it and
+  -- reposting someone else's link can't farm credit. Populated live by the
+  -- messageCreate listener and retroactively by /tweets scan.
+  CREATE TABLE IF NOT EXISTS tweet_posts (
+    guild_id    TEXT NOT NULL,
+    tweet_id    TEXT NOT NULL,                     -- the numeric status id from the URL
+    discord_id  TEXT NOT NULL,
+    channel_id  TEXT NOT NULL,                     -- where it was shared (thread → parent)
+    message_id  TEXT NOT NULL,
+    posted_at   TEXT NOT NULL,                     -- ISO timestamp of the Discord message
+    PRIMARY KEY (guild_id, tweet_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_tweet_posts_user
+    ON tweet_posts(guild_id, discord_id, posted_at);
 `);
 
 // ── Migrations (add columns to existing tables) ─────────────
@@ -232,6 +253,9 @@ try { db.exec('ALTER TABLE giveaways ADD COLUMN require_prediction INTEGER NOT N
 try { db.exec('ALTER TABLE giveaways ADD COLUMN required_pack TEXT'); } catch { /* already exists / table absent */ }
 try { db.exec('ALTER TABLE giveaways ADD COLUMN min_account_age_days INTEGER NOT NULL DEFAULT 0'); } catch { /* already exists / table absent */ }
 try { db.exec('ALTER TABLE giveaways ADD COLUMN min_messages INTEGER NOT NULL DEFAULT 0'); } catch { /* already exists / table absent */ }
+try { db.exec('ALTER TABLE giveaways ADD COLUMN min_tweets INTEGER NOT NULL DEFAULT 0'); } catch { /* already exists / table absent */ }
+try { db.exec('ALTER TABLE giveaways ADD COLUMN tweet_window_hours INTEGER NOT NULL DEFAULT 0'); } catch { /* already exists / table absent */ }
+try { db.exec('ALTER TABLE giveaways ADD COLUMN tweet_channel_id TEXT'); } catch { /* already exists / table absent */ }
 try { db.exec('ALTER TABLE card_battles ADD COLUMN ends_at TEXT'); } catch { /* already exists / table absent */ }
 try { db.exec("ALTER TABLE card_battles ADD COLUMN required_roles TEXT NOT NULL DEFAULT '[]'"); } catch { /* already exists / table absent */ }
 try { db.exec("ALTER TABLE card_battles ADD COLUMN excluded_roles TEXT NOT NULL DEFAULT '[]'"); } catch { /* already exists / table absent */ }
@@ -683,15 +707,18 @@ function hydrateGiveaway(row) {
     required_pack: row.required_pack || null,
     min_account_age_days: row.min_account_age_days || 0,
     min_messages: row.min_messages || 0,
+    min_tweets: row.min_tweets || 0,
+    tweet_window_hours: row.tweet_window_hours || 0,
+    tweet_channel_id: row.tweet_channel_id || null,
   };
 }
 
 export function createGiveaway(g) {
   db.prepare(`
     INSERT INTO giveaways (id, guild_id, channel_id, creator_id, pack_id, pack_name,
-      winners_count, description, required_roles, excluded_roles, excluded_users, require_prediction, required_pack, min_account_age_days, min_messages, ends_at)
+      winners_count, description, required_roles, excluded_roles, excluded_users, require_prediction, required_pack, min_account_age_days, min_messages, min_tweets, tweet_window_hours, tweet_channel_id, ends_at)
     VALUES (@id, @guild_id, @channel_id, @creator_id, @pack_id, @pack_name,
-      @winners_count, @description, @required_roles, @excluded_roles, @excluded_users, @require_prediction, @required_pack, @min_account_age_days, @min_messages, @ends_at)
+      @winners_count, @description, @required_roles, @excluded_roles, @excluded_users, @require_prediction, @required_pack, @min_account_age_days, @min_messages, @min_tweets, @tweet_window_hours, @tweet_channel_id, @ends_at)
   `).run({
     id: g.id,
     guild_id: g.guildId,
@@ -708,6 +735,9 @@ export function createGiveaway(g) {
     required_pack: g.requiredPack || null,
     min_account_age_days: g.minAccountAgeDays || 0,
     min_messages: g.minMessages || 0,
+    min_tweets: g.minTweets || 0,
+    tweet_window_hours: g.tweetWindowHours || 0,
+    tweet_channel_id: g.tweetChannelId || null,
     ends_at: g.endsAt,
   });
   return getGiveaway(g.id);
@@ -749,7 +779,8 @@ export function updateGiveawayFields(id, patch) {
   const JSON_COLS = new Set(['required_roles', 'excluded_roles', 'excluded_users']);
   const ALLOWED = new Set([
     'description', 'winners_count', 'ends_at', 'require_prediction', 'required_pack',
-    'min_account_age_days', 'min_messages', ...JSON_COLS,
+    'min_account_age_days', 'min_messages', 'min_tweets', 'tweet_window_hours',
+    'tweet_channel_id', ...JSON_COLS,
   ]);
   const sets = [];
   const params = {};
@@ -1222,6 +1253,88 @@ export function bulkUpsertMessageCounts(guildId, entries) {
 export function getMessageTrackingSince(guildId) {
   const row = db.prepare('SELECT value FROM bot_state WHERE key = ?').get(`msg_tracking_since_${guildId}`);
   return row?.value || null;
+}
+
+// ── Shared tweets (x.com links in the tweet-share channel) ──
+//
+// Credit is per distinct tweet id per guild, so a link only ever counts once no
+// matter how many times (or by whom) it is reposted. `postedAt` is an ISO string
+// so it compares directly with the ISO cutoffs the giveaway gate builds.
+
+export function recordTweetPost({ guildId, tweetId, discordId, channelId, messageId, postedAt }) {
+  const res = db.prepare(`
+    INSERT OR IGNORE INTO tweet_posts (guild_id, tweet_id, discord_id, channel_id, message_id, posted_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(guildId, tweetId, discordId, channelId, messageId, postedAt);
+  return res.changes > 0; // true = first time this tweet was shared here
+}
+
+// Bulk variant for the /tweets scan backfill. Rows that already exist are left
+// alone (first sharer keeps the credit), so re-running a scan is idempotent.
+export function bulkInsertTweetPosts(guildId, rows) {
+  const stmt = db.prepare(`
+    INSERT OR IGNORE INTO tweet_posts (guild_id, tweet_id, discord_id, channel_id, message_id, posted_at)
+    VALUES (@guild_id, @tweet_id, @discord_id, @channel_id, @message_id, @posted_at)
+  `);
+  let inserted = 0;
+  const run = db.transaction((batch) => {
+    for (const r of batch) {
+      inserted += stmt.run({
+        guild_id: guildId,
+        tweet_id: r.tweetId,
+        discord_id: r.discordId,
+        channel_id: r.channelId,
+        message_id: r.messageId,
+        posted_at: r.postedAt,
+      }).changes;
+    }
+  });
+  run(rows);
+  return inserted;
+}
+
+// How many distinct tweets this member has shared since `sinceIso`. Pass a
+// channelId to scope the count to one channel (a giveaway counts only the
+// channel it was created against, so changing the guild setting mid-flight
+// can't retroactively move the goalposts).
+export function countTweetsSince(guildId, discordId, sinceIso, channelId = null) {
+  const where = channelId ? 'AND channel_id = ?' : '';
+  const args = [guildId, discordId, sinceIso, ...(channelId ? [channelId] : [])];
+  return db.prepare(
+    `SELECT COUNT(*) AS n FROM tweet_posts
+     WHERE guild_id = ? AND discord_id = ? AND posted_at >= ? ${where}`
+  ).get(...args).n;
+}
+
+// Most recent tweets this member shared (newest first) — powers /tweets me.
+export function getRecentTweetPosts(guildId, discordId, sinceIso, limit = 5, channelId = null) {
+  const where = channelId ? 'AND channel_id = ?' : '';
+  const args = [guildId, discordId, sinceIso, ...(channelId ? [channelId] : []), limit];
+  return db.prepare(
+    `SELECT * FROM tweet_posts
+     WHERE guild_id = ? AND discord_id = ? AND posted_at >= ? ${where}
+     ORDER BY posted_at DESC LIMIT ?`
+  ).all(...args);
+}
+
+// Top sharers in a window — powers /tweets top.
+export function getTweetLeaderboard(guildId, sinceIso, limit = 15, channelId = null) {
+  const where = channelId ? 'AND channel_id = ?' : '';
+  const args = [guildId, sinceIso, ...(channelId ? [channelId] : []), limit];
+  return db.prepare(
+    `SELECT discord_id, COUNT(*) AS n, MAX(posted_at) AS last_at FROM tweet_posts
+     WHERE guild_id = ? AND posted_at >= ? ${where}
+     GROUP BY discord_id ORDER BY n DESC, last_at DESC LIMIT ?`
+  ).all(...args);
+}
+
+// Totals for the admin panel / scan summary: all-time count and the oldest row
+// we hold (i.e. how far back the tweet history actually goes).
+export function getTweetStats(guildId) {
+  return db.prepare(
+    `SELECT COUNT(*) AS total, COUNT(DISTINCT discord_id) AS sharers, MIN(posted_at) AS oldest
+     FROM tweet_posts WHERE guild_id = ?`
+  ).get(guildId) || { total: 0, sharers: 0, oldest: null };
 }
 
 export default db;
