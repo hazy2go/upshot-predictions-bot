@@ -138,6 +138,8 @@ Users can edit their predictions (title, description, deadline) within **1 hour*
 | `/upshotrank` | View your Upshot season rank and XP |
 | `/mycontests` | View your active contest lineups and card IDs |
 | `/pastleaderboard` | View a past month's leaderboard (format: `YYYY-MM`) |
+| `/tweets me [user] [window]` | How many tweets you've shared in the tweet-share channel (default window: 7d) |
+| `/tweets top [window]` | Top tweet sharers in the window |
 
 ### Admin Commands
 
@@ -165,6 +167,9 @@ Users can edit their predictions (title, description, deadline) within **1 hour*
 | `/setup export-db` | Download the full database file |
 | `/setup user-info @user` | View a user's profile, stats, and predictions |
 | `/setup view` | View config, auto-resolve timer, and prediction stats |
+| `/tweets channel #chan` | Set the channel members share their x.com links in |
+| `/tweets scan [days]` | Backfill shared tweets from that channel's history (default 90 days) |
+| `/giveaway … min-tweets:<n> tweet-window:<7d>` | Require N tweets shared in the last X before a member can enter |
 
 ## Limits
 
@@ -204,6 +209,7 @@ The `/setup auto-rate-all` and `/setup recheck-all-ratings` commands use [NVIDIA
 - Node.js 18+
 - A Discord bot token with the `bot` and `applications.commands` scopes
 - Bot permissions: Send Messages, Manage Messages, Embed Links, Attach Files, Use External Emojis
+- Privileged intents (Developer Portal → your app → Bot): **Server Members** and **Message Content**. Message Content is read for one purpose only — spotting x.com/twitter.com links in the tweet-share channel for the giveaway `min-tweets` gate.
 - *(Optional)* NVIDIA NIM API key for AI auto-rating — [build.nvidia.com](https://build.nvidia.com)
 
 ### Installation

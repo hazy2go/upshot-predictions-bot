@@ -41,6 +41,8 @@ import {
   createBadgeDef, getBadgeDef, getAllBadgeDefs, deleteBadgeDef,
   grantBadge, revokeBadge, getUserBadges, countBadgeHolders, getBadgeHolders,
   recordMessage, getMessageActivity, getMessageTrackingSince, bulkUpsertMessageCounts,
+  recordTweetPost, bulkInsertTweetPosts, countTweetsSince, getRecentTweetPosts,
+  getTweetLeaderboard, getTweetStats,
 } from './database.js';
 
 import { rateWithAI, MODEL as NIM_MODEL } from './nim.js';
@@ -58,6 +60,7 @@ import {
   buildCardBattleLive, buildCardBattlePull, buildCardBattleResults, formatGold,
   buildStoreListed, buildStoreList,
   buildAdminPanel, buildAdminPickChannel, buildAdminPickRole, buildAdminPickRoles, ADMIN_SETTINGS_LIST,
+  formatWindow,
   buildShotCallerPanel,
 } from './components.js';
 
@@ -85,7 +88,11 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,   // referral: GUILD_MEMBER_ADD
     GatewayIntentBits.GuildInvites,   // referral: invite create/delete
-    GatewayIntentBits.GuildMessages,  // /shotcallers: forward-only message counter (non-privileged; no MessageContent needed)
+    GatewayIntentBits.GuildMessages,  // /shotcallers: forward-only message counter
+    // PRIVILEGED — must be enabled in the Discord Developer Portal (Bot → Message
+    // Content Intent). Needed only to read x.com/twitter.com links out of the
+    // tweet-share channel for the giveaway tweet gate; nothing else reads content.
+    GatewayIntentBits.MessageContent,
   ],
   rest: {
     timeout: 30_000, // 30s REST timeout (default is 15s, too short for Pi with large attachments)
@@ -104,10 +111,47 @@ client.on(Events.MessageCreate, (message) => {
     if (!message.guildId || message.author?.bot || message.system) return;
     const channelId = message.channel?.isThread?.() ? (message.channel.parentId || message.channelId) : message.channelId;
     recordMessage(message.guildId, message.author.id, channelId);
+    recordTweetsFrom(message, channelId);
   } catch (err) {
-    console.error('recordMessage failed:', err.message);
+    console.error('message tracking failed:', err.message);
   }
 });
+
+// ── Tweet-share tracking ────────────────────────────────────
+//
+// Members drop x.com / twitter.com links in the configured tweet-share channel;
+// each distinct tweet is banked so the giveaway `min-tweets` gate can ask "did
+// this member share N tweets in the last X days?". Only status links count — a
+// bare profile or search URL is not a tweet. Threads under the channel count
+// too (attributed to the parent, matching the message counter).
+
+const TWEET_URL_RE = /https?:\/\/(?:www\.|mobile\.|m\.)?(?:twitter\.com|x\.com|fxtwitter\.com|vxtwitter\.com|fixupx\.com|twittpr\.com)\/(?:i\/web\/status|[A-Za-z0-9_]{1,15}\/status(?:es)?)\/(\d{5,25})/gi;
+
+// Distinct tweet ids in a message body, in order of appearance.
+function extractTweetIds(content) {
+  if (!content) return [];
+  return [...new Set([...String(content).matchAll(TWEET_URL_RE)].map(m => m[1]))];
+}
+
+// Bank every tweet link in `message`, if it landed in the guild's tweet-share
+// channel. No-op when the channel isn't configured or doesn't match.
+function recordTweetsFrom(message, resolvedChannelId) {
+  const tweetChannelId = getTweetsChannelId(message.guildId);
+  if (!tweetChannelId || resolvedChannelId !== tweetChannelId) return;
+  const ids = extractTweetIds(message.content);
+  if (!ids.length) return;
+  const postedAt = new Date(message.createdTimestamp).toISOString();
+  for (const tweetId of ids) {
+    recordTweetPost({
+      guildId: message.guildId,
+      tweetId,
+      discordId: message.author.id,
+      channelId: resolvedChannelId,
+      messageId: message.id,
+      postedAt,
+    });
+  }
+}
 
 // ── Config resolver (DB first, .env fallback) ───────────────
 
@@ -310,6 +354,11 @@ function getLuckyShotsChannelId(guildId) {
 
 function getStoreChannelId(guildId) {
   return cfg(guildId, 'store_channel', 'STORE_CHANNEL_ID');
+}
+
+// Where members share their x.com links — the source for the tweet gate.
+function getTweetsChannelId(guildId) {
+  return cfg(guildId, 'tweets_channel', 'TWEETS_CHANNEL_ID');
 }
 
 function getAdminRoleId(guildId) {
@@ -1703,6 +1752,9 @@ async function handleCancelSendPack(interaction) {
 const GIVEAWAY_MIN_MS = 60 * 1000;             // 1 minute
 const GIVEAWAY_MAX_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 const GIVEAWAY_SWEEP_INTERVAL = 20 * 1000;     // check for due giveaways every 20s
+const DEFAULT_TWEET_WINDOW = '7d';             // rolling lookback if the admin doesn't pass one
+const TWEET_WINDOW_MIN_MS = 60 * 60 * 1000;        // 1 hour
+const TWEET_WINDOW_MAX_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
 let giveawaySweepTimer = null;
 
 // Parse "30m" / "2h" / "1d" / "90s" into milliseconds. Returns null if invalid.
@@ -1761,6 +1813,8 @@ async function handleGiveaway(interaction) {
   const requirePrediction = interaction.options.getBoolean('require-prediction') ?? false;
   const minAccountAgeDays = interaction.options.getInteger('min-account-age') ?? 0;
   const minMessages = interaction.options.getInteger('min-messages') ?? 0;
+  const minTweets = interaction.options.getInteger('min-tweets') ?? 0;
+  const tweetWindowRaw = interaction.options.getString('tweet-window') || null;
   const requiredPack = interaction.options.getString('required-pack')?.trim() || null;
   const targetChannel = interaction.options.getChannel('channel') || interaction.channel;
 
@@ -1772,6 +1826,29 @@ async function handleGiveaway(interaction) {
   }
   if (durationMs < GIVEAWAY_MIN_MS || durationMs > GIVEAWAY_MAX_MS) {
     return interaction.editReply({ content: '❌ Duration must be between **1 minute** and **14 days**.' });
+  }
+
+  // Tweet gate: needs a configured share channel (that's where the counts come
+  // from) and a valid rolling window. Fail loudly here rather than silently
+  // letting everyone in — or locking everyone out — at entry time.
+  const tweetChannelId = getTweetsChannelId(interaction.guildId);
+  let tweetWindowHours = 0;
+  if (minTweets > 0) {
+    if (!tweetChannelId) {
+      return interaction.editReply({
+        content: '❌ No tweet-share channel is set, so `min-tweets` has nothing to count. Run `/tweets channel` first (then `/tweets scan` to backfill history).',
+      });
+    }
+    const windowMs = parseDuration(tweetWindowRaw || DEFAULT_TWEET_WINDOW);
+    if (!windowMs) {
+      return interaction.editReply({ content: '❌ Couldn\'t read that `tweet-window`. Use a number + unit like `48h`, `7d`, or `30d`.' });
+    }
+    if (windowMs < TWEET_WINDOW_MIN_MS || windowMs > TWEET_WINDOW_MAX_MS) {
+      return interaction.editReply({ content: '❌ `tweet-window` must be between **1 hour** and **90 days**.' });
+    }
+    tweetWindowHours = Math.round(windowMs / 3_600_000);
+  } else if (tweetWindowRaw) {
+    return interaction.editReply({ content: '❌ `tweet-window` only means something with `min-tweets` — set both, or neither.' });
   }
 
   // Confirm a token + the creator's linked account, exactly like /sendpack — the
@@ -1824,6 +1901,9 @@ async function handleGiveaway(interaction) {
     requiredPack,
     minAccountAgeDays,
     minMessages,
+    minTweets,
+    tweetWindowHours,
+    tweetChannelId: minTweets > 0 ? tweetChannelId : null,
     endsAt,
   });
 
@@ -1839,7 +1919,9 @@ async function handleGiveaway(interaction) {
 
   return interaction.editReply({
     content: `✅ Giveaway started in <#${targetChannel.id}> — **${winnersCount} winner${winnersCount > 1 ? 's' : ''}** of **${match.name}**, ends <t:${Math.floor(Date.parse(endsAt) / 1000)}:R>.`
-      + (requiredPack ? `\n-# 🎴 Entrants must hold a **${requiredPack}** pack in their Upshot inventory.` : ''),
+      + (requiredPack ? `\n-# 🎴 Entrants must hold a **${requiredPack}** pack in their Upshot inventory.` : '')
+      + (minTweets > 0 ? `\n-# 🐦 Entrants must have shared **${minTweets}** tweet(s) in <#${tweetChannelId}> in the last **${formatWindow(tweetWindowHours)}**.` : ''),
+    allowedMentions: { parse: [] },
   });
 }
 
@@ -1905,6 +1987,22 @@ async function handleGiveawayEnter(interaction, giveawayId) {
     if (count < g.min_messages) {
       return interaction.editReply({
         content: `🚫 You need at least **${g.min_messages}** messages in this server to enter — you have **${count}**. Keep chatting and come back.`,
+      });
+    }
+  }
+
+  // Tweet gate — entrant must have shared at least N tweets in the share channel
+  // within the rolling window, counted backwards from right now.
+  if (g.min_tweets > 0) {
+    const windowHours = g.tweet_window_hours || 24 * 7;
+    const since = new Date(Date.now() - windowHours * 3_600_000).toISOString();
+    const shared = countTweetsSince(interaction.guildId, userId, since, g.tweet_channel_id);
+    if (shared < g.min_tweets) {
+      const where = g.tweet_channel_id ? ` in <#${g.tweet_channel_id}>` : '';
+      return interaction.editReply({
+        content: `🚫 You need at least **${g.min_tweets}** tweet${g.min_tweets === 1 ? '' : 's'} shared${where} in the last **${formatWindow(windowHours)}** to enter — you have **${shared}**.`
+          + '\n-# Drop your x.com links there (each tweet counts once), then hit **🎟 Enter** again.',
+        allowedMentions: { parse: [] },
       });
     }
   }
@@ -2142,6 +2240,41 @@ async function handleGiveawayEdit(interaction) {
 
   const minMsg = interaction.options.getInteger('min-messages');
   if (minMsg != null) { patch.min_messages = minMsg; changes.push(minMsg ? `💬 min messages → ${minMsg}` : '💬 message gate off'); }
+
+  // Tweet gate. Turning it on (or raising it from 0) needs a configured share
+  // channel; the window may be edited on its own once the gate is already on.
+  const minTweets = interaction.options.getInteger('min-tweets');
+  const tweetWindowRaw = interaction.options.getString('tweet-window');
+  if (minTweets != null || tweetWindowRaw != null) {
+    const effectiveMin = minTweets ?? g.min_tweets;
+    if (effectiveMin > 0) {
+      const channelId = g.tweet_channel_id || getTweetsChannelId(interaction.guildId);
+      if (!channelId) {
+        return interaction.editReply({ content: '❌ No tweet-share channel is set, so `min-tweets` has nothing to count. Run `/tweets channel` first.' });
+      }
+      if (tweetWindowRaw != null) {
+        const windowMs = parseDuration(tweetWindowRaw);
+        if (!windowMs) return interaction.editReply({ content: '❌ Couldn\'t read that `tweet-window`. Use e.g. `48h`, `7d`, `30d`.' });
+        if (windowMs < TWEET_WINDOW_MIN_MS || windowMs > TWEET_WINDOW_MAX_MS) {
+          return interaction.editReply({ content: '❌ `tweet-window` must be between **1 hour** and **90 days**.' });
+        }
+        patch.tweet_window_hours = Math.round(windowMs / 3_600_000);
+        changes.push(`🐦 tweet window → last ${formatWindow(patch.tweet_window_hours)}`);
+      } else if (!g.tweet_window_hours) {
+        patch.tweet_window_hours = Math.round(parseDuration(DEFAULT_TWEET_WINDOW) / 3_600_000);
+      }
+      patch.tweet_channel_id = channelId;
+      if (minTweets != null) changes.push(`🐦 min tweets → ${minTweets} (in <#${channelId}>)`);
+      patch.min_tweets = effectiveMin;
+    } else if (minTweets != null) {
+      patch.min_tweets = 0;
+      patch.tweet_window_hours = 0;
+      patch.tweet_channel_id = null;
+      changes.push('🐦 tweet gate off');
+    } else {
+      return interaction.editReply({ content: '❌ `tweet-window` only means something once `min-tweets` is on — set `min-tweets` too.' });
+    }
+  }
 
   const rRoles = interaction.options.getString('required-roles');
   if (rRoles != null) {
@@ -6207,6 +6340,197 @@ async function handleScanMessages(interaction) {
   }
 }
 
+// ── /tweets — tweet-share tracking ──────────────────────────
+//
+// Live tracking starts the moment a tweet-share channel is configured (the
+// messageCreate listener above). `/tweets scan` backfills from history so a gate
+// can be applied to a channel that has been running for months.
+
+const tweetScanInProgress = new Set(); // guildIds currently scanning (overlap guard)
+
+// Resolve a user-supplied window ("7d") to hours, or null if unparseable.
+function parseTweetWindowHours(raw) {
+  const ms = parseDuration(raw || DEFAULT_TWEET_WINDOW);
+  if (!ms || ms < TWEET_WINDOW_MIN_MS || ms > TWEET_WINDOW_MAX_MS) return null;
+  return Math.round(ms / 3_600_000);
+}
+
+async function handleTweetsChannel(interaction) {
+  if (!isAdmin(interaction.member)) return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  const channel = interaction.options.getChannel('channel', true);
+  setConfig(interaction.guildId, 'tweets_channel', channel.id);
+  return interaction.reply({
+    content: `✅ Tweet-share channel set to <#${channel.id}>. x.com links posted there now count toward the giveaway \`min-tweets\` gate.`
+      + '\n-# Run `/tweets scan` to backfill what members already posted there.',
+    flags: ['Ephemeral'],
+    allowedMentions: { parse: [] },
+  });
+}
+
+async function handleTweetsMe(interaction) {
+  const channelId = getTweetsChannelId(interaction.guildId);
+  if (!channelId) {
+    return interaction.reply({ content: 'ℹ️ No tweet-share channel is set yet — an admin can set one with `/tweets channel`.', flags: ['Ephemeral'] });
+  }
+  const hours = parseTweetWindowHours(interaction.options.getString('window'));
+  if (!hours) return interaction.reply({ content: '❌ Couldn\'t read that window. Use e.g. `48h`, `7d`, `30d` (max 90d).', flags: ['Ephemeral'] });
+
+  const target = interaction.options.getUser('user') || interaction.user;
+  const since = new Date(Date.now() - hours * 3_600_000).toISOString();
+  const n = countTweetsSince(interaction.guildId, target.id, since, channelId);
+  const recent = getRecentTweetPosts(interaction.guildId, target.id, since, 5, channelId);
+
+  const who = target.id === interaction.user.id ? 'You have' : `<@${target.id}> has`;
+  const lines = [
+    `🐦 ${who} shared **${n}** tweet${n === 1 ? '' : 's'} in <#${channelId}> in the last **${formatWindow(hours)}**.`,
+  ];
+  if (recent.length) {
+    lines.push('', '**Most recent:**');
+    for (const r of recent) {
+      const ts = Math.floor(Date.parse(r.posted_at) / 1000);
+      lines.push(`• [tweet](https://x.com/i/web/status/${r.tweet_id}) — <t:${ts}:R>`);
+    }
+  }
+  lines.push('-# Each tweet counts once — reposting a link someone already shared doesn\'t add to the total.');
+  return interaction.reply({ content: lines.join('\n'), flags: ['Ephemeral'], allowedMentions: { parse: [] } });
+}
+
+async function handleTweetsTop(interaction) {
+  const channelId = getTweetsChannelId(interaction.guildId);
+  if (!channelId) {
+    return interaction.reply({ content: 'ℹ️ No tweet-share channel is set yet — an admin can set one with `/tweets channel`.', flags: ['Ephemeral'] });
+  }
+  const hours = parseTweetWindowHours(interaction.options.getString('window'));
+  if (!hours) return interaction.reply({ content: '❌ Couldn\'t read that window. Use e.g. `7d`, `30d` (max 90d).', flags: ['Ephemeral'] });
+
+  const since = new Date(Date.now() - hours * 3_600_000).toISOString();
+  const rows = getTweetLeaderboard(interaction.guildId, since, 15, channelId);
+  if (!rows.length) {
+    return interaction.reply({ content: `🐦 No tweets shared in <#${channelId}> in the last **${formatWindow(hours)}**.`, flags: ['Ephemeral'], allowedMentions: { parse: [] } });
+  }
+  const MEDAL = ['🥇', '🥈', '🥉'];
+  const body = rows.map((r, i) => `${MEDAL[i] || `**${i + 1}.**`} <@${r.discord_id}> — **${r.n}**`).join('\n');
+  return interaction.reply({
+    content: `## 🐦 Top tweet sharers — last ${formatWindow(hours)}\n${body}`,
+    flags: ['Ephemeral'],
+    allowedMentions: { parse: [] },
+  });
+}
+
+// Page the tweet-share channel (and its active threads) and pull every tweet
+// link out of the history. Paced like scanGuildMessages so a long scan can't
+// starve live interactions of global REST capacity.
+async function scanTweetChannel(guild, channelId, { days = 90, onProgress } = {}) {
+  const cutoffMs = days > 0 ? Date.now() - days * 86_400_000 : 0;
+  const root = await guild.channels.fetch(channelId).catch(() => null);
+  if (!root) return null;
+
+  const targets = [root];
+  try {
+    const active = await guild.channels.fetchActiveThreads();
+    for (const t of active.threads.values()) if (t.parentId === channelId) targets.push(t);
+  } catch { /* no thread access — channel itself is enough */ }
+
+  const rows = [];
+  const TOTAL_CAP = 500_000;   // messages read, not tweets found
+  const THROTTLE_MS = 120;
+  let totalMsgs = 0, capped = false;
+
+  for (const ch of targets) {
+    let before;
+    try {
+      while (true) {
+        const batch = await ch.messages.fetch({ limit: 100, ...(before ? { before } : {}) });
+        if (!batch.size) break;
+        let reachedCutoff = false;
+        for (const m of batch.values()) {
+          if (cutoffMs && m.createdTimestamp < cutoffMs) { reachedCutoff = true; continue; }
+          totalMsgs++;
+          if (m.author?.bot || m.system) continue;
+          for (const tweetId of extractTweetIds(m.content)) {
+            rows.push({
+              tweetId,
+              discordId: m.author.id,
+              channelId,                  // threads attribute to the parent
+              messageId: m.id,
+              postedAt: new Date(m.createdTimestamp).toISOString(),
+            });
+          }
+        }
+        before = batch.last()?.id;
+        if (reachedCutoff || batch.size < 100) break;
+        if (totalMsgs >= TOTAL_CAP) { capped = true; break; }
+        onProgress?.({ totalMsgs, tweets: rows.length });
+        await sleep(THROTTLE_MS);
+      }
+    } catch { /* lost access mid-scan — keep what we have */ }
+    onProgress?.({ totalMsgs, tweets: rows.length });
+    if (capped) break;
+  }
+  return { rows, totalMsgs, capped };
+}
+
+async function handleTweetsScan(interaction) {
+  if (!isAdmin(interaction.member)) return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  const guild = interaction.guild;
+  if (!guild) return interaction.reply({ content: '❌ Run this in a server.', flags: ['Ephemeral'] });
+  const channelId = getTweetsChannelId(guild.id);
+  if (!channelId) {
+    return interaction.reply({ content: '❌ Set the tweet-share channel first with `/tweets channel`.', flags: ['Ephemeral'] });
+  }
+  if (tweetScanInProgress.has(guild.id)) {
+    return interaction.reply({ content: '⏳ A tweet scan is already running for this server — let it finish first.', flags: ['Ephemeral'] });
+  }
+  const days = interaction.options.getInteger('days') ?? 90;
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+  tweetScanInProgress.add(guild.id);
+  const started = Date.now();
+  let lastEdit = 0;
+  const onProgress = (s) => {
+    if (Date.now() - lastEdit < 4000) return;
+    lastEdit = Date.now();
+    interaction.editReply({
+      content: `🔍 Scanning <#${channelId}>… **${s.totalMsgs.toLocaleString('en-US')}** messages read · **${s.tweets}** tweet link(s) found.`,
+    }).catch(() => {});
+  };
+
+  try {
+    const res = await scanTweetChannel(guild, channelId, { days, onProgress });
+    if (!res) {
+      return interaction.editReply({ content: `❌ Couldn't read <#${channelId}> — check the bot can view it and read its history.` });
+    }
+    // Oldest first so the ORIGINAL sharer of a repeated link keeps the credit
+    // (the insert ignores duplicates on the (guild, tweet) key).
+    res.rows.sort((a, b) => a.postedAt.localeCompare(b.postedAt));
+    const WRITE_CHUNK = 1000;
+    let inserted = 0;
+    for (let i = 0; i < res.rows.length; i += WRITE_CHUNK) {
+      inserted += bulkInsertTweetPosts(guild.id, res.rows.slice(i, i + WRITE_CHUNK));
+      if (i + WRITE_CHUNK < res.rows.length) await sleep(0);
+    }
+    const stats = getTweetStats(guild.id);
+    const mins = ((Date.now() - started) / 60000).toFixed(1);
+    const lines = [
+      `✅ **Tweet scan complete** (${mins} min).`,
+      `• Read **${res.totalMsgs.toLocaleString('en-US')}** messages in <#${channelId}>.`,
+      `• Found **${res.rows.length}** tweet link(s) · **${inserted}** newly banked (the rest were already tracked or duplicate links).`,
+      `• Total on record: **${stats.total}** tweet(s) from **${stats.sharers}** member(s).`,
+      days > 0 ? `• Window: last **${days}** days.` : '• Window: **all history** (up to the scan cap).',
+    ];
+    if (res.capped) lines.push('⚠️ Hit the scan cap — the oldest messages weren\'t all read.');
+    lines.push('-# The `min-tweets` giveaway gate now reflects history. Live tracking continues from here (re-running is safe).');
+    const content = lines.join('\n');
+    try { await interaction.editReply({ content }); }
+    catch { await interaction.channel?.send({ content, allowedMentions: { parse: [] } }).catch(() => {}); }
+  } catch (err) {
+    console.error('Tweet scan failed:', err.message);
+    await interaction.editReply({ content: `❌ Scan failed: ${err.message}` }).catch(() => {});
+  } finally {
+    tweetScanInProgress.delete(guild.id);
+  }
+}
+
 function gatherAdminCfg(guildId) {
   const token = getUpshotToken(guildId);
   let expiresInMin = null;
@@ -6222,6 +6546,7 @@ function gatherAdminCfg(guildId) {
       contests: getContestsChannelId(guildId),
       luckyshots: getLuckyShotsChannelId(guildId),
       store: getStoreChannelId(guildId),
+      tweets: getTweetsChannelId(guildId),
     },
     adminRole: getAdminRoleId(guildId),
     ownerId: getOwnerId(guildId),
@@ -6290,6 +6615,7 @@ async function handleAdminHelp(interaction) {
       '`/lookup-wallets file` — .txt of names → CSV of wallets/profiles',
       '`/process-tiers [month]` — award top-10 leaderboard tiers for a month',
       '`/scan-messages [days]` — backfill member message counts from history (for the min-messages predict gate)',
+      '`/tweets channel|scan|top|me` — tweet-share tracking (source for the giveaway `min-tweets` gate)',
       '`/shotcallers panel|config` — Shot Caller monitoring',
     ]],
   ];
@@ -6478,6 +6804,15 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'cardbattle': return await handleCardBattle(interaction);
         case 'process-tiers': return await handleProcessTiers(interaction);
         case 'scan-messages': return await handleScanMessages(interaction);
+        case 'tweets': {
+          switch (interaction.options.getSubcommand()) {
+            case 'me': return await handleTweetsMe(interaction);
+            case 'top': return await handleTweetsTop(interaction);
+            case 'channel': return await handleTweetsChannel(interaction);
+            case 'scan': return await handleTweetsScan(interaction);
+          }
+          return;
+        }
         case 'shotcallers': {
           const sub = interaction.options.getSubcommand();
           if (sub === 'config') return await handleShotCallersConfig(interaction);
@@ -6715,4 +7050,18 @@ process.on('SIGINT', () => {
   process.exit(0);
 });
 
-client.login(process.env.DISCORD_TOKEN);
+// A disallowed-intent rejection is otherwise an opaque stack trace that pm2 just
+// restarts forever — name the toggle that needs flipping.
+client.login(process.env.DISCORD_TOKEN).catch((err) => {
+  if (/disallowed intents/i.test(err.message)) {
+    console.error(
+      'Login rejected: a privileged intent is not enabled for this bot.\n'
+      + 'Enable BOTH "Server Members Intent" and "Message Content Intent" at\n'
+      + 'https://discord.com/developers/applications → your app → Bot → Privileged Gateway Intents,\n'
+      + 'then restart. Message Content powers the tweet-share tracking behind the giveaway min-tweets gate.'
+    );
+  } else {
+    console.error('Login failed:', err.message);
+  }
+  process.exit(1);
+});

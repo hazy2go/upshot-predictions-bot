@@ -440,6 +440,17 @@ export function buildRaffleList(raffles, topByRaffle = new Map()) {
 // winners_count, description, required_roles[], excluded_roles[],
 // excluded_users[], ends_at, status, winner_ids[], ... }
 
+// "72" → "3 days"; anything under a day stays in hours. Used for the rolling
+// tweet window, which is stored in hours.
+export function formatWindow(hours) {
+  const h = Number(hours) || 0;
+  if (h >= 24 && h % 24 === 0) {
+    const d = h / 24;
+    return `${d} day${d === 1 ? '' : 's'}`;
+  }
+  return `${h} hour${h === 1 ? '' : 's'}`;
+}
+
 // Render the eligibility rules as human-readable lines (role/user mentions).
 function giveawayRules(g) {
   const lines = [];
@@ -460,6 +471,10 @@ function giveawayRules(g) {
   }
   if (g.min_messages) {
     lines.push(`💬 **Messages in server:** at least ${g.min_messages}`);
+  }
+  if (g.min_tweets) {
+    const where = g.tweet_channel_id ? ` in <#${g.tweet_channel_id}>` : '';
+    lines.push(`🐦 **Tweets shared${where}:** at least ${g.min_tweets} in the last ${formatWindow(g.tweet_window_hours)}`);
   }
   if (g.required_pack) {
     lines.push(`🎴 **Must hold pack:** ${g.required_pack}`);
@@ -615,6 +630,7 @@ const ADMIN_SETTINGS = [
   { key: 'contests_channel',    label: 'Contests channel',    kind: 'channel', emoji: '🎯' },
   { key: 'luckyshots_channel',  label: 'Lucky Shots channel', kind: 'channel', emoji: '🎰' },
   { key: 'store_channel',       label: 'Store channel',       kind: 'channel', emoji: '🛒' },
+  { key: 'tweets_channel',      label: 'Tweet-share channel', kind: 'channel', emoji: '🐦' },
   { key: 'admin_role',          label: 'Admin role',          kind: 'role',    emoji: '👮' },
   { key: 'max_daily',           label: 'Max predictions / day', kind: 'int',   emoji: '📆' },
   { key: 'max_open',            label: 'Max open predictions',  kind: 'int',   emoji: '📂' },
@@ -649,6 +665,7 @@ export function buildAdminPanel(cfg) {
     `🎯 Contests: ${chan(ch.contests)}`,
     `🎰 Lucky Shots: ${chan(ch.luckyshots)}`,
     `🛒 Store: ${chan(ch.store)}`,
+    `🐦 Tweet share: ${chan(ch.tweets)}`,
   ].join('\n')));
   const pg = cfg.predictGates || {};
   children.push(text([

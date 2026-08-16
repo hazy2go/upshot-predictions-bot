@@ -438,6 +438,16 @@ export const commands = [
         .setMinValue(0)
         .setMaxValue(100000)
     )
+    .addIntegerOption(opt =>
+      opt.setName('min-tweets')
+        .setDescription('Minimum tweets shared in the tweet-share channel to enter (set it with /tweets channel)')
+        .setMinValue(0)
+        .setMaxValue(1000)
+    )
+    .addStringOption(opt =>
+      opt.setName('tweet-window')
+        .setDescription('How far back tweets count, e.g. 48h, 7d, 30d (default 7d — needs min-tweets)')
+    )
     .addStringOption(opt =>
       opt.setName('required-pack')
         .setDescription('Only members holding this pack can enter — pick from the store list')
@@ -509,10 +519,64 @@ export const commands = [
         .setMinValue(0)
         .setMaxValue(100000)
     )
+    .addIntegerOption(opt =>
+      opt.setName('min-tweets')
+        .setDescription('Minimum tweets shared in the tweet-share channel (0 to disable)')
+        .setMinValue(0)
+        .setMaxValue(1000)
+    )
+    .addStringOption(opt =>
+      opt.setName('tweet-window')
+        .setDescription('How far back tweets count, e.g. 48h, 7d, 30d')
+    )
     .addStringOption(opt =>
       opt.setName('required-pack')
         .setDescription('Only members holding this pack can enter — or "none" to clear')
         .setAutocomplete(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('tweets')
+    .setDescription('Tweet-share tracking — the source for the giveaway min-tweets gate')
+    .addSubcommand(sub =>
+      sub.setName('me')
+        .setDescription('How many tweets you (or another member) have shared')
+        .addUserOption(opt =>
+          opt.setName('user')
+            .setDescription('Whose count to show (default: you)')
+        )
+        .addStringOption(opt =>
+          opt.setName('window')
+            .setDescription('Lookback window, e.g. 48h, 7d, 30d (default 7d)')
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('top')
+        .setDescription('Top tweet sharers in the window')
+        .addStringOption(opt =>
+          opt.setName('window')
+            .setDescription('Lookback window, e.g. 7d, 30d (default 7d)')
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('channel')
+        .setDescription('Set the channel members share their x.com links in (admin only)')
+        .addChannelOption(opt =>
+          opt.setName('channel')
+            .setDescription('The tweet-share channel')
+            .setRequired(true)
+            .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('scan')
+        .setDescription('Backfill shared tweets from the channel\'s history (admin only)')
+        .addIntegerOption(opt =>
+          opt.setName('days')
+            .setDescription('How far back to scan (default 90, 0 = all history)')
+            .setMinValue(0)
+            .setMaxValue(3650)
+        )
     ),
 
   new SlashCommandBuilder()
