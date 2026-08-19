@@ -66,6 +66,7 @@ import {
 
 import { commands } from './commands.js';
 import { registerReferralHandlers, tryHandleReferralInteraction } from './referral.js';
+import { registerNudgePoller } from './referralNudges.js';
 
 import {
   Status, DefaultCategories, starPoints, totalPoints, weightedStarRating, isRated, renderStars,
@@ -100,6 +101,7 @@ const client = new Client({
 });
 
 registerReferralHandlers(client);
+registerNudgePoller(client);
 
 // ── Message activity counter (forward-only, powers /shotcallers) ──
 // We only read metadata (author, channel, timestamp) — never content — so this
