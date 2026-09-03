@@ -446,7 +446,7 @@ export const commands = [
     )
     .addStringOption(opt =>
       opt.setName('tweet-window')
-        .setDescription('How far back before the giveaway starts tweets count, e.g. 48h, 7d, 30d (default 7d — needs min-tweets)')
+        .setDescription('How far back from the giveaway start tweets count, e.g. 48h, 7d, 30d (default 7d)')
     )
     .addStringOption(opt =>
       opt.setName('required-pack')
@@ -527,7 +527,7 @@ export const commands = [
     )
     .addStringOption(opt =>
       opt.setName('tweet-window')
-        .setDescription('How far back before the giveaway starts tweets count, e.g. 48h, 7d, 30d')
+        .setDescription('How far back from the giveaway start tweets count, e.g. 48h, 7d, 30d')
     )
     .addStringOption(opt =>
       opt.setName('required-pack')
