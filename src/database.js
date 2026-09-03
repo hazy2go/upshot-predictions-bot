@@ -1296,13 +1296,17 @@ export function bulkInsertTweetPosts(guildId, rows) {
 // How many distinct tweets this member has shared since `sinceIso`. Pass a
 // channelId to scope the count to one channel (a giveaway counts only the
 // channel it was created against, so changing the guild setting mid-flight
-// can't retroactively move the goalposts).
-export function countTweetsSince(guildId, discordId, sinceIso, channelId = null) {
-  const where = channelId ? 'AND channel_id = ?' : '';
-  const args = [guildId, discordId, sinceIso, ...(channelId ? [channelId] : [])];
+// can't retroactively move the goalposts). Pass untilIso to close the window at
+// a fixed point — the giveaway gate ends it at the giveaway's start so tweets
+// posted after it went live can't be farmed to qualify.
+export function countTweetsSince(guildId, discordId, sinceIso, channelId = null, untilIso = null) {
+  const clauses = [];
+  const args = [guildId, discordId, sinceIso];
+  if (channelId) { clauses.push('AND channel_id = ?'); args.push(channelId); }
+  if (untilIso) { clauses.push('AND posted_at < ?'); args.push(untilIso); }
   return db.prepare(
     `SELECT COUNT(*) AS n FROM tweet_posts
-     WHERE guild_id = ? AND discord_id = ? AND posted_at >= ? ${where}`
+     WHERE guild_id = ? AND discord_id = ? AND posted_at >= ? ${clauses.join(' ')}`
   ).get(...args).n;
 }
 

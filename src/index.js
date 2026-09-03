@@ -1920,7 +1920,7 @@ async function handleGiveaway(interaction) {
   return interaction.editReply({
     content: `✅ Giveaway started in <#${targetChannel.id}> — **${winnersCount} winner${winnersCount > 1 ? 's' : ''}** of **${match.name}**, ends <t:${Math.floor(Date.parse(endsAt) / 1000)}:R>.`
       + (requiredPack ? `\n-# 🎴 Entrants must hold a **${requiredPack}** pack in their Upshot inventory.` : '')
-      + (minTweets > 0 ? `\n-# 🐦 Entrants must have shared **${minTweets}** tweet(s) in <#${tweetChannelId}> in the last **${formatWindow(tweetWindowHours)}**.` : ''),
+      + (minTweets > 0 ? `\n-# 🐦 Entrants must have shared **${minTweets}** tweet(s) in <#${tweetChannelId}> in the **${formatWindow(tweetWindowHours)} before this giveaway started**.` : ''),
     allowedMentions: { parse: [] },
   });
 }
@@ -1992,16 +1992,20 @@ async function handleGiveawayEnter(interaction, giveawayId) {
   }
 
   // Tweet gate — entrant must have shared at least N tweets in the share channel
-  // within the rolling window, counted backwards from right now.
+  // in the window that ENDS when the giveaway went live. The requirement is
+  // meant to be earned beforehand, so tweets posted after the drop don't count.
   if (g.min_tweets > 0) {
     const windowHours = g.tweet_window_hours || 24 * 7;
-    const since = new Date(Date.now() - windowHours * 3_600_000).toISOString();
-    const shared = countTweetsSince(interaction.guildId, userId, since, g.tweet_channel_id);
+    const startUnix = sqlTimeToUnix(g.created_at);
+    const startMs = startUnix ? startUnix * 1000 : Date.now();
+    const until = new Date(startMs).toISOString();
+    const since = new Date(startMs - windowHours * 3_600_000).toISOString();
+    const shared = countTweetsSince(interaction.guildId, userId, since, g.tweet_channel_id, until);
     if (shared < g.min_tweets) {
       const where = g.tweet_channel_id ? ` in <#${g.tweet_channel_id}>` : '';
       return interaction.editReply({
-        content: `🚫 You need at least **${g.min_tweets}** tweet${g.min_tweets === 1 ? '' : 's'} shared${where} in the last **${formatWindow(windowHours)}** to enter — you have **${shared}**.`
-          + '\n-# Drop your x.com links there (each tweet counts once), then hit **🎟 Enter** again.',
+        content: `🚫 You need at least **${g.min_tweets}** tweet${g.min_tweets === 1 ? '' : 's'} shared${where} in the **${formatWindow(windowHours)} before this giveaway started** to enter — you have **${shared}**.`
+          + '\n-# Only tweets posted before the giveaway went live count, so this one is out of reach — catch the next drop.',
         allowedMentions: { parse: [] },
       });
     }
@@ -2259,7 +2263,7 @@ async function handleGiveawayEdit(interaction) {
           return interaction.editReply({ content: '❌ `tweet-window` must be between **1 hour** and **90 days**.' });
         }
         patch.tweet_window_hours = Math.round(windowMs / 3_600_000);
-        changes.push(`🐦 tweet window → last ${formatWindow(patch.tweet_window_hours)}`);
+        changes.push(`🐦 tweet window → ${formatWindow(patch.tweet_window_hours)} before the giveaway started`);
       } else if (!g.tweet_window_hours) {
         patch.tweet_window_hours = Math.round(parseDuration(DEFAULT_TWEET_WINDOW) / 3_600_000);
       }
