@@ -169,7 +169,7 @@ Users can edit their predictions (title, description, deadline) within **1 hour*
 | `/setup view` | View config, auto-resolve timer, and prediction stats |
 | `/tweets channel #chan` | Set the channel members share their x.com links in |
 | `/tweets scan [days]` | Backfill shared tweets from that channel's history (default 90 days) |
-| `/giveaway … min-tweets:<n> tweet-window:<7d>` | Require N tweets shared in the last X before a member can enter |
+| `/giveaway … min-tweets:<n> tweet-window:<7d>` | Require N tweets shared in the X window **ending when the giveaway starts** — tweets posted after it goes live don't count |
 
 ## Limits
 

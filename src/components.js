@@ -474,7 +474,7 @@ function giveawayRules(g) {
   }
   if (g.min_tweets) {
     const where = g.tweet_channel_id ? ` in <#${g.tweet_channel_id}>` : '';
-    lines.push(`🐦 **Tweets shared${where}:** at least ${g.min_tweets} in the last ${formatWindow(g.tweet_window_hours)}`);
+    lines.push(`🐦 **Tweets shared${where}:** at least ${g.min_tweets} in the ${formatWindow(g.tweet_window_hours)} before this giveaway started`);
   }
   if (g.required_pack) {
     lines.push(`🎴 **Must hold pack:** ${g.required_pack}`);
