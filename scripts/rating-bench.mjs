@@ -45,6 +45,22 @@ const SAMPLES = [
     ctx: { title: 'ETH ETF flows', category: 'Crypto', deadline: '2026-07-15', description: 'ETH outperforms BTC this month because spot ETF net inflows have turned positive three weeks running and supply on exchanges is falling.' },
   },
   {
+    name: 'thin-1-nondiscriminating', expect: 1,
+    ctx: {
+      title: 'Madonna 2-3 VMA wins', category: 'Pop', deadline: '2026-09-07',
+      description: 'Madonna leads with 11 noms.',
+      eventName: 'MTV VMAs', outcomeName: 'Madonna wins 2-3 awards',
+    },
+  },
+  {
+    name: 'clear-2-discriminating', expect: 2,
+    ctx: {
+      title: 'Madonna 2-3 VMA wins', category: 'Pop', deadline: '2026-09-07',
+      description: 'Madonna leads with 11 noms but most are in the technical and video categories she has lost the last two years, and the big three are split between younger acts — so she converts only a couple.',
+      eventName: 'MTV VMAs', outcomeName: 'Madonna wins 2-3 awards',
+    },
+  },
+  {
     name: 'zero-question', expect: 0,
     ctx: { title: 'Award show', category: 'Pop', deadline: '2026-07-01', description: 'who else should win?' },
   },

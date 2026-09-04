@@ -29,7 +29,7 @@ IMPORTANT — predicting the LIKELY / EXPECTED / "obvious" / base-case outcome i
 RUBRIC:
 - 0 stars — NOT a genuine prediction / zero effort. ONLY use this when the submission adds nothing beyond restating the outcome or is plainly not a prediction. This includes: text that only echoes the card title / outcome with no reasoning whatsoever, a question ("who else should win?", "will it pump?"), bare hype or emotion ("to the moon", "easy win", "LFG"), off-topic / joke / spam / gibberish, or an empty / near-empty submission. 0 stars means zero points — no rewards even if a tweet is attached.
 - 1 star — A genuine prediction with at least a little substance: states the outcome plus some rationale, context, or specificity, even if vague or thin.
-- 2 stars — Makes a clear, specific prediction AND gives at least one concrete supporting reason that engages with the real outcome. The argument may be thin, but a real thesis is present.
+- 2 stars — Makes a clear, specific prediction AND gives at least one concrete supporting reason that ARGUES FOR THE SPECIFIC OUTCOME PREDICTED (see the DISCRIMINATING REASONING test below). The argument may be thin, but a real thesis is present.
 - 3 stars — Specific prediction backed by concrete evidence, data, or a strong mechanistic thesis. Shows real domain knowledge and clear logic.
 
 HARD RULES — these are ALWAYS 0 stars, no exceptions:
@@ -38,7 +38,13 @@ HARD RULES — these are ALWAYS 0 stars, no exceptions:
 - Bare opinion, hope, or hype with no reasoning.
 - Off-topic, joke, spam, gibberish, or empty text.
 
-To earn 1+ stars the submission must be a genuine prediction that adds at least some reasoning, context, or specificity beyond the bare outcome. To earn 2 or 3 stars it must contain clear supporting reasoning. Naming dates, levels, data points, probabilities, or a mechanism all count as reasoning.
+DISCRIMINATING REASONING — the test that separates 1 star from 2:
+A fact only earns 2 stars if it argues for the SPECIFIC outcome the user picked, rather than for the general subject of the card. Ask: does this fact make the user's outcome more likely than the OTHER outcomes available on the same card? If the same fact would equally support a different answer, it is background context, not a thesis — that is 1 star.
+- 1 star: card "Madonna wins 2-3 VMAs", submission "Madonna leads with 11 noms." — leading in nominations supports "wins something"; it is just as consistent with 1 win or 5 wins, so it does not argue for the 2-3 range. Real context, no thesis.
+- 2 stars: the same card, "Madonna leads with 11 noms but most are in categories she has lost the last two years, so she converts only a couple." — the fact is now connected to the specific range by a reason.
+Also 1 star, not 2: a single fact restated from the card, event description, or public headline with no inference added; a number quoted with no argument about what it implies; naming the favourite without saying why the picked margin, count, or range follows.
+
+To earn 1+ stars the submission must be a genuine prediction that adds at least some reasoning, context, or specificity beyond the bare outcome. To earn 2 or 3 stars it must contain clear supporting reasoning that passes the discriminating test above. Naming dates, levels, data points, probabilities, or a mechanism counts as reasoning ONLY when it is tied to why the picked outcome happens.
 
 Rate PREDICTION QUALITY (clarity, thesis, evidence, specificity) — NOT whether you think it will hit or fail, and NOT merely whether it resembles the card. A detailed, well-argued prediction that happens to align closely with the outcome is HIGH quality, not low.
 
