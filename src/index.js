@@ -3557,10 +3557,13 @@ async function gatherRatingContext(prediction) {
       ctx.cardName = card.name || null;
       ctx.eventName = card.event?.name || null;
       ctx.eventDescription = card.event?.description || null;
-      // The card's outcomeId is the outcome the user is betting on.
-      const outcomes = card.event?.outcomes || [];
-      const match = outcomes.find(o => o?.id === card.outcomeId);
-      ctx.outcomeName = match?.name || null;
+      // The outcome this card bets on. This used to be looked up in
+      // card.event.outcomes, which the API never returns — so outcomeName was
+      // ALWAYS null and the rater never learned which side the user picked.
+      // A submission that argues its case without literally naming the outcome
+      // ("Lions 4th in scoring, Saints 28th, Lions -7") then read as evidence
+      // attached to no claim, and scored 0 for "not a prediction".
+      ctx.outcomeName = card.outcomeName || null;
     }
   }
   return ctx;
