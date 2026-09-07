@@ -2635,33 +2635,71 @@ function newStageDropId() {
  * button press checks it: without the cache, 40 people tapping at once would be
  * 40 paginated REST walks.
  */
-const rsvpCache = new Map(); // eventId -> { at, ids: Set }
-const RSVP_CACHE_TTL = 20_000;
+const rsvpCache = new Map();    // eventId -> { at, ids: Set }
+const rsvpSeeding = new Map();  // eventId -> in-flight seed promise (single-flight)
+// The subscriber list is only re-walked this often. It doesn't need to be short:
+// once seeded, the gateway keeps the set exact via USER_ADD / USER_REMOVE. This
+// is just a periodic re-sync in case an event was missed during a disconnect.
+const RSVP_RESYNC_MS = 10 * 60 * 1000;
 
-async function fetchEventRsvpIds(guild, eventId, { fresh = false } = {}) {
-  const cached = rsvpCache.get(eventId);
-  if (!fresh && cached && Date.now() - cached.at < RSVP_CACHE_TTL) return cached.ids;
+/**
+ * Walk every RSVP for an event. Measured against the real guild: ~1.5-2.7s per
+ * page, on a bucket of 5 requests per 20 SECONDS. That is nowhere near cheap
+ * enough to run per button click — doing so put 2-10s of latency on every claim
+ * and pushed unrelated interactions (My Card) past Discord's 3s ack window as
+ * they queued behind it. So this runs once per event and the result is then
+ * maintained by the gateway; see rsvpSetFor and the USER_ADD/REMOVE listeners.
+ *
+ * Single-flight: twenty people tapping at once trigger ONE walk, not twenty.
+ */
+function seedRsvpSet(guild, eventId) {
+  const inFlight = rsvpSeeding.get(eventId);
+  if (inFlight) return inFlight;
 
-  const event = guild.scheduledEvents.cache.get(eventId)
-    || await guild.scheduledEvents.fetch(eventId).catch(() => null);
-  if (!event) return null; // event deleted — caller decides how to fail
+  const run = (async () => {
+    const event = guild.scheduledEvents.cache.get(eventId)
+      || await guild.scheduledEvents.fetch(eventId).catch(() => null);
+    if (!event) return null; // event deleted — caller decides how to fail
 
-  const ids = new Set();
-  let after;
-  // Hard page cap: 100 pages = 10k RSVPs, far past any realistic stage, and it
-  // guarantees we can't spin forever if the API keeps handing back a full page.
-  for (let page = 0; page < 100; page++) {
-    const batch = await event.fetchSubscribers({ limit: 100, ...(after ? { after } : {}) }).catch(() => null);
-    if (!batch || batch.size === 0) break;
-    for (const sub of batch.values()) ids.add(sub.user.id);
-    if (batch.size < 100) break;
-    after = batch.last()?.user?.id;
-    if (!after) break;
-  }
+    const ids = new Set();
+    let after;
+    // Hard page cap: 100 pages = 10k RSVPs, far past any realistic stage, and it
+    // guarantees we can't spin forever if the API keeps handing back a full page.
+    for (let page = 0; page < 100; page++) {
+      const batch = await event.fetchSubscribers({ limit: 100, ...(after ? { after } : {}) }).catch(() => null);
+      if (!batch || batch.size === 0) break;
+      for (const sub of batch.values()) ids.add(sub.user.id);
+      if (batch.size < 100) break;
+      after = batch.last()?.user?.id;
+      if (!after) break;
+    }
 
-  rsvpCache.set(eventId, { at: Date.now(), ids });
-  return ids;
+    rsvpCache.set(eventId, { at: Date.now(), ids });
+    return ids;
+  })().finally(() => rsvpSeeding.delete(eventId));
+
+  rsvpSeeding.set(eventId, run);
+  return run;
 }
+
+// The RSVP set for an event, from memory when we have it. Only the first call
+// per event (or a stale one after a long gap) costs a REST walk.
+async function rsvpSetFor(guild, eventId) {
+  const cached = rsvpCache.get(eventId);
+  if (cached && Date.now() - cached.at < RSVP_RESYNC_MS) return cached.ids;
+  const seeded = await seedRsvpSet(guild, eventId);
+  // A failed re-sync should not invalidate a set the gateway has been keeping
+  // correct — stale beats refusing everybody.
+  return seeded ?? cached?.ids ?? null;
+}
+
+// Gateway keeps the seeded sets exact, so a claim never has to ask Discord.
+client.on(Events.GuildScheduledEventUserAdd, (event, user) => {
+  rsvpCache.get(event.id)?.ids.add(user.id);
+});
+client.on(Events.GuildScheduledEventUserRemove, (event, user) => {
+  rsvpCache.get(event.id)?.ids.delete(user.id);
+});
 
 /**
  * Entry gate for claiming a sealed card. Mirrors /giveaway's rules one for one,
@@ -2715,7 +2753,7 @@ async function stageDropEligibilityError(drop, interaction) {
   // The RSVP gate — the whole reason this feature exists. Checked before the
   // pack lookup because it's the one people will actually trip.
   if (drop.require_rsvp && drop.event_id) {
-    const ids = await fetchEventRsvpIds(interaction.guild, drop.event_id);
+    const ids = await rsvpSetFor(interaction.guild, drop.event_id);
     if (ids === null) {
       // Event deleted out from under the drop. Letting everyone through would
       // silently void the gate the admin asked for, so hold the line and say why.
@@ -2907,6 +2945,10 @@ async function handleStageDropStart(interaction) {
     return interaction.editReply({ content: `❌ Couldn't post the drop in <#${targetChannel.id}>: ${e.message}` });
   }
   setStageDropMessageId(id, posted.id);
+
+  // Warm the RSVP set now, off the hot path — the walk is slow and tightly
+  // bucketed, so paying for it here means the first claim doesn't.
+  if (requireRsvp && event) seedRsvpSet(interaction.guild, event.id).catch(() => {});
 
   const bits = [];
   if (event) bits.push(`tied to **${event.name}**`);
@@ -7556,10 +7598,28 @@ async function handleAdminAction(interaction, action) {
 const SLOW_INTERACTION_ARRIVAL_MS = 1200; // late before we even started
 const SLOW_INTERACTION_TOTAL_MS = 2200;   // close to the 3s cliff
 
+// The only clock that can produce a 10062 is "Discord created it" → "Discord got
+// our acknowledgement". Everything a handler does AFTER acknowledging — an RSVP
+// lookup, an API call, the actual reply — is off that clock entirely, which is
+// what deferReply buys. So measure to the ack, not to the end of the handler.
+function stampAck(interaction, onAck) {
+  for (const method of ['reply', 'deferReply', 'update', 'deferUpdate', 'showModal', 'respond']) {
+    const original = interaction[method];
+    if (typeof original !== 'function') continue;
+    interaction[method] = async (...args) => {
+      const result = await original.apply(interaction, args);
+      onAck(); // after the await: Discord has the ack, which is what its clock sees
+      return result;
+    };
+  }
+}
+
 client.on(Events.InteractionCreate, async interaction => {
   const startedAt = Date.now();
   const arrivalMs = interaction.createdTimestamp ? startedAt - interaction.createdTimestamp : null;
   const label = () => interaction.commandName || interaction.customId || 'unknown';
+  let ackAt = null;
+  stampAck(interaction, () => { ackAt ??= Date.now(); });
   if (arrivalMs != null && arrivalMs > SLOW_INTERACTION_ARRIVAL_MS) {
     console.warn(`Interaction arrived ${arrivalMs}ms after Discord created it on \`${label()}\` — lag before our code ran (gateway/reconnect), not handler time.`);
   }
@@ -7724,7 +7784,9 @@ client.on(Events.InteractionCreate, async interaction => {
       const ageMs = interaction.createdTimestamp ? Date.now() - interaction.createdTimestamp : '?';
       // arrival = how late it reached us; handler = how long we then took. If
       // arrival is already near 3000 there was nothing to fix on our side.
-      const split = arrivalMs != null ? ` (arrival ${arrivalMs}ms + handler ${Date.now() - startedAt}ms)` : '';
+      const split = arrivalMs != null
+        ? ` (arrival ${arrivalMs}ms + ${ackAt ? `${ackAt - startedAt}ms to ack` : `${Date.now() - startedAt}ms, never acked`})`
+        : '';
       console.warn(`Interaction expired before response (${error.code}) on \`${cmd}\` after ${ageMs}ms${split}${messageScanInProgress?.size ? ' [scan running]' : ''} — skipping.`);
       return;
     }
@@ -7744,11 +7806,14 @@ client.on(Events.InteractionCreate, async interaction => {
       notifyAdmin(interaction.guildId, `⚠️ **Interaction error** (\`${cmd}\`): ${error.message}`).catch(() => {});
     }
   } finally {
-    // Near-misses that didn't error yet. These are the early warning: an
-    // interaction answered at 2.5s is one hiccup away from a 10062.
-    const totalMs = Date.now() - startedAt;
-    if (arrivalMs != null && arrivalMs + totalMs > SLOW_INTERACTION_TOTAL_MS) {
-      console.warn(`Slow interaction on \`${label()}\`: arrival ${arrivalMs}ms + handler ${totalMs}ms = ${arrivalMs + totalMs}ms (3000ms limit).`);
+    // Near-miss warning, measured against the only deadline that exists: how
+    // long Discord waited for our acknowledgement. Work after the ack is not
+    // counted — a deferred handler may take 10s afterwards and be perfectly fine.
+    if (arrivalMs != null && interaction.createdTimestamp) {
+      const ackMs = ackAt ? ackAt - interaction.createdTimestamp : null;
+      if (ackMs != null && ackMs > SLOW_INTERACTION_TOTAL_MS) {
+        console.warn(`Slow ack on \`${label()}\`: ${ackMs}ms to acknowledge (arrival ${arrivalMs}ms + ${ackAt - startedAt}ms of our own) — 3000ms limit.`);
+      }
     }
   }
 });
