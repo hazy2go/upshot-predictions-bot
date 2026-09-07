@@ -7548,7 +7548,21 @@ async function handleAdminAction(interaction, action) {
 
 // ── Event routing ────────────────────────────────────────────
 
+// Discord gives us 3 seconds from the moment IT creates an interaction to the
+// moment we acknowledge. A 10062 only tells us we missed that window, never
+// whether the interaction reached us late (gateway lag, a reconnect, the process
+// restarting) or whether our own handler was slow. Splitting the two is the
+// difference between "nothing to fix" and "a handler is blocking".
+const SLOW_INTERACTION_ARRIVAL_MS = 1200; // late before we even started
+const SLOW_INTERACTION_TOTAL_MS = 2200;   // close to the 3s cliff
+
 client.on(Events.InteractionCreate, async interaction => {
+  const startedAt = Date.now();
+  const arrivalMs = interaction.createdTimestamp ? startedAt - interaction.createdTimestamp : null;
+  const label = () => interaction.commandName || interaction.customId || 'unknown';
+  if (arrivalMs != null && arrivalMs > SLOW_INTERACTION_ARRIVAL_MS) {
+    console.warn(`Interaction arrived ${arrivalMs}ms after Discord created it on \`${label()}\` — lag before our code ran (gateway/reconnect), not handler time.`);
+  }
   try {
     if (await tryHandleReferralInteraction(interaction)) return;
 
@@ -7700,6 +7714,7 @@ client.on(Events.InteractionCreate, async interaction => {
         return await handleLeaderboardGrantRole(interaction, monthKey);
       }
     }
+    return undefined;
   } catch (error) {
     // 10062 (Unknown interaction) / 40060 (already acknowledged) are benign: the
     // interaction expired before we could respond (usually the bot was briefly
@@ -7707,7 +7722,10 @@ client.on(Events.InteractionCreate, async interaction => {
     if (error?.code === 10062 || error?.code === 40060) {
       const cmd = interaction.commandName || interaction.customId || 'unknown';
       const ageMs = interaction.createdTimestamp ? Date.now() - interaction.createdTimestamp : '?';
-      console.warn(`Interaction expired before response (${error.code}) on \`${cmd}\` after ${ageMs}ms${messageScanInProgress?.size ? ' [scan running]' : ''} — skipping.`);
+      // arrival = how late it reached us; handler = how long we then took. If
+      // arrival is already near 3000 there was nothing to fix on our side.
+      const split = arrivalMs != null ? ` (arrival ${arrivalMs}ms + handler ${Date.now() - startedAt}ms)` : '';
+      console.warn(`Interaction expired before response (${error.code}) on \`${cmd}\` after ${ageMs}ms${split}${messageScanInProgress?.size ? ' [scan running]' : ''} — skipping.`);
       return;
     }
     console.error('Interaction error:', error);
@@ -7724,6 +7742,13 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.guildId) {
       const cmd = interaction.commandName || interaction.customId || 'unknown';
       notifyAdmin(interaction.guildId, `⚠️ **Interaction error** (\`${cmd}\`): ${error.message}`).catch(() => {});
+    }
+  } finally {
+    // Near-misses that didn't error yet. These are the early warning: an
+    // interaction answered at 2.5s is one hiccup away from a 10062.
+    const totalMs = Date.now() - startedAt;
+    if (arrivalMs != null && arrivalMs + totalMs > SLOW_INTERACTION_TOTAL_MS) {
+      console.warn(`Slow interaction on \`${label()}\`: arrival ${arrivalMs}ms + handler ${totalMs}ms = ${arrivalMs + totalMs}ms (3000ms limit).`);
     }
   }
 });
