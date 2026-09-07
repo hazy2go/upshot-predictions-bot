@@ -7892,6 +7892,19 @@ client.once(Events.ClientReady, async () => {
   stageDropSweepTimer = setTimeout(safeRunStageDropSweep, 30_000);
   console.log(`   Card battle sweep: first check in 30s, then every 20s`);
 
+  // Re-warm the RSVP set for any drop still taking claims. The set lives in
+  // memory and the gateway keeps it current, so a restart mid-drop would
+  // otherwise leave it cold and make the next person to tap pay for the walk.
+  // Restarting shortly before a stage is exactly when that would happen.
+  for (const guild of client.guilds.cache.values()) {
+    for (const d of getRecentStageDrops(guild.id, 25)) {
+      if (d.status !== 'live' || !d.require_rsvp || !d.event_id) continue;
+      seedRsvpSet(guild, d.event_id)
+        .then(ids => console.log(`   Stage drop ${d.id}: RSVP set warmed (${ids ? ids.size : 0} RSVP'd to "${d.event_name || d.event_id}")`))
+        .catch(() => {});
+    }
+  }
+
   // Start the badge sweep (first run after 3 min, then every 12h). Auto-grants
   // contest-lineup badges to eligible linked users.
   badgeTimer = setTimeout(safeRunBadgeSweep, 180_000);
