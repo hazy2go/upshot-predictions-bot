@@ -97,6 +97,11 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,   // referral: GUILD_MEMBER_ADD
     GatewayIntentBits.GuildInvites,   // referral: invite create/delete
     GatewayIntentBits.GuildMessages,  // /shotcallers: forward-only message counter
+    // /stagedrop: keeps guild.scheduledEvents.cache populated from the gateway.
+    // Not a nicety — GET /guilds/{id}/scheduled-events buckets at ONE request
+    // per ~10s, so a REST-backed event picker 429s on the second keystroke and
+    // the field shows "loading failed". Non-privileged; no portal change needed.
+    GatewayIntentBits.GuildScheduledEvents,
     // PRIVILEGED — must be enabled in the Discord Developer Portal (Bot → Message
     // Content Intent). Needed only to read x.com/twitter.com links out of the
     // tweet-share channel for the giveaway tweet gate; nothing else reads content.
@@ -2637,7 +2642,8 @@ async function fetchEventRsvpIds(guild, eventId, { fresh = false } = {}) {
   const cached = rsvpCache.get(eventId);
   if (!fresh && cached && Date.now() - cached.at < RSVP_CACHE_TTL) return cached.ids;
 
-  const event = await guild.scheduledEvents.fetch(eventId).catch(() => null);
+  const event = guild.scheduledEvents.cache.get(eventId)
+    || await guild.scheduledEvents.fetch(eventId).catch(() => null);
   if (!event) return null; // event deleted — caller decides how to fail
 
   const ids = new Set();
@@ -2802,9 +2808,13 @@ async function handleStageDropStart(interaction) {
   // inherit its start time — and so a bad id fails here, not at claim time.
   let event = null;
   if (eventId) {
-    event = await interaction.guild.scheduledEvents.fetch(eventId).catch(() => null);
+    event = interaction.guild.scheduledEvents.cache.get(eventId)
+      || await interaction.guild.scheduledEvents.fetch(eventId).catch(() => null);
     if (!event) {
-      return interaction.editReply({ content: '❌ I couldn\'t find that scheduled event. Pick one from the autocomplete list.' });
+      return interaction.editReply({
+        content: '❌ I couldn\'t find that scheduled event — pick one from the autocomplete list.'
+          + '\n-# If the list wouldn\'t load, Discord was rate-limiting the lookup. Wait a few seconds and try again.',
+      });
     }
   }
 
@@ -3247,40 +3257,88 @@ async function handleStageDropMine(interaction, dropId) {
   });
 }
 
+// Short cache so per-keystroke autocomplete doesn't hammer Discord. This one is
+// not optional: GET /guilds/{id}/scheduled-events has a tight per-route bucket,
+// and fetching it on every keystroke earns a 429 with a ~8s retry_after — which
+// discord.js dutifully waits out, blowing the 3s autocomplete window and showing
+// the user "loading failed". One fetch a minute, and stale data on any failure,
+// beats a fresh list nobody ever sees.
+const scheduledEventsCache = new Map(); // guildId -> { at, events: [{ id, name, startMs }] }
+const SCHEDULED_EVENTS_TTL = 60_000;
+
+const toEventChoice = (e) => ({ id: e.id, name: e.name, startMs: e.scheduledStartTimestamp || 0 });
+
+async function getScheduledEventsCached(guild) {
+  // Fast path: with the GuildScheduledEvents intent the gateway keeps this cache
+  // current (seeded on GUILD_CREATE, updated on create/update/delete), so the
+  // picker costs nothing and can't be rate limited.
+  if (guild.scheduledEvents.cache.size) {
+    return [...guild.scheduledEvents.cache.values()].map(toEventChoice);
+  }
+
+  const hit = scheduledEventsCache.get(guild.id);
+  if (hit && Date.now() - hit.at < SCHEDULED_EVENTS_TTL) return hit.events;
+  try {
+    // Fallback only — an empty cache genuinely means "no events" most of the
+    // time, so this fires at most once a minute and tolerates being refused.
+    const fetched = await guild.scheduledEvents.fetch();
+    const events = [...fetched.values()].map(toEventChoice);
+    scheduledEventsCache.set(guild.id, { at: Date.now(), events });
+    return events;
+  } catch (err) {
+    // Rate limited or unreachable — serve the last good list rather than an
+    // empty one, so a 429 doesn't wipe the picker mid-typing.
+    if (hit) return hit.events;
+    console.error('Stage drop: scheduled-event lookup failed:', err.message);
+    return [];
+  }
+}
+
 // Autocomplete: upcoming scheduled events for `start`, recent drops elsewhere.
+// Every branch must answer inside Discord's 3s window, so all of them are
+// best-effort and none of them may throw.
 async function handleStageDropAutocomplete(interaction) {
-  const focused = interaction.options.getFocused(true);
-  const q = (focused.value || '').toLowerCase();
+  try {
+    const focused = interaction.options.getFocused(true);
+    const q = (focused.value || '').toLowerCase();
 
-  if (focused.name === 'event') {
-    const events = await interaction.guild.scheduledEvents.fetch().catch(() => null);
-    if (!events) return interaction.respond([]);
-    const choices = [...events.values()]
-      .sort((a, b) => (a.scheduledStartTimestamp || 0) - (b.scheduledStartTimestamp || 0))
-      .filter(e => !q || e.name.toLowerCase().includes(q))
-      .slice(0, 25)
-      .map(e => {
-        const when = e.scheduledStartTimestamp
-          ? new Date(e.scheduledStartTimestamp).toISOString().slice(0, 16).replace('T', ' ')
-          : 'no date';
-        return { name: `${e.name} — ${when}`.slice(0, 100), value: e.id };
-      });
-    return interaction.respond(choices);
+    if (focused.name === 'event') {
+      const events = await getScheduledEventsCached(interaction.guild);
+      const choices = events
+        .slice()
+        .sort((a, b) => (a.startMs || 0) - (b.startMs || 0))
+        .filter(e => !q || e.name.toLowerCase().includes(q))
+        .slice(0, 25)
+        .map(e => {
+          // Discord renders <t:> only in message content, never in a choice
+          // label, so the date has to be plain text here.
+          const when = e.startMs
+            ? new Date(e.startMs).toISOString().slice(0, 16).replace('T', ' ') + ' UTC'
+            : 'no date';
+          return { name: `${e.name} — ${when}`.slice(0, 100), value: e.id };
+        });
+      return await interaction.respond(choices);
+    }
+
+    if (focused.name === 'drop') {
+      const drops = getRecentStageDrops(interaction.guildId, 25)
+        .filter(d => !q || (d.event_name || d.id).toLowerCase().includes(q))
+        .slice(0, 25)
+        .map(d => ({
+          name: `${d.event_name || 'Drop'} · ${d.status} · ${countStageDropPulls(d.id)} sealed`.slice(0, 100),
+          value: d.id,
+        }));
+      return await interaction.respond(drops);
+    }
+
+    if (focused.name === 'required-pack') return await handleRequiredPackAutocomplete(interaction);
+    return await interaction.respond([]);
+  } catch (err) {
+    // Never leave the field spinning — an empty list is a better failure than
+    // "loading failed". Already-acknowledged (40060) just means we were slow.
+    if (err?.code !== 40060) console.error('Stage drop autocomplete failed:', err.message);
+    return interaction.respond([]).catch(() => {});
   }
-
-  if (focused.name === 'drop') {
-    const drops = getRecentStageDrops(interaction.guildId, 25)
-      .filter(d => !q || (d.event_name || d.id).toLowerCase().includes(q))
-      .slice(0, 25)
-      .map(d => ({
-        name: `${d.event_name || 'Drop'} · ${d.status} · ${countStageDropPulls(d.id)} sealed`.slice(0, 100),
-        value: d.id,
-      }));
-    return interaction.respond(drops);
-  }
-
-  if (focused.name === 'required-pack') return handleRequiredPackAutocomplete(interaction);
-  return interaction.respond([]);
 }
 
 // ── Stage drop auto-seal sweep (timed drops) ────────────────
