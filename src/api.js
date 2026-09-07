@@ -348,6 +348,11 @@ async function fetchCardDetails(cardId, { retries, timeout }) {
       event: card.event || null,
       eventDate: card.event?.eventDate || null,
       outcomeId: card.outcomeId || null,
+      // The name of the outcome this card is betting on ("Detroit Lions Win").
+      // The API ships it under `outcome` with the includes we already request;
+      // it used to be dropped here, which left the AI rater with no idea WHICH
+      // side of the event a submission was picking (see gatherRatingContext).
+      outcomeName: card.outcome?.name || null,
       eventStatus: card.event?.status || null,
       winningOutcomeId: card.event?.winningOutcomeId || null,
       resolvedAt: card.event?.resolvedAt || null,
