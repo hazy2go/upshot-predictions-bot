@@ -1689,7 +1689,7 @@ function sealedLine(n) {
  *   sealed   — pulls closed, cards still hidden, waiting on the stage
  *   revealed — archived pointer to the results
  */
-export function buildStageDropLive(drop, { pulls = 0, remaining = null, potGold = 0 } = {}) {
+export function buildStageDropLive(drop, { pulls = 0, remaining = null, potGold = 0, note = null } = {}) {
   const live = drop.status === 'live';
   const revealed = drop.status === 'revealed';
   const cancelled = drop.status === 'cancelled';
@@ -1700,6 +1700,9 @@ export function buildStageDropLive(drop, { pulls = 0, remaining = null, potGold 
     : live ? '## 🔒 Sealed Card Drop'
     : '## 🔒 Sealed Card Drop — 🤐 Sealed';
   children.push(text(heading));
+  // Reminder re-posts carry a one-line nudge ("30 min left, last chance") right
+  // under the heading, where it reads before the rules do.
+  if (note) children.push(text(`> ${note.replace(/[\r\n]+/g, ' ')}`));
 
   if (cancelled) {
     children.push(text('-# This drop was cancelled. No cards were revealed.'));
@@ -1773,6 +1776,18 @@ export function buildStageDropLive(drop, { pulls = 0, remaining = null, potGold 
   children.push(actionRow(...row));
 
   return { components: [container(revealed ? Colors.Leaderboard : Colors.Gold, children)], flags: 1 << 15 };
+}
+
+// Left in place of a superseded drop message after a reminder re-post. The old
+// post keeps its spot in the channel but stops showing a stale counter, and its
+// buttons are gone so everyone converges on the current one.
+export function buildStageDropMoved({ channelId, messageUrl }) {
+  const children = [
+    text('## 🔒 Sealed Card Drop — re-posted'),
+    text(`-# This drop moved to a newer message${channelId ? ` in <#${channelId}>` : ''}. Claim your card there.`),
+  ];
+  if (messageUrl) children.push(actionRow(linkButton(messageUrl, '➡️ Go to the drop')));
+  return { components: [container(Colors.Gold, children)], flags: 1 << 15 };
 }
 
 // Ephemeral receipt handed to a member the moment they claim. Deliberately tells

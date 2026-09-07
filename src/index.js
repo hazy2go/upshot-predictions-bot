@@ -38,7 +38,7 @@ import {
   createCardBattle, getCardBattle, setCardBattleMessageId, setCardBattleStatus,
   countCardBattlePulls, getCardBattlePulls, pullCardFromBattle, getDueCardBattles,
   createStageDrop, getStageDrop, getLatestUnrevealedStageDrop, getRecentStageDrops,
-  getDueStageDrops, setStageDropMessageId, setStageDropStatus,
+  getDueStageDrops, setStageDropMessageId, setStageDropLocation, setStageDropStatus,
   countStageDropPulls, sumStageDropGold, getStageDropPulls, getStageDropPull,
   pullCardFromStageDrop,
   hasAnyPrediction,
@@ -64,6 +64,7 @@ import {
   buildCardBattleLive, buildCardBattlePull, buildCardBattleResults, formatGold,
   buildStageDropLive, buildStageDropSealedReceipt, buildStageDropRevealCard,
   buildStageDropResults, buildStageDropDm, buildStageDropRevealIntro,
+  buildStageDropMoved,
   buildStoreListed, buildStoreList,
   buildAdminPanel, buildAdminPickChannel, buildAdminPickRole, buildAdminPickRoles, ADMIN_SETTINGS_LIST,
   formatWindow,
@@ -2766,6 +2767,7 @@ async function handleStageDrop(interaction) {
   switch (interaction.options.getSubcommand()) {
     case 'start': return handleStageDropStart(interaction);
     case 'reveal': return handleStageDropReveal(interaction);
+    case 'redrop': return handleStageDropRedrop(interaction);
     case 'close': return handleStageDropClose(interaction);
     case 'cancel': return handleStageDropCancel(interaction);
   }
@@ -2913,6 +2915,93 @@ async function handleStageDropStart(interaction) {
     content: `✅ Sealed drop posted in <#${targetChannel.id}> with **${drop.pool_size}** card${drop.pool_size === 1 ? '' : 's'} in the pot.`
       + (bits.length ? `\n-# ${bits.join(' · ')}` : '')
       + '\n-# When you\'re live on stage, run `/stagedrop reveal` to open them.',
+    allowedMentions: { parse: [] },
+  });
+}
+
+/**
+ * Re-post a drop that's still running — the reminder announcement. Same drop id,
+ * same pool, same claims: only the message moves. Everything that tracks the
+ * drop keys off its id, so the buttons on the new post are the same buttons.
+ *
+ * The old message can't just be left as-is: its counter stops updating (only the
+ * recorded message_id gets refreshed) and it would sit there advertising a stale
+ * number next to a live button. So by default it's replaced with a pointer at
+ * the new one; `keep-old` opts out.
+ */
+async function handleStageDropRedrop(interaction) {
+  const drop = resolveStageDropTarget(interaction);
+  if (!drop) {
+    return interaction.reply({ content: '❌ No drop to re-post — start one with `/stagedrop start`.', flags: ['Ephemeral'] });
+  }
+  if (drop.status === 'revealed' || drop.status === 'cancelled') {
+    return interaction.reply({
+      content: `❌ That drop is **${drop.status}** — re-posting only makes sense while it's still running.`,
+      flags: ['Ephemeral'],
+    });
+  }
+
+  const note = interaction.options.getString('note')?.trim() || null;
+  const mentionRaw = interaction.options.getString('mention') || '';
+  const keepOld = interaction.options.getBoolean('keep-old') ?? false;
+  const targetChannel = interaction.options.getChannel('channel')
+    || await safeGetChannel(drop.channel_id)
+    || interaction.channel;
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  // Only roles named in the option get pinged, and only those — never a blanket
+  // @everyone from a stray mention in the note.
+  const mentionRoles = [...new Set([...mentionRaw.matchAll(/<@&(\d+)>/g)].map(m => m[1]))];
+  const content = mentionRoles.length ? mentionRoles.map(r => `<@&${r}>`).join(' ') : undefined;
+
+  const pulls = countStageDropPulls(drop.id);
+  const payload = buildStageDropLive(drop, {
+    pulls,
+    remaining: Math.max(0, drop.pool_size - pulls),
+    potGold: sumStageDropGold(drop.id),
+    note,
+  });
+
+  let posted;
+  try {
+    posted = await targetChannel.send({
+      ...(content ? { content } : {}),
+      ...payload,
+      allowedMentions: { roles: mentionRoles },
+    });
+  } catch (e) {
+    return interaction.editReply({ content: `❌ Couldn't re-post the drop in <#${targetChannel.id}>: ${e.message}` });
+  }
+
+  // Retire the previous post before repointing the drop, so a failure here can't
+  // leave two live-looking messages. Best-effort: the old one may be gone already.
+  const prevChannelId = drop.channel_id;
+  const prevMessageId = drop.message_id;
+  let retired = false;
+  if (!keepOld && prevMessageId && prevMessageId !== posted.id) {
+    const prevChannel = await safeGetChannel(prevChannelId);
+    const prevMsg = prevChannel ? await safeGetMessage(prevChannel, prevMessageId) : null;
+    if (prevMsg) {
+      retired = await prevMsg.edit({
+        ...buildStageDropMoved({ channelId: targetChannel.id, messageUrl: posted.url }),
+        allowedMentions: { parse: [] },
+      }).then(() => true).catch(() => false);
+    }
+  }
+
+  setStageDropLocation(drop.id, { channelId: targetChannel.id, messageId: posted.id });
+  // The throttle is keyed by drop id — clear it so the first claim on the new
+  // message refreshes it immediately instead of waiting out the old window.
+  stageDropCountEditAt.delete(drop.id);
+
+  const bits = [`**${pulls}** card${pulls === 1 ? '' : 's'} already claimed — all kept`];
+  if (note) bits.push('reminder note added');
+  if (mentionRoles.length) bits.push(`pinged ${mentionRoles.map(r => `<@&${r}>`).join(' ')}`);
+  bits.push(keepOld ? 'previous message left as-is' : (retired ? 'previous message now points here' : 'previous message not found'));
+
+  return interaction.editReply({
+    content: `🔁 Re-posted the drop in <#${targetChannel.id}>.\n-# ${bits.join(' · ')}`,
     allowedMentions: { parse: [] },
   });
 }
@@ -7244,7 +7333,7 @@ async function handleAdminHelp(interaction) {
       '`/giveaway pack duration …` — run a pack giveaway (react to enter, auto-drawn)',
       '`/giveaway-edit giveaway …` — change settings, end early, or cancel a live giveaway',
       '`/cardbattle [duration] …` — drop a "highest card wins" battle (members pull a random gold card)',
-      '`/stagedrop start|reveal|close|cancel` — sealed card drop for a live Stage: cards stay hidden until you reveal them, and claiming can require an RSVP to the event',
+      '`/stagedrop start|reveal|redrop|close|cancel` — sealed card drop for a live Stage: cards stay hidden until you reveal them, and claiming can require an RSVP to the event',
     ]],
     ['🏅 Badges', [
       '`/badge create` · `list` · `holders` · `delete` · `check` · `grant` · `revoke`',

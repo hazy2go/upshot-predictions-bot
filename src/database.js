@@ -1052,6 +1052,14 @@ export function setStageDropMessageId(id, messageId) {
   db.prepare('UPDATE stage_drops SET message_id = ? WHERE id = ?').run(messageId, id);
 }
 
+// Re-posting a drop as a reminder moves the live message — and possibly the
+// channel with it. The counter follows whatever message is recorded here, so
+// both must move together or the refresh keeps editing the abandoned post.
+export function setStageDropLocation(id, { channelId, messageId }) {
+  db.prepare('UPDATE stage_drops SET channel_id = ?, message_id = ? WHERE id = ?')
+    .run(channelId, messageId, id);
+}
+
 export function setStageDropStatus(id, status) {
   const revealedAt = status === 'revealed' ? new Date().toISOString() : null;
   if (revealedAt) {
