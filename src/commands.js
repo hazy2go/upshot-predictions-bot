@@ -868,6 +868,32 @@ export const commands = [
         )
     )
     .addSubcommand(sub =>
+      sub.setName('redrop')
+        .setDescription('Re-post the same drop as a reminder — same cards, same claims, fresh message')
+        .addStringOption(opt =>
+          opt.setName('drop')
+            .setDescription('Which drop to re-post (defaults to the most recent open one)')
+            .setAutocomplete(true)
+        )
+        .addStringOption(opt =>
+          opt.setName('note')
+            .setDescription('A reminder line shown at the top, e.g. "30 minutes left — last chance to claim"')
+        )
+        .addChannelOption(opt =>
+          opt.setName('channel')
+            .setDescription('Re-post somewhere else (defaults to where the drop already lives)')
+            .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+        )
+        .addStringOption(opt =>
+          opt.setName('mention')
+            .setDescription('Ping a role with the reminder, e.g. @Members (nothing is pinged by default)')
+        )
+        .addBooleanOption(opt =>
+          opt.setName('keep-old')
+            .setDescription('Leave the previous message untouched instead of pointing it at the new one')
+        )
+    )
+    .addSubcommand(sub =>
       sub.setName('close')
         .setDescription('Close claims early — cards stay sealed until you reveal them')
         .addStringOption(opt =>
