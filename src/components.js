@@ -44,6 +44,21 @@ function linkButton(url, label) {
 }
 
 /**
+ * Components v2 Section: up to 3 text blocks with a thumbnail pinned to their
+ * right. Unlike a MediaGallery — which is an unlabelled grid — this keeps each
+ * image attached to its own line, which is the difference between a readable
+ * leaderboard and five pictures nobody can match to a name.
+ */
+function section(textLines, thumbnailUrl) {
+  const node = {
+    type: CT.Section,
+    components: textLines.slice(0, 3).map(t => text(t)),
+  };
+  if (thumbnailUrl) node.accessory = { type: CT.Thumbnail, media: { url: thumbnailUrl } };
+  return node;
+}
+
+/**
  * MediaGallery that references local attachments via attachment:// protocol.
  * Filenames must match the AttachmentBuilder `name` used when sending the message.
  */
@@ -1656,6 +1671,223 @@ export function buildCardBattleResults({ tiers = [], totalPulls = 0 } = {}) {
   children.push(separator());
   children.push(text(`-# ${totalPulls} total pull${totalPulls === 1 ? '' : 's'}.`));
   return { components: [container(Colors.Gold, children)], flags: 1 << 15 };
+}
+
+// ── Stage drops (sealed cards, revealed live on stage) ───────
+
+const RANK_MEDALS = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣'];
+
+// A face-down card. Nothing about the card is shown while the drop is sealed —
+// the whole mechanic depends on nobody knowing what is in the pot.
+function sealedLine(n) {
+  return '🎴 '.repeat(Math.min(n, 10)).trim();
+}
+
+/**
+ * The live drop message. Three faces of the same message:
+ *   live     — button open, counter ticking
+ *   sealed   — pulls closed, cards still hidden, waiting on the stage
+ *   revealed — archived pointer to the results
+ */
+export function buildStageDropLive(drop, { pulls = 0, remaining = null, potGold = 0 } = {}) {
+  const live = drop.status === 'live';
+  const revealed = drop.status === 'revealed';
+  const cancelled = drop.status === 'cancelled';
+  const children = [];
+
+  const heading = cancelled ? '## 🔒 Sealed Card Drop — ❌ Cancelled'
+    : revealed ? '## 🔒 Sealed Card Drop — ✅ Revealed'
+    : live ? '## 🔒 Sealed Card Drop'
+    : '## 🔒 Sealed Card Drop — 🤐 Sealed';
+  children.push(text(heading));
+
+  if (cancelled) {
+    children.push(text('-# This drop was cancelled. No cards were revealed.'));
+    return { components: [container(Colors.Admin, children)], flags: 1 << 15 };
+  }
+
+  if (live) {
+    children.push(text(
+      '**Claim one random card — but you don\'t get to see it.**\n'
+      + 'Your card stays sealed until it\'s opened live on stage. Highest value wins the pack.'
+    ));
+  } else if (revealed) {
+    children.push(text('-# The cards have been opened — results are posted below.'));
+  } else {
+    children.push(text('**Pulls are closed. Every card is still sealed.**\nThey get opened live on stage — be there to see if yours is the top one.'));
+  }
+
+  children.push(separator());
+
+  const meta = [];
+  meta.push(`🔒 **Sealed cards claimed:** ${pulls}`);
+  if (pulls > 0) meta.push(`🪙 **Gold sitting in the pot:** ${formatGold(potGold)}`);
+  if (remaining != null && live) meta.push(`📦 **Still up for grabs:** ${remaining}`);
+  children.push(text(meta.join('\n')));
+
+  if (pulls > 0) children.push(text(sealedLine(pulls)));
+
+  if (drop.event_name) {
+    children.push(separator());
+    const endMs = drop.ends_at ? Date.parse(drop.ends_at) : NaN;
+    const when = Number.isFinite(endMs)
+      ? (live ? `\n-# Claims close <t:${Math.floor(endMs / 1000)}:R>, right as we go live.` : '')
+      : '';
+    children.push(text(`🎙️ **Opening live at:** ${drop.event_name}${when}`));
+  } else {
+    const endMs = drop.ends_at ? Date.parse(drop.ends_at) : NaN;
+    if (Number.isFinite(endMs) && live) {
+      children.push(separator());
+      children.push(text(`🕒 **Claims close:** <t:${Math.floor(endMs / 1000)}:R>`));
+    }
+  }
+
+  // Entry requirements, spelled out so nobody taps into a rejection.
+  const reqs = [];
+  if (drop.require_rsvp) reqs.push('📅 **You must RSVP to the event to claim a card**');
+  const reqRoles = drop.required_roles || [];
+  const excRoles = drop.excluded_roles || [];
+  const excUsers = drop.excluded_users || [];
+  if (reqRoles.length) reqs.push(`✅ Must have: ${reqRoles.map(r => `<@&${r}>`).join(' or ')}`);
+  if (excRoles.length) reqs.push(`⛔ Barred roles: ${excRoles.map(r => `<@&${r}>`).join(', ')}`);
+  if (excUsers.length) reqs.push(`⛔ ${excUsers.length} member(s) excluded`);
+  if (drop.require_prediction) reqs.push('🔮 Must have made at least one prediction');
+  if (drop.required_pack) reqs.push(`🎴 Must hold a **${drop.required_pack}** pack`);
+  if (drop.min_account_age_days > 0) reqs.push(`🕰 Account must be ${drop.min_account_age_days}+ days old`);
+  if (drop.min_messages > 0) reqs.push(`💬 ${drop.min_messages}+ messages in this server`);
+  if (drop.min_tweets > 0) {
+    const w = drop.tweet_window_hours ? ` in the ${formatWindow(drop.tweet_window_hours)} before this drop` : '';
+    reqs.push(`🐦 ${drop.min_tweets}+ tweet${drop.min_tweets === 1 ? '' : 's'} shared${w}`);
+  }
+  if (reqs.length) {
+    children.push(separator());
+    children.push(text(reqs.map(r => `-# ${r}`).join('\n')));
+  }
+
+  children.push(separator());
+  const row = [
+    button(`stagedrop_pull:${drop.id}`, live ? '🔒 Claim a Sealed Card' : '🔒 Claims Closed', ButtonStyle.Success, live ? {} : { disabled: true }),
+  ];
+  if (drop.event_url) row.push(linkButton(drop.event_url, '📅 RSVP to the Event'));
+  row.push(button(`stagedrop_mine:${drop.id}`, '🎴 My Card', ButtonStyle.Secondary));
+  children.push(actionRow(...row));
+
+  return { components: [container(revealed ? Colors.Leaderboard : Colors.Gold, children)], flags: 1 << 15 };
+}
+
+// Ephemeral receipt handed to a member the moment they claim. Deliberately tells
+// them nothing about the card — only that they are holding one.
+export function buildStageDropSealedReceipt({ eventName, endsAt, position }) {
+  const children = [];
+  children.push(text('## 🔒 Sealed card claimed'));
+  children.push(text('🎴 **You\'re holding card #' + position + '** — and no, you can\'t peek.'));
+  children.push(separator());
+  const lines = [];
+  if (eventName) lines.push(`It gets opened live at **${eventName}**.`);
+  else lines.push('It gets opened when the admin reveals the drop.');
+  const endMs = endsAt ? Date.parse(endsAt) : NaN;
+  if (Number.isFinite(endMs)) lines.push(`Claims close <t:${Math.floor(endMs / 1000)}:R>.`);
+  lines.push('Highest card in the room takes the pack — show up to find out if it\'s you.');
+  children.push(text(lines.join('\n')));
+  return { components: [container(Colors.Gold, children)], flags: (1 << 15) | (1 << 6) };
+}
+
+// Curtain-raiser posted just before the one-by-one countdown.
+export function buildStageDropRevealIntro({ totalPulls = 0 } = {}) {
+  return {
+    components: [container(Colors.Gold, [
+      text('## 🔓 Opening the sealed cards…'),
+      text(`-# ${totalPulls} card${totalPulls === 1 ? '' : 's'} claimed. Counting up to the top one.`),
+    ])],
+    flags: 1 << 15,
+  };
+}
+
+// One rank, revealed on its own — the on-stage countdown from #5 up to #1.
+export function buildStageDropRevealCard({ rank, displayName, cardName, gold, cardImage, isTop = false }) {
+  const children = [];
+  const medal = RANK_MEDALS[rank - 1] || `#${rank}`;
+  children.push(text(isTop ? `## ${medal} And the top card goes to…` : `## ${medal} Rank ${rank}`));
+  children.push(text(`### ${displayName}`));
+
+  const img = eventImage(cardImage);
+  if (img) children.push({ type: CT.MediaGallery, items: [{ media: { url: img } }] });
+
+  children.push(separator());
+  children.push(text(`**${(cardName || 'Gold Card').replace(/[\r\n]+/g, ' ')}**\n🪙 **${formatGold(gold)}**`));
+  if (isTop) children.push(text('-# 🎁 Pack incoming — an admin will send it over.'));
+
+  return { components: [container(isTop ? Colors.Leaderboard : Colors.Gold, children)], flags: 1 << 15 };
+}
+
+/**
+ * The final standings. Each rank is a Section so the card art sits beside the
+ * name it belongs to, with the same five cards repeated as a gallery underneath
+ * for the "here's the whole podium" shot.
+ *
+ * `tiers` = [{ rank, gold, entries: [{ displayName, cardName, cardImage }] }].
+ */
+export function buildStageDropResults({ tiers = [], totalPulls = 0, potGold = 0, eventName = null } = {}) {
+  const children = [];
+  children.push(text('## 🏆 Sealed Card Drop — Final Standings'));
+  if (eventName) children.push(text(`-# Opened live at ${eventName}`));
+
+  if (!tiers.length) {
+    children.push(separator());
+    children.push(text('-# Nobody claimed a card this round.'));
+    return { components: [container(Colors.Leaderboard, children)], flags: 1 << 15 };
+  }
+
+  const gallery = [];
+  for (const tier of tiers) {
+    children.push(separator());
+    const medal = RANK_MEDALS[tier.rank - 1] || `#${tier.rank}`;
+    const head = tier.entries.length > 1
+      ? `${medal} **${formatGold(tier.gold)}** 🪙 — tie (${tier.entries.length})`
+      : `${medal} **${formatGold(tier.gold)}** 🪙`;
+    const names = tier.entries
+      .map(e => `**${e.displayName}** — ${(e.cardName || 'Gold Card').replace(/[\r\n]+/g, ' ')}`)
+      .join('\n');
+    const img = eventImage(tier.entries[0]?.cardImage);
+    children.push(section([head, names], img));
+    if (img && gallery.length < 10) gallery.push(img);
+  }
+
+  if (gallery.length) {
+    children.push(separator());
+    children.push({ type: CT.MediaGallery, items: gallery.map(url => ({ media: { url } })) });
+  }
+
+  children.push(separator());
+  children.push(text(
+    `-# ${totalPulls} sealed card${totalPulls === 1 ? '' : 's'} opened · ${formatGold(potGold)} 🪙 total in the pot`
+  ));
+  children.push(text('-# 🎁 The top card wins the pack. Catch the next drop at the next stage.'));
+
+  return { components: [container(Colors.Leaderboard, children)], flags: 1 << 15 };
+}
+
+// Sent to every puller when the drop is revealed — winners and everyone else,
+// so 20 people who didn't place still get their own moment instead of nothing.
+export function buildStageDropDm({ cardName, gold, cardImage, rank, totalPulls, won = false, eventName = null }) {
+  const children = [];
+  children.push(text(won ? '## 🥇 You won the drop!' : '## 🔒 Your sealed card is open'));
+  children.push(text(`### ${(cardName || 'Gold Card').replace(/[\r\n]+/g, ' ')}`));
+
+  const img = eventImage(cardImage);
+  if (img) children.push({ type: CT.MediaGallery, items: [{ media: { url: img } }] });
+
+  children.push(separator());
+  const lines = [`🪙 **Value:** ${formatGold(gold)}`];
+  if (rank) lines.push(`📊 **Placed:** #${rank} of ${totalPulls}`);
+  children.push(text(lines.join('\n')));
+
+  children.push(separator());
+  if (won) children.push(text('🎁 **You took the top card** — an admin will send your pack over shortly.'));
+  else if (eventName) children.push(text(`-# Thanks for showing up to ${eventName}. Another drop next week.`));
+  else children.push(text('-# Another drop next week — same mystery, new cards.'));
+
+  return { components: [container(won ? Colors.Leaderboard : Colors.Gold, children)], flags: 1 << 15 };
 }
 
 // ── Delete confirmation ──────────────────────────────────────

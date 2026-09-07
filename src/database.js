@@ -180,6 +180,63 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_card_battle_pulls_battle ON card_battle_pulls(battle_id);
 
+  -- ── Stage drops ────────────────────────────────────────────
+  -- A card battle whose cards stay SEALED until an admin reveals them at a live
+  -- Stage event. Same pull mechanic as card_battles, different lifecycle: the
+  -- puller only learns what they got at the reveal, which is the whole point —
+  -- the mystery is the reason to RSVP and actually turn up.
+  --
+  -- Kept in its own tables rather than a flag on card_battles because the state
+  -- machine differs (live → sealed → revealed vs. live → stopped) and the entry
+  -- gates mirror /giveaway's full set, which card battles don't carry.
+  CREATE TABLE IF NOT EXISTS stage_drops (
+    id            TEXT PRIMARY KEY,
+    guild_id      TEXT NOT NULL,
+    channel_id    TEXT NOT NULL,
+    message_id    TEXT,                             -- the live drop message
+    creator_id    TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'live',     -- 'live' (pulling open) | 'sealed' (closed, pre-reveal) | 'revealed' | 'cancelled'
+    pool          TEXT NOT NULL DEFAULT '[]',       -- JSON: undrawn cards remaining
+    pool_size     INTEGER NOT NULL DEFAULT 0,
+    event_id      TEXT,                             -- Discord scheduled event this drop is tied to
+    event_name    TEXT,                             -- snapshot, so the copy survives the event being deleted
+    event_url     TEXT,                             -- RSVP link shown on the drop
+    require_rsvp  INTEGER NOT NULL DEFAULT 0,       -- 1 = must be RSVP'd to event_id to pull
+    ends_at       TEXT,                             -- ISO; auto-seals when reached (NULL = manual)
+    -- Entry gates, mirroring /giveaway.
+    required_roles     TEXT NOT NULL DEFAULT '[]',
+    excluded_roles     TEXT NOT NULL DEFAULT '[]',
+    excluded_users     TEXT NOT NULL DEFAULT '[]',
+    require_prediction INTEGER NOT NULL DEFAULT 0,
+    required_pack      TEXT,
+    min_account_age_days INTEGER NOT NULL DEFAULT 0,
+    min_messages       INTEGER NOT NULL DEFAULT 0,
+    min_tweets         INTEGER NOT NULL DEFAULT 0,
+    tweet_window_hours INTEGER NOT NULL DEFAULT 0,
+    tweet_channel_id   TEXT,
+    revealed_at   TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_stage_drops_status ON stage_drops(status);
+
+  -- One row per member per drop (PK enforces one sealed card each). Card + value
+  -- are snapshotted so the reveal is stable even if the pool changes upstream.
+  CREATE TABLE IF NOT EXISTS stage_drop_pulls (
+    drop_id      TEXT NOT NULL,
+    discord_id   TEXT NOT NULL,
+    username     TEXT,
+    card_id      TEXT NOT NULL,
+    card_name    TEXT,
+    card_image   TEXT,
+    gold_value   INTEGER NOT NULL DEFAULT 0,
+    pulled_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (drop_id, discord_id),
+    FOREIGN KEY (drop_id) REFERENCES stage_drops(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_stage_drop_pulls_drop ON stage_drop_pulls(drop_id);
+
   -- Admin-defined achievement badges. A badge is earned by having at least
   -- required_lineups total lineup entries SUMMED across the contests listed in
   -- contest_ids (a JSON array of Upshot contest IDs). The 12h sweep is add-only:
@@ -911,6 +968,153 @@ export function pullCardFromBattle(battleId, { discordId, username }) {
       INSERT INTO card_battle_pulls (battle_id, discord_id, username, card_id, card_name, card_image, gold_value)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run(battleId, discordId, username || null, card.id, card.name || null, card.image || null, Math.round(Number(card.goldValue) || 0));
+
+    return { card, remaining: pool.length };
+  });
+  return txn();
+}
+
+// ── Stage drops (sealed card drops for live Stage events) ───
+
+function hydrateStageDrop(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    required_roles: JSON.parse(row.required_roles || '[]'),
+    excluded_roles: JSON.parse(row.excluded_roles || '[]'),
+    excluded_users: JSON.parse(row.excluded_users || '[]'),
+  };
+}
+
+export function createStageDrop(d) {
+  db.prepare(`
+    INSERT INTO stage_drops (id, guild_id, channel_id, creator_id, pool, pool_size,
+      event_id, event_name, event_url, require_rsvp, ends_at,
+      required_roles, excluded_roles, excluded_users, require_prediction, required_pack,
+      min_account_age_days, min_messages, min_tweets, tweet_window_hours, tweet_channel_id)
+    VALUES (@id, @guild_id, @channel_id, @creator_id, @pool, @pool_size,
+      @event_id, @event_name, @event_url, @require_rsvp, @ends_at,
+      @required_roles, @excluded_roles, @excluded_users, @require_prediction, @required_pack,
+      @min_account_age_days, @min_messages, @min_tweets, @tweet_window_hours, @tweet_channel_id)
+  `).run({
+    id: d.id,
+    guild_id: d.guildId,
+    channel_id: d.channelId,
+    creator_id: d.creatorId,
+    pool: JSON.stringify(d.pool || []),
+    pool_size: (d.pool || []).length,
+    event_id: d.eventId || null,
+    event_name: d.eventName || null,
+    event_url: d.eventUrl || null,
+    require_rsvp: d.requireRsvp ? 1 : 0,
+    ends_at: d.endsAt || null,
+    required_roles: JSON.stringify(d.requiredRoles || []),
+    excluded_roles: JSON.stringify(d.excludedRoles || []),
+    excluded_users: JSON.stringify(d.excludedUsers || []),
+    require_prediction: d.requirePrediction ? 1 : 0,
+    required_pack: d.requiredPack || null,
+    min_account_age_days: d.minAccountAgeDays || 0,
+    min_messages: d.minMessages || 0,
+    min_tweets: d.minTweets || 0,
+    tweet_window_hours: d.tweetWindowHours || 0,
+    tweet_channel_id: d.tweetChannelId || null,
+  });
+  return getStageDrop(d.id);
+}
+
+export function getStageDrop(id) {
+  return hydrateStageDrop(db.prepare('SELECT * FROM stage_drops WHERE id = ?').get(id));
+}
+
+// Most recent drop in a guild that is still awaiting its reveal — what
+// `/stagedrop reveal` targets when the admin doesn't name an id.
+export function getLatestUnrevealedStageDrop(guildId) {
+  return hydrateStageDrop(db.prepare(
+    "SELECT * FROM stage_drops WHERE guild_id = ? AND status IN ('live','sealed') ORDER BY created_at DESC LIMIT 1"
+  ).get(guildId));
+}
+
+export function getRecentStageDrops(guildId, limit = 25) {
+  return db.prepare(
+    'SELECT * FROM stage_drops WHERE guild_id = ? ORDER BY created_at DESC LIMIT ?'
+  ).all(guildId, limit).map(hydrateStageDrop);
+}
+
+// Live drops whose clock has run out — they seal (no more pulls), but the cards
+// stay hidden until an admin reveals them on stage.
+export function getDueStageDrops(nowIso) {
+  return db.prepare(
+    "SELECT * FROM stage_drops WHERE status = 'live' AND ends_at IS NOT NULL AND ends_at <= ?"
+  ).all(nowIso).map(hydrateStageDrop);
+}
+
+export function setStageDropMessageId(id, messageId) {
+  db.prepare('UPDATE stage_drops SET message_id = ? WHERE id = ?').run(messageId, id);
+}
+
+export function setStageDropStatus(id, status) {
+  const revealedAt = status === 'revealed' ? new Date().toISOString() : null;
+  if (revealedAt) {
+    db.prepare('UPDATE stage_drops SET status = ?, revealed_at = ? WHERE id = ?').run(status, revealedAt, id);
+  } else {
+    db.prepare('UPDATE stage_drops SET status = ? WHERE id = ?').run(status, id);
+  }
+}
+
+export function countStageDropPulls(dropId) {
+  return db.prepare('SELECT COUNT(*) AS n FROM stage_drop_pulls WHERE drop_id = ?')
+    .get(dropId).n;
+}
+
+// Total gold sealed in the pot — shown live so the drop builds tension without
+// giving away who holds what.
+export function sumStageDropGold(dropId) {
+  return db.prepare('SELECT COALESCE(SUM(gold_value), 0) AS g FROM stage_drop_pulls WHERE drop_id = ?')
+    .get(dropId).g;
+}
+
+export function getStageDropPulls(dropId) {
+  return db.prepare(
+    'SELECT * FROM stage_drop_pulls WHERE drop_id = ? ORDER BY gold_value DESC, pulled_at ASC'
+  ).all(dropId);
+}
+
+export function getStageDropPull(dropId, discordId) {
+  return db.prepare('SELECT * FROM stage_drop_pulls WHERE drop_id = ? AND discord_id = ?')
+    .get(dropId, discordId);
+}
+
+/**
+ * Claim one sealed card. Identical atomicity guarantees to pullCardFromBattle —
+ * a single transaction, so concurrent taps can't take the same card and no one
+ * can hold two. Returns:
+ *   { card, remaining }         — success
+ *   { error: 'gone' }           — drop id unknown / deleted
+ *   { error: 'closed' }         — sealed, revealed or cancelled
+ *   { error: 'already', pull }  — member already holds one
+ *   { error: 'empty' }          — every card claimed
+ */
+export function pullCardFromStageDrop(dropId, { discordId, username }) {
+  const txn = db.transaction(() => {
+    const row = db.prepare('SELECT status, pool FROM stage_drops WHERE id = ?').get(dropId);
+    if (!row) return { error: 'gone' };
+    if (row.status !== 'live') return { error: 'closed' };
+
+    const existing = db.prepare(
+      'SELECT * FROM stage_drop_pulls WHERE drop_id = ? AND discord_id = ?'
+    ).get(dropId, discordId);
+    if (existing) return { error: 'already', pull: existing };
+
+    const pool = JSON.parse(row.pool || '[]');
+    if (!pool.length) return { error: 'empty' };
+
+    const idx = Math.floor(Math.random() * pool.length);
+    const [card] = pool.splice(idx, 1);
+    db.prepare('UPDATE stage_drops SET pool = ? WHERE id = ?').run(JSON.stringify(pool), dropId);
+    db.prepare(`
+      INSERT INTO stage_drop_pulls (drop_id, discord_id, username, card_id, card_name, card_image, gold_value)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(dropId, discordId, username || null, card.id, card.name || null, card.image || null, Math.round(Number(card.goldValue) || 0));
 
     return { card, remaining: pool.length };
   });

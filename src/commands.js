@@ -780,4 +780,109 @@ export const commands = [
         .setDescription('Where to drop the battle (defaults to this channel)')
         .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
     ),
+
+  new SlashCommandBuilder()
+    .setName('stagedrop')
+    .setDescription('Sealed card drop for a live Stage event — cards stay hidden until you reveal them (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addSubcommand(sub =>
+      sub.setName('start')
+        .setDescription('Post a sealed card drop — members claim a hidden card, revealed live on stage')
+        .addStringOption(opt =>
+          opt.setName('event')
+            .setDescription('The Discord scheduled event this drop belongs to (gates RSVP + auto-closes at start)')
+            .setAutocomplete(true)
+        )
+        .addBooleanOption(opt =>
+          opt.setName('require-rsvp')
+            .setDescription('Only members who RSVP\'d to that event can claim a card (default: on when an event is picked)')
+        )
+        .addStringOption(opt =>
+          opt.setName('duration')
+            .setDescription('Close claims after this, e.g. 30m, 2h, 1d. Defaults to the event start time.')
+        )
+        .addStringOption(opt =>
+          opt.setName('required-roles')
+            .setDescription('Mention role(s) a claimer MUST have one of, e.g. @OG @Holder')
+        )
+        .addStringOption(opt =>
+          opt.setName('excluded-roles')
+            .setDescription('Mention role(s) that are barred from claiming')
+        )
+        .addStringOption(opt =>
+          opt.setName('excluded-users')
+            .setDescription('Mention specific members to exclude, e.g. @alice @bob')
+        )
+        .addBooleanOption(opt =>
+          opt.setName('require-prediction')
+            .setDescription('Only members who have made at least one prediction can claim')
+        )
+        .addIntegerOption(opt =>
+          opt.setName('min-account-age')
+            .setDescription('Minimum Discord account age in days to claim (e.g. 30)')
+            .setMinValue(0)
+            .setMaxValue(3650)
+        )
+        .addIntegerOption(opt =>
+          opt.setName('min-messages')
+            .setDescription('Minimum messages sent in this server to claim (uses the message database)')
+            .setMinValue(0)
+            .setMaxValue(100000)
+        )
+        .addIntegerOption(opt =>
+          opt.setName('min-tweets')
+            .setDescription('Minimum tweets shared in the tweet-share channel to claim')
+            .setMinValue(0)
+            .setMaxValue(1000)
+        )
+        .addStringOption(opt =>
+          opt.setName('tweet-window')
+            .setDescription('How far back from the drop start tweets count, e.g. 48h, 7d, 30d (default 7d)')
+        )
+        .addStringOption(opt =>
+          opt.setName('required-pack')
+            .setDescription('Only members holding this pack can claim — pick from the store list')
+            .setAutocomplete(true)
+        )
+        .addChannelOption(opt =>
+          opt.setName('channel')
+            .setDescription('Where to post the drop (defaults to this channel)')
+            .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('reveal')
+        .setDescription('Open every sealed card and post the top 5 — run this live on stage')
+        .addStringOption(opt =>
+          opt.setName('drop')
+            .setDescription('Which drop to reveal (defaults to the most recent one awaiting its reveal)')
+            .setAutocomplete(true)
+        )
+        .addBooleanOption(opt =>
+          opt.setName('suspense')
+            .setDescription('Count down #5 → #1 one message at a time before the standings (default: on)')
+        )
+        .addBooleanOption(opt =>
+          opt.setName('dm-everyone')
+            .setDescription('DM every claimer their own card, not just the winners (default: on)')
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('close')
+        .setDescription('Close claims early — cards stay sealed until you reveal them')
+        .addStringOption(opt =>
+          opt.setName('drop')
+            .setDescription('Which drop to close (defaults to the most recent open one)')
+            .setAutocomplete(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('cancel')
+        .setDescription('Cancel a drop entirely — nothing is revealed')
+        .addStringOption(opt =>
+          opt.setName('drop')
+            .setDescription('Which drop to cancel (defaults to the most recent open one)')
+            .setAutocomplete(true)
+        )
+    ),
 ];
