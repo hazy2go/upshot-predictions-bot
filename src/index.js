@@ -37,6 +37,10 @@ import {
   addGiveawayEntry, getGiveawayEntries, countGiveawayEntries,
   createCardBattle, getCardBattle, setCardBattleMessageId, setCardBattleStatus,
   countCardBattlePulls, getCardBattlePulls, pullCardFromBattle, getDueCardBattles,
+  createStageDrop, getStageDrop, getLatestUnrevealedStageDrop, getRecentStageDrops,
+  getDueStageDrops, setStageDropMessageId, setStageDropStatus,
+  countStageDropPulls, sumStageDropGold, getStageDropPulls, getStageDropPull,
+  pullCardFromStageDrop,
   hasAnyPrediction,
   createBadgeDef, getBadgeDef, getAllBadgeDefs, deleteBadgeDef,
   grantBadge, revokeBadge, getUserBadges, countBadgeHolders, getBadgeHolders,
@@ -58,6 +62,8 @@ import {
   buildRaffleLive, buildRaffleWinner, buildRaffleList,
   buildGiveawayLive, buildGiveawayEnded, buildGiveawayCancelled,
   buildCardBattleLive, buildCardBattlePull, buildCardBattleResults, formatGold,
+  buildStageDropLive, buildStageDropSealedReceipt, buildStageDropRevealCard,
+  buildStageDropResults, buildStageDropDm, buildStageDropRevealIntro,
   buildStoreListed, buildStoreList,
   buildAdminPanel, buildAdminPickChannel, buildAdminPickRole, buildAdminPickRoles, ADMIN_SETTINGS_LIST,
   formatWindow,
@@ -2594,6 +2600,630 @@ async function safeRunCardBattleSweep() {
   cardBattleSweepTimer = setTimeout(safeRunCardBattleSweep, CARD_BATTLE_SWEEP_INTERVAL);
 }
 
+
+// ── Stage drops (sealed cards, opened live on stage) ─────────
+//
+// Same pull mechanic as /cardbattle, inverted: the card is hidden until an admin
+// opens it on stage. The mystery is the CTA — you RSVP to find out what you got.
+
+const STAGE_DROP_SWEEP_INTERVAL = 20 * 1000; // check for due drops every 20s
+// Beat between one-by-one reveals. Long enough for a host to react on mic,
+// short enough that a 5-card countdown doesn't stall the stage.
+const STAGE_REVEAL_DELAY_MS = Number(process.env.STAGE_REVEAL_DELAY_MS) || 4000;
+// Ceiling on one-by-one reveal messages (ties can multiply them). Keeps the
+// last N — i.e. the ranks closest to the top, which is what the room wants.
+const STAGE_REVEAL_MAX_MESSAGES = 10;
+let stageDropSweepTimer = null;
+const stageDropsSealing = new Set(); // ids being auto-sealed (overlap guard)
+
+function newStageDropId() {
+  return `sd_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+}
+
+/**
+ * Who RSVP'd to a Discord scheduled event. This is a plain REST read
+ * (GET /guild-scheduled-events/{id}/users), so it needs no extra gateway intent —
+ * which is why the RSVP gate can exist at all without touching the Client config.
+ *
+ * The endpoint pages at 100, so walk it with `after`. Cached briefly because a
+ * button press checks it: without the cache, 40 people tapping at once would be
+ * 40 paginated REST walks.
+ */
+const rsvpCache = new Map(); // eventId -> { at, ids: Set }
+const RSVP_CACHE_TTL = 20_000;
+
+async function fetchEventRsvpIds(guild, eventId, { fresh = false } = {}) {
+  const cached = rsvpCache.get(eventId);
+  if (!fresh && cached && Date.now() - cached.at < RSVP_CACHE_TTL) return cached.ids;
+
+  const event = await guild.scheduledEvents.fetch(eventId).catch(() => null);
+  if (!event) return null; // event deleted — caller decides how to fail
+
+  const ids = new Set();
+  let after;
+  // Hard page cap: 100 pages = 10k RSVPs, far past any realistic stage, and it
+  // guarantees we can't spin forever if the API keeps handing back a full page.
+  for (let page = 0; page < 100; page++) {
+    const batch = await event.fetchSubscribers({ limit: 100, ...(after ? { after } : {}) }).catch(() => null);
+    if (!batch || batch.size === 0) break;
+    for (const sub of batch.values()) ids.add(sub.user.id);
+    if (batch.size < 100) break;
+    after = batch.last()?.user?.id;
+    if (!after) break;
+  }
+
+  rsvpCache.set(eventId, { at: Date.now(), ids });
+  return ids;
+}
+
+/**
+ * Entry gate for claiming a sealed card. Mirrors /giveaway's rules one for one,
+ * plus the RSVP check. Async because the pack + RSVP checks hit the network;
+ * everything cheap and synchronous is tested first so the common rejection never
+ * pays for a round-trip. Returns an error string, or null when they're allowed.
+ */
+async function stageDropEligibilityError(drop, interaction) {
+  const userId = interaction.user.id;
+  const member = interaction.member;
+
+  if (drop.excluded_users.includes(userId)) {
+    return '🚫 You\'re not eligible for this drop.';
+  }
+  if (drop.excluded_roles.length && drop.excluded_roles.some(r => member.roles.cache.has(r))) {
+    return '🚫 One of your roles is excluded from this drop.';
+  }
+  if (drop.required_roles.length && !drop.required_roles.some(r => member.roles.cache.has(r))) {
+    return `🚫 You need ${drop.required_roles.map(r => `<@&${r}>`).join(' or ')} to claim a card.`;
+  }
+  if (drop.require_prediction && !hasAnyPrediction(userId)) {
+    return '🚫 This drop is for active predictors — make at least one prediction first, then come back.';
+  }
+  if (drop.min_account_age_days > 0) {
+    const ageDays = Math.floor((Date.now() - interaction.user.createdTimestamp) / 86_400_000);
+    if (ageDays < drop.min_account_age_days) {
+      return `🚫 Your Discord account must be at least **${drop.min_account_age_days}** days old to claim — yours is **${ageDays}** day${ageDays === 1 ? '' : 's'} old.`;
+    }
+  }
+  if (drop.min_messages > 0) {
+    const count = getMessageActivity(interaction.guildId, userId)?.message_count || 0;
+    if (count < drop.min_messages) {
+      return `🚫 You need at least **${drop.min_messages}** messages in this server to claim — you have **${count}**.`;
+    }
+  }
+  // Tweets are counted in the window ENDING when the drop went live, same as
+  // /giveaway: the requirement is meant to be earned beforehand.
+  if (drop.min_tweets > 0) {
+    const windowHours = drop.tweet_window_hours || 24 * 7;
+    const startUnix = sqlTimeToUnix(drop.created_at);
+    const startMs = startUnix ? startUnix * 1000 : Date.now();
+    const until = new Date(startMs).toISOString();
+    const since = new Date(startMs - windowHours * 3_600_000).toISOString();
+    const shared = countTweetsSince(interaction.guildId, userId, since, drop.tweet_channel_id, until);
+    if (shared < drop.min_tweets) {
+      const where = drop.tweet_channel_id ? ` in <#${drop.tweet_channel_id}>` : '';
+      return `🚫 You need at least **${drop.min_tweets}** tweet${drop.min_tweets === 1 ? '' : 's'} shared${where} in the **${formatWindow(windowHours)} before this drop started** to claim — you have **${shared}**.`;
+    }
+  }
+
+  // The RSVP gate — the whole reason this feature exists. Checked before the
+  // pack lookup because it's the one people will actually trip.
+  if (drop.require_rsvp && drop.event_id) {
+    const ids = await fetchEventRsvpIds(interaction.guild, drop.event_id);
+    if (ids === null) {
+      // Event deleted out from under the drop. Letting everyone through would
+      // silently void the gate the admin asked for, so hold the line and say why.
+      return '⚠️ I can\'t read the RSVP list for this event right now — it may have been deleted. Ping an admin.';
+    }
+    if (!ids.has(userId)) {
+      const link = drop.event_url ? `\n${drop.event_url}` : '';
+      return `📅 **RSVP first.** Hit **Interested** on ${drop.event_name ? `**${drop.event_name}**` : 'the event'}, then come back and claim your card.${link}`;
+    }
+  }
+
+  if (drop.required_pack) {
+    const profile = getUpshotProfile(userId);
+    if (!profile?.wallet_address) {
+      return '🔗 Link your Upshot profile first (`/link-upshot`) — this drop checks your pack inventory.';
+    }
+    const held = await getUserPacks(profile.wallet_address);
+    if (!holdsRequiredPack(held, drop.required_pack)) {
+      return `🚫 This drop requires holding a **${drop.required_pack}** pack in your Upshot inventory.`;
+    }
+  }
+
+  return null;
+}
+
+// Throttled live-count edit on the drop message (mirrors the card battle throttle).
+const stageDropCountEditAt = new Map(); // dropId -> last edit ts
+async function refreshStageDropMessage(drop, { force = false } = {}) {
+  if (!drop?.message_id) return;
+  const last = stageDropCountEditAt.get(drop.id) || 0;
+  if (!force && Date.now() - last < 5000) return;
+  stageDropCountEditAt.set(drop.id, Date.now());
+  const channel = await safeGetChannel(drop.channel_id);
+  if (!channel) return;
+  const msg = await safeGetMessage(channel, drop.message_id);
+  if (!msg) return;
+  const pulls = countStageDropPulls(drop.id);
+  const remaining = Math.max(0, drop.pool_size - pulls);
+  const potGold = sumStageDropGold(drop.id);
+  await msg.edit({ ...buildStageDropLive(drop, { pulls, remaining, potGold }), allowedMentions: { parse: [] } }).catch(() => {});
+}
+
+// Resolve the `drop` option (or fall back to the newest one still awaiting a
+// reveal) for reveal/close/cancel.
+function resolveStageDropTarget(interaction) {
+  const id = interaction.options.getString('drop');
+  if (id) return getStageDrop(id);
+  return getLatestUnrevealedStageDrop(interaction.guildId);
+}
+
+async function handleStageDrop(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+  switch (interaction.options.getSubcommand()) {
+    case 'start': return handleStageDropStart(interaction);
+    case 'reveal': return handleStageDropReveal(interaction);
+    case 'close': return handleStageDropClose(interaction);
+    case 'cancel': return handleStageDropCancel(interaction);
+  }
+}
+
+async function handleStageDropStart(interaction) {
+  const eventId = interaction.options.getString('event');
+  const requireRsvpOpt = interaction.options.getBoolean('require-rsvp');
+  const durationRaw = interaction.options.getString('duration');
+  const requiredRolesRaw = interaction.options.getString('required-roles') || '';
+  const excludedRolesRaw = interaction.options.getString('excluded-roles') || '';
+  const excludedUsersRaw = interaction.options.getString('excluded-users') || '';
+  const requirePrediction = interaction.options.getBoolean('require-prediction') ?? false;
+  const minAccountAge = interaction.options.getInteger('min-account-age') ?? 0;
+  const minMessages = interaction.options.getInteger('min-messages') ?? 0;
+  const minTweets = interaction.options.getInteger('min-tweets') ?? 0;
+  const tweetWindowRaw = interaction.options.getString('tweet-window');
+  const requiredPack = interaction.options.getString('required-pack')?.trim() || null;
+  const targetChannel = interaction.options.getChannel('channel') || interaction.channel;
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  // RSVP defaults ON whenever an event is named — that's the point of tying one.
+  const requireRsvp = requireRsvpOpt ?? !!eventId;
+  if (requireRsvp && !eventId) {
+    return interaction.editReply({
+      content: '❌ `require-rsvp` needs an `event` to check against. Pick the scheduled event, or turn the gate off.',
+    });
+  }
+
+  // Resolve the scheduled event now so the drop can snapshot its name/link and
+  // inherit its start time — and so a bad id fails here, not at claim time.
+  let event = null;
+  if (eventId) {
+    event = await interaction.guild.scheduledEvents.fetch(eventId).catch(() => null);
+    if (!event) {
+      return interaction.editReply({ content: '❌ I couldn\'t find that scheduled event. Pick one from the autocomplete list.' });
+    }
+  }
+
+  // Claims close at the duration if given, else at the event's start time —
+  // latecomers shouldn't be able to claim once the reveal is under way.
+  let endsAt = null;
+  if (durationRaw) {
+    const durationMs = parseDuration(durationRaw);
+    if (!durationMs) {
+      return interaction.editReply({ content: '❌ Couldn\'t read that duration. Use a number + unit like `30m`, `2h`, or `1d`.' });
+    }
+    if (durationMs < GIVEAWAY_MIN_MS || durationMs > GIVEAWAY_MAX_MS) {
+      return interaction.editReply({ content: '❌ Duration must be between **1 minute** and **14 days**.' });
+    }
+    endsAt = new Date(Date.now() + durationMs).toISOString();
+  } else if (event?.scheduledStartTimestamp) {
+    if (event.scheduledStartTimestamp <= Date.now()) {
+      return interaction.editReply({
+        content: '❌ That event already started, so claims would close instantly. Pass an explicit `duration` if you want to run the drop anyway.',
+      });
+    }
+    endsAt = new Date(event.scheduledStartTimestamp).toISOString();
+  }
+
+  // Tweet gate needs a configured share channel and a valid window (same rules
+  // as /giveaway — fail loudly rather than locking everyone out at claim time).
+  const tweetChannelId = getTweetsChannelId(interaction.guildId);
+  let tweetWindowHours = 0;
+  if (minTweets > 0) {
+    if (!tweetChannelId) {
+      return interaction.editReply({
+        content: '❌ No tweet-share channel is set, so `min-tweets` has nothing to count. Run `/tweets channel` first (then `/tweets scan` to backfill history).',
+      });
+    }
+    const windowMs = parseDuration(tweetWindowRaw || DEFAULT_TWEET_WINDOW);
+    if (!windowMs) {
+      return interaction.editReply({ content: '❌ Couldn\'t read that `tweet-window`. Use a number + unit like `48h`, `7d`, or `30d`.' });
+    }
+    if (windowMs < TWEET_WINDOW_MIN_MS || windowMs > TWEET_WINDOW_MAX_MS) {
+      return interaction.editReply({ content: '❌ `tweet-window` must be between **1 hour** and **90 days**.' });
+    }
+    tweetWindowHours = Math.round(windowMs / 3_600_000);
+  } else if (tweetWindowRaw) {
+    return interaction.editReply({ content: '❌ `tweet-window` only means something with `min-tweets` — set both, or neither.' });
+  }
+
+  const requiredRoles = [...new Set([...requiredRolesRaw.matchAll(/<@&(\d+)>/g)].map(m => m[1]))];
+  const excludedRoles = [...new Set([...excludedRolesRaw.matchAll(/<@&(\d+)>/g)].map(m => m[1]))];
+  const excludedUsers = [...new Set([...excludedUsersRaw.matchAll(/<@!?(\d+)>/g)].map(m => m[1]))];
+
+  const pool = await getLiveGoldCards();
+  if (!pool.length) {
+    return interaction.editReply({
+      content: '❌ No live gold cards to seal right now — I couldn\'t find any live GOLD cards (or the Upshot API is unreachable). Try again once a gold event is live.',
+    });
+  }
+
+  const id = newStageDropId();
+  const drop = createStageDrop({
+    id,
+    guildId: interaction.guildId,
+    channelId: targetChannel.id,
+    creatorId: interaction.user.id,
+    pool,
+    eventId: event?.id || null,
+    eventName: event?.name || null,
+    eventUrl: event ? (event.url || `https://discord.com/events/${interaction.guildId}/${event.id}`) : null,
+    requireRsvp,
+    endsAt,
+    requiredRoles,
+    excludedRoles,
+    excludedUsers,
+    requirePrediction,
+    requiredPack,
+    minAccountAgeDays: minAccountAge,
+    minMessages,
+    minTweets,
+    tweetWindowHours,
+    tweetChannelId: minTweets > 0 ? tweetChannelId : null,
+  });
+
+  let posted;
+  try {
+    posted = await targetChannel.send({
+      ...buildStageDropLive(drop, { pulls: 0, remaining: drop.pool_size, potGold: 0 }),
+      allowedMentions: { parse: [] },
+    });
+  } catch (e) {
+    setStageDropStatus(id, 'cancelled');
+    return interaction.editReply({ content: `❌ Couldn't post the drop in <#${targetChannel.id}>: ${e.message}` });
+  }
+  setStageDropMessageId(id, posted.id);
+
+  const bits = [];
+  if (event) bits.push(`tied to **${event.name}**`);
+  if (requireRsvp) bits.push('RSVP required');
+  if (endsAt) bits.push(`claims close <t:${Math.floor(Date.parse(endsAt) / 1000)}:R>`);
+  if (requiredRoles.length) bits.push(`must have ${requiredRoles.map(r => `<@&${r}>`).join(' or ')}`);
+  if (excludedRoles.length) bits.push(`${excludedRoles.length} excluded role(s)`);
+  if (excludedUsers.length) bits.push(`${excludedUsers.length} excluded member(s)`);
+  if (requirePrediction) bits.push('needs ≥1 prediction');
+  if (requiredPack) bits.push(`must hold ${requiredPack}`);
+  if (minAccountAge) bits.push(`account ≥${minAccountAge}d`);
+  if (minMessages) bits.push(`≥${minMessages} messages`);
+  if (minTweets) bits.push(`≥${minTweets} tweets / ${formatWindow(tweetWindowHours)}`);
+
+  return interaction.editReply({
+    content: `✅ Sealed drop posted in <#${targetChannel.id}> with **${drop.pool_size}** card${drop.pool_size === 1 ? '' : 's'} in the pot.`
+      + (bits.length ? `\n-# ${bits.join(' · ')}` : '')
+      + '\n-# When you\'re live on stage, run `/stagedrop reveal` to open them.',
+    allowedMentions: { parse: [] },
+  });
+}
+
+// Rank claims into the top-N tiers, ties sharing a rank (dense rank over distinct
+// gold values). Returns [{ rank, gold, entries: [{ displayName, cardName, cardImage }] }].
+function rankStageDropTiers(pulls, maxTiers = 5) {
+  const tiers = [];
+  let rank = 0;
+  let lastGold = null;
+  for (const p of pulls) {
+    if (p.gold_value !== lastGold) {
+      if (tiers.length >= maxTiers) break;
+      rank += 1;
+      lastGold = p.gold_value;
+      tiers.push({ rank, gold: p.gold_value, entries: [] });
+    }
+    tiers[tiers.length - 1].entries.push({
+      displayName: p.username || 'Someone',
+      cardName: p.card_name,
+      cardImage: p.card_image,
+    });
+  }
+  return tiers;
+}
+
+// The reveal — this is the bit that happens live on stage.
+async function handleStageDropReveal(interaction) {
+  const drop = resolveStageDropTarget(interaction);
+  if (!drop) {
+    return interaction.reply({ content: '❌ No drop to reveal — start one with `/stagedrop start`.', flags: ['Ephemeral'] });
+  }
+  if (drop.status === 'revealed') {
+    return interaction.reply({ content: '✅ That drop has already been revealed.', flags: ['Ephemeral'] });
+  }
+  if (drop.status === 'cancelled') {
+    return interaction.reply({ content: '❌ That drop was cancelled.', flags: ['Ephemeral'] });
+  }
+
+  const suspense = interaction.options.getBoolean('suspense') ?? true;
+  const dmEveryone = interaction.options.getBoolean('dm-everyone') ?? true;
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  const pulls = getStageDropPulls(drop.id);
+  if (!pulls.length) {
+    setStageDropStatus(drop.id, 'revealed');
+    await refreshStageDropMessage(getStageDrop(drop.id), { force: true });
+    return interaction.editReply({ content: 'ℹ️ Nobody claimed a card on this drop — nothing to reveal.' });
+  }
+
+  // Reveal into the channel the drop lives in, so the results land with it even
+  // if the admin fires the command from somewhere else mid-stage.
+  const channel = await safeGetChannel(drop.channel_id) || interaction.channel;
+  const tiers = rankStageDropTiers(pulls, 5);
+  const potGold = sumStageDropGold(drop.id);
+
+  setStageDropStatus(drop.id, 'revealed');
+  await refreshStageDropMessage(getStageDrop(drop.id), { force: true });
+
+  // Countdown: bottom of the top 5 upward, one message at a time, so there's
+  // something to talk over on stage instead of a single wall of results.
+  if (suspense) {
+    await channel.send(buildStageDropRevealIntro({ totalPulls: pulls.length })).catch(() => {});
+
+    // Flatten to one message per person, lowest rank first. A big tie could
+    // otherwise turn the countdown into a wall of messages mid-stage, so cap it —
+    // the standings post below always shows everyone in the top 5 regardless.
+    const sequence = [];
+    for (const tier of [...tiers].reverse()) {
+      for (const e of tier.entries) sequence.push({ tier, e });
+    }
+    for (const { tier, e } of sequence.slice(-STAGE_REVEAL_MAX_MESSAGES)) {
+      await channel.send({
+        ...buildStageDropRevealCard({
+          rank: tier.rank,
+          displayName: e.displayName,
+          cardName: e.cardName,
+          gold: tier.gold,
+          cardImage: e.cardImage,
+          isTop: tier.rank === 1,
+        }),
+        allowedMentions: { parse: [] },
+      }).catch(() => {});
+      await sleep(STAGE_REVEAL_DELAY_MS);
+    }
+  }
+
+  await channel.send({
+    ...buildStageDropResults({ tiers, totalPulls: pulls.length, potGold, eventName: drop.event_name }),
+    allowedMentions: { parse: [] },
+  }).catch(() => {});
+
+  // Everyone who claimed hears what they got — not just the podium. Best-effort:
+  // closed DMs are normal and must never fail the reveal.
+  let dmSent = 0;
+  let dmFailed = 0;
+  if (dmEveryone) {
+    const topGold = pulls[0].gold_value;
+    for (let i = 0; i < pulls.length; i++) {
+      const p = pulls[i];
+      try {
+        const user = await client.users.fetch(p.discord_id);
+        await user.send(buildStageDropDm({
+          cardName: p.card_name,
+          gold: p.gold_value,
+          cardImage: p.card_image,
+          rank: i + 1,
+          totalPulls: pulls.length,
+          won: p.gold_value === topGold,
+          eventName: drop.event_name,
+        }));
+        dmSent++;
+      } catch {
+        dmFailed++;
+      }
+    }
+  }
+
+  const winners = tiers[0]?.entries.map(e => e.displayName).join(', ') || '—';
+  return interaction.editReply({
+    content: `✅ Revealed **${pulls.length}** sealed card${pulls.length === 1 ? '' : 's'} in <#${channel.id}>.`
+      + `\n🥇 Top card: **${winners}** (${formatGold(tiers[0]?.gold || 0)} 🪙)`
+      + (dmEveryone ? `\n-# DMs: ${dmSent} delivered, ${dmFailed} couldn't be reached (closed DMs).` : '')
+      + '\n-# Send the pack with `/sendpack` when you\'re ready.',
+    allowedMentions: { parse: [] },
+  });
+}
+
+async function handleStageDropClose(interaction) {
+  const drop = resolveStageDropTarget(interaction);
+  if (!drop) return interaction.reply({ content: '❌ No open drop to close.', flags: ['Ephemeral'] });
+  if (drop.status !== 'live') {
+    return interaction.reply({ content: `ℹ️ That drop is already **${drop.status}**.`, flags: ['Ephemeral'] });
+  }
+  setStageDropStatus(drop.id, 'sealed');
+  await refreshStageDropMessage(getStageDrop(drop.id), { force: true });
+  return interaction.reply({
+    content: `🤐 Claims closed — **${countStageDropPulls(drop.id)}** sealed card(s) in the pot. Run \`/stagedrop reveal\` when you're live.`,
+    flags: ['Ephemeral'],
+  });
+}
+
+async function handleStageDropCancel(interaction) {
+  const drop = resolveStageDropTarget(interaction);
+  if (!drop) return interaction.reply({ content: '❌ No open drop to cancel.', flags: ['Ephemeral'] });
+  if (drop.status === 'revealed') {
+    return interaction.reply({ content: '❌ That drop is already revealed — too late to cancel.', flags: ['Ephemeral'] });
+  }
+  setStageDropStatus(drop.id, 'cancelled');
+  await refreshStageDropMessage(getStageDrop(drop.id), { force: true });
+  return interaction.reply({ content: '❌ Drop cancelled — nothing was revealed.', flags: ['Ephemeral'] });
+}
+
+// A member claims a sealed card. The reply is deliberately ephemeral and says
+// nothing about the card: the public message only ever shows the counter.
+async function handleStageDropPull(interaction, dropId) {
+  const drop = getStageDrop(dropId);
+  if (!drop || drop.status !== 'live') {
+    return interaction.reply({ content: '⌛ Claims are closed on this drop.', flags: ['Ephemeral'] });
+  }
+
+  // Already holding one? Answer before running the (async) gates — they've
+  // already passed them once and re-checking would just be slower.
+  const existing = getStageDropPull(dropId, interaction.user.id);
+  if (existing) {
+    return interaction.reply({
+      content: '🔒 You already hold a sealed card from this drop — one each. It gets opened at the reveal.',
+      flags: ['Ephemeral'],
+    });
+  }
+
+  // The RSVP / pack checks hit the network, so defer before running them.
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  const eligErr = await stageDropEligibilityError(drop, interaction);
+  if (eligErr) {
+    return interaction.editReply({ content: eligErr, allowedMentions: { parse: [] } });
+  }
+
+  const result = pullCardFromStageDrop(dropId, {
+    discordId: interaction.user.id,
+    username: memberDisplayName(interaction),
+  });
+
+  if (result.error === 'gone' || result.error === 'closed') {
+    return interaction.editReply({ content: '⌛ Claims are closed on this drop.' });
+  }
+  if (result.error === 'already') {
+    return interaction.editReply({ content: '🔒 You already hold a sealed card from this drop — one each.' });
+  }
+  if (result.error === 'empty') {
+    return interaction.editReply({ content: '📦 Every card has been claimed — the pot is empty.' });
+  }
+
+  const position = countStageDropPulls(dropId);
+  await interaction.editReply(buildStageDropSealedReceipt({
+    eventName: drop.event_name,
+    endsAt: drop.ends_at,
+    position,
+  }));
+
+  refreshStageDropMessage(drop).catch(() => {});
+}
+
+// "My Card" — before the reveal this confirms you hold one; after it, it shows
+// you what you got (so the DM isn't the only copy).
+async function handleStageDropMine(interaction, dropId) {
+  const drop = getStageDrop(dropId);
+  if (!drop) return interaction.reply({ content: '❌ That drop no longer exists.', flags: ['Ephemeral'] });
+
+  const pull = getStageDropPull(dropId, interaction.user.id);
+  if (!pull) {
+    return interaction.reply({
+      content: drop.status === 'live'
+        ? '🎴 You haven\'t claimed a card yet — tap **🔒 Claim a Sealed Card**.'
+        : '🎴 You didn\'t claim a card on this drop. Catch the next one.',
+      flags: ['Ephemeral'],
+    });
+  }
+
+  if (drop.status !== 'revealed') {
+    return interaction.reply({
+      content: `🔒 You're holding a sealed card${drop.event_name ? ` — it gets opened at **${drop.event_name}**` : ''}. No peeking.`,
+      flags: ['Ephemeral'],
+      allowedMentions: { parse: [] },
+    });
+  }
+
+  const pulls = getStageDropPulls(dropId);
+  const rank = pulls.findIndex(p => p.discord_id === interaction.user.id) + 1;
+  return interaction.reply({
+    ...buildStageDropDm({
+      cardName: pull.card_name,
+      gold: pull.gold_value,
+      cardImage: pull.card_image,
+      rank: rank || null,
+      totalPulls: pulls.length,
+      won: pull.gold_value === pulls[0]?.gold_value,
+      eventName: drop.event_name,
+    }),
+    flags: (1 << 15) | (1 << 6),
+  });
+}
+
+// Autocomplete: upcoming scheduled events for `start`, recent drops elsewhere.
+async function handleStageDropAutocomplete(interaction) {
+  const focused = interaction.options.getFocused(true);
+  const q = (focused.value || '').toLowerCase();
+
+  if (focused.name === 'event') {
+    const events = await interaction.guild.scheduledEvents.fetch().catch(() => null);
+    if (!events) return interaction.respond([]);
+    const choices = [...events.values()]
+      .sort((a, b) => (a.scheduledStartTimestamp || 0) - (b.scheduledStartTimestamp || 0))
+      .filter(e => !q || e.name.toLowerCase().includes(q))
+      .slice(0, 25)
+      .map(e => {
+        const when = e.scheduledStartTimestamp
+          ? new Date(e.scheduledStartTimestamp).toISOString().slice(0, 16).replace('T', ' ')
+          : 'no date';
+        return { name: `${e.name} — ${when}`.slice(0, 100), value: e.id };
+      });
+    return interaction.respond(choices);
+  }
+
+  if (focused.name === 'drop') {
+    const drops = getRecentStageDrops(interaction.guildId, 25)
+      .filter(d => !q || (d.event_name || d.id).toLowerCase().includes(q))
+      .slice(0, 25)
+      .map(d => ({
+        name: `${d.event_name || 'Drop'} · ${d.status} · ${countStageDropPulls(d.id)} sealed`.slice(0, 100),
+        value: d.id,
+      }));
+    return interaction.respond(drops);
+  }
+
+  if (focused.name === 'required-pack') return handleRequiredPackAutocomplete(interaction);
+  return interaction.respond([]);
+}
+
+// ── Stage drop auto-seal sweep (timed drops) ────────────────
+// A drop's clock running out only CLOSES claims. It never reveals — the whole
+// point is that an admin opens the cards live.
+async function autoSealStageDrop(d) {
+  if (stageDropsSealing.has(d.id)) return;
+  stageDropsSealing.add(d.id);
+  try {
+    setStageDropStatus(d.id, 'sealed');
+    await refreshStageDropMessage(getStageDrop(d.id), { force: true });
+  } catch (err) {
+    console.error(`Stage drop auto-seal failed for ${d.id}:`, err.message);
+  } finally {
+    stageDropsSealing.delete(d.id);
+  }
+}
+
+async function runStageDropSweep() {
+  const due = getDueStageDrops(new Date().toISOString());
+  for (const d of due) await autoSealStageDrop(d);
+}
+
+async function safeRunStageDropSweep() {
+  try {
+    await runStageDropSweep();
+  } catch (err) {
+    console.error('Stage drop sweep: fatal error:', err.message);
+  }
+  stageDropSweepTimer = setTimeout(safeRunStageDropSweep, STAGE_DROP_SWEEP_INTERVAL);
+}
+
 // ── Card picker (pick a card to predict — no URL needed) ─────
 
 // Per-user cache of the full predictable-card list so the pagination buttons can
@@ -4381,6 +5011,12 @@ async function handleButton(interaction) {
   }
   if (interaction.customId.startsWith('cardbattle_results:')) {
     return handleCardBattleResults(interaction, interaction.customId.slice('cardbattle_results:'.length));
+  }
+  if (interaction.customId.startsWith('stagedrop_pull:')) {
+    return handleStageDropPull(interaction, interaction.customId.slice('stagedrop_pull:'.length));
+  }
+  if (interaction.customId.startsWith('stagedrop_mine:')) {
+    return handleStageDropMine(interaction, interaction.customId.slice('stagedrop_mine:'.length));
   }
 
   // Contest navigation
@@ -6608,6 +7244,7 @@ async function handleAdminHelp(interaction) {
       '`/giveaway pack duration …` — run a pack giveaway (react to enter, auto-drawn)',
       '`/giveaway-edit giveaway …` — change settings, end early, or cancel a live giveaway',
       '`/cardbattle [duration] …` — drop a "highest card wins" battle (members pull a random gold card)',
+      '`/stagedrop start|reveal|close|cancel` — sealed card drop for a live Stage: cards stay hidden until you reveal them, and claiming can require an RSVP to the event',
     ]],
     ['🏅 Badges', [
       '`/badge create` · `list` · `holders` · `delete` · `check` · `grant` · `revoke`',
@@ -6776,6 +7413,7 @@ client.on(Events.InteractionCreate, async interaction => {
           : await handleSendPackAutocomplete(interaction);
       }
       if (interaction.commandName === 'giveaway-edit') return await handleGiveawayEditAutocomplete(interaction);
+      if (interaction.commandName === 'stagedrop') return await handleStageDropAutocomplete(interaction);
       if (interaction.commandName === 'badge') return await handleBadgeAutocomplete(interaction);
       return;
     }
@@ -6811,6 +7449,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'giveaway': return await handleGiveaway(interaction);
         case 'giveaway-edit': return await handleGiveawayEdit(interaction);
         case 'cardbattle': return await handleCardBattle(interaction);
+        case 'stagedrop': return await handleStageDrop(interaction);
         case 'process-tiers': return await handleProcessTiers(interaction);
         case 'scan-messages': return await handleScanMessages(interaction);
         case 'tweets': {
@@ -7013,6 +7652,7 @@ client.once(Events.ClientReady, async () => {
   // Stops any timed battle whose clock ran out and posts its results — DB-backed,
   // so it survives restarts.
   cardBattleSweepTimer = setTimeout(safeRunCardBattleSweep, 30_000);
+  stageDropSweepTimer = setTimeout(safeRunStageDropSweep, 30_000);
   console.log(`   Card battle sweep: first check in 30s, then every 20s`);
 
   // Start the badge sweep (first run after 3 min, then every 12h). Auto-grants
@@ -7046,6 +7686,7 @@ process.on('SIGTERM', () => {
   if (tierTimer) clearTimeout(tierTimer);
   if (giveawaySweepTimer) clearTimeout(giveawaySweepTimer);
   if (cardBattleSweepTimer) clearTimeout(cardBattleSweepTimer);
+  if (stageDropSweepTimer) clearTimeout(stageDropSweepTimer);
   client.destroy();
   process.exit(0);
 });
@@ -7055,6 +7696,7 @@ process.on('SIGINT', () => {
   if (tierTimer) clearTimeout(tierTimer);
   if (giveawaySweepTimer) clearTimeout(giveawaySweepTimer);
   if (cardBattleSweepTimer) clearTimeout(cardBattleSweepTimer);
+  if (stageDropSweepTimer) clearTimeout(stageDropSweepTimer);
   client.destroy();
   process.exit(0);
 });
