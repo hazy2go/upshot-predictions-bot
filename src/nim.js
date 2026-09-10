@@ -20,6 +20,10 @@ const REASONING_BUDGET = Number(process.env.NIM_REASONING_BUDGET) || 512;
 const ANSWER_TOKENS = 256; // headroom for the short JSON answer after the thinking
 const REQUEST_TIMEOUT_MS = 120_000;
 
+// Re-roll a 0★ once before believing it (see rateWithAI). Off via
+// NIM_CONFIRM_ZERO=0 if it ever needs disabling without a deploy.
+const CONFIRM_ZERO = process.env.NIM_CONFIRM_ZERO !== '0';
+
 const RUBRIC = `You are a STRICT prediction-market analyst rating the quality of a user-submitted prediction on a 0-3 star scale. Be harsh: most submissions are low effort. A submission that is not a genuine, original prediction gets 0 stars and earns the user NOTHING.
 
 IMPORTANT — stating the outcome is EXPECTED, not a penalty: every real prediction names the specific outcome it is betting on, and that outcome will naturally resemble the card/event. Restating the outcome is ONLY a problem when the submission does NOTHING ELSE. If the user states the outcome AND adds ANY reasoning, evidence, timing, probability view, or thesis, it is NOT low-effort — rate it 1 star or higher. When unsure whether something counts as reasoning, give the benefit of the doubt and award at least 1 star.
@@ -134,14 +138,49 @@ function isRetryable(message) {
  * Rate a prediction. Throws if it can't get a valid rating after all retries —
  * callers MUST handle that (fall back to the standard, un-rated flow).
  *
+ * A 0 is re-rolled once before it's believed — see the note in the body.
+ * The result carries `overturnedZero: true` when a stray 0 was upgraded, or
+ * `confirmedZero: true` when the second opinion agreed.
+ *
  * opts:
- *   attempts  — total tries (default 3)
- *   timeoutMs — per-request timeout (default REQUEST_TIMEOUT_MS = 120s)
+ *   attempts    — total tries per call (default 3)
+ *   timeoutMs   — per-request timeout (default REQUEST_TIMEOUT_MS = 120s)
+ *   confirmZero — re-roll a 0 (default on; NIM_CONFIRM_ZERO=0 disables globally)
  *
  * For latency-sensitive callers (e.g. rating during a live submission), pass a
  * smaller budget so the user isn't blocked, and fall back on throw.
  */
 export async function rateWithAI(ctx, opts = {}) {
+  const { confirmZero = CONFIRM_ZERO } = opts;
+  const first = await rateOnce(ctx, opts);
+  if (first.stars !== 0 || !confirmZero) return first;
+
+  // A 0 is the one verdict worth paying to double-check. Every other
+  // disagreement costs a point or two; a 0 costs EVERYTHING — no points, no
+  // tweet bonus, however good the submission was. And this model is known to
+  // throw stray 0s at strong predictions: four runs of the same Chelsea
+  // submission returned 2, 2, 3 and 0, the 0 claiming it "provides no reasoning"
+  // about six sentences of statistics. Temperature and reasoning-budget sweeps
+  // were both tried against this and rejected — the stray survived them.
+  //
+  // So re-roll, and let a non-zero second opinion win. Genuine junk rates 0
+  // twice and is unaffected; the extra call only ever happens on a 0, which is
+  // rare. If the re-roll itself fails, keep the first verdict.
+  try {
+    const second = await rateOnce(ctx, opts);
+    if (second.stars > 0) {
+      console.warn(`rateWithAI: stray 0★ overturned to ${second.stars}★ on re-roll — "${first.reason}"`);
+      return { ...second, overturnedZero: true };
+    }
+    return { ...first, confirmedZero: true };
+  } catch (err) {
+    console.warn(`rateWithAI: 0★ re-roll failed (${err.message}) — keeping the 0★.`);
+    return first;
+  }
+}
+
+// One rating, with the retry policy. rateWithAI wraps this to second-guess a 0.
+async function rateOnce(ctx, opts = {}) {
   const { attempts = 3, timeoutMs = REQUEST_TIMEOUT_MS, reasoningBudget = REASONING_BUDGET } = opts;
   const apiKey = process.env.NVIDIA_NIM_API_KEY;
   if (!apiKey) throw new Error('NVIDIA_NIM_API_KEY not set in .env');
