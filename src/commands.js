@@ -782,6 +782,25 @@ export const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName('giveaway-waive')
+    .setDescription('Let members into a pack-gated giveaway who already opened their pack (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption(opt =>
+      opt.setName('giveaway')
+        .setDescription('Which live giveaway (only ones with a pack requirement are listed)')
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('members')
+        .setDescription('Mention the member(s) to wave through, e.g. @alice @bob. Leave blank to pick from a menu.')
+    )
+    .addBooleanOption(opt =>
+      opt.setName('revoke')
+        .setDescription('Take the waiver back instead of granting it')
+    ),
+
+  new SlashCommandBuilder()
     .setName('stagedrop')
     .setDescription('Sealed card drop for a live Stage event — cards stay hidden until you reveal them (admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)

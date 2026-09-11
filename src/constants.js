@@ -4,6 +4,7 @@ export const ComponentType = {
   Button: 2,
   StringSelect: 3,
   TextInput: 4,
+  UserSelect: 5,
   RoleSelect: 6,
   ChannelSelect: 8,
   Section: 9,
@@ -11,7 +12,7 @@ export const ComponentType = {
   Thumbnail: 11,
   MediaGallery: 12,
   Separator: 14,
-  File: 16,
+  File: 13,
   Container: 17,
 };
 

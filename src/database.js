@@ -137,6 +137,27 @@ db.exec(`
     FOREIGN KEY (giveaway_id) REFERENCES giveaways(id) ON DELETE CASCADE
   );
 
+  -- Per-giveaway exemptions from the required_pack gate.
+  --
+  -- The pack gate asks whether you hold the pack RIGHT NOW, which punishes
+  -- exactly the people it should reward: someone who bought the pack and opened
+  -- it has no way to know a giveaway was coming. They can show proof (the buy
+  -- is visible in their Upshot activity) and an admin waives the gate for them
+  -- on that one giveaway. Every other requirement still applies.
+  --
+  -- Scoped per giveaway on purpose — a waiver is a judgement about one pack on
+  -- one occasion, not a standing pass.
+  CREATE TABLE IF NOT EXISTS giveaway_pack_waivers (
+    giveaway_id  TEXT NOT NULL,
+    discord_id   TEXT NOT NULL,
+    granted_by   TEXT NOT NULL,
+    granted_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (giveaway_id, discord_id),
+    FOREIGN KEY (giveaway_id) REFERENCES giveaways(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_giveaway_pack_waivers_gw ON giveaway_pack_waivers(giveaway_id);
+
   -- "Highest card wins" battles. An admin drops one embed with a Pull button;
   -- every member may pull ONE random gold card from the pool collected at drop
   -- time. The pool column is a JSON array of the still-undrawn cards ({ id, name,
@@ -859,6 +880,11 @@ export function addGiveawayEntry(giveawayId, discordId) {
   return res.changes > 0; // true = newly entered, false = already in
 }
 
+export function hasGiveawayEntry(giveawayId, discordId) {
+  return !!db.prepare('SELECT 1 FROM giveaway_entries WHERE giveaway_id = ? AND discord_id = ?')
+    .get(giveawayId, discordId);
+}
+
 export function getGiveawayEntries(giveawayId) {
   return db.prepare('SELECT discord_id FROM giveaway_entries WHERE giveaway_id = ?')
     .all(giveawayId).map(r => r.discord_id);
@@ -867,6 +893,33 @@ export function getGiveawayEntries(giveawayId) {
 export function countGiveawayEntries(giveawayId) {
   return db.prepare('SELECT COUNT(*) AS n FROM giveaway_entries WHERE giveaway_id = ?')
     .get(giveawayId).n;
+}
+
+// ── Giveaway pack waivers ───────────────────────────────────
+
+/** Grant one member an exemption from a giveaway's required-pack gate. */
+export function grantPackWaiver(giveawayId, discordId, grantedBy) {
+  const info = db.prepare(`
+    INSERT OR IGNORE INTO giveaway_pack_waivers (giveaway_id, discord_id, granted_by)
+    VALUES (?, ?, ?)
+  `).run(giveawayId, discordId, grantedBy);
+  return info.changes > 0; // false = already had one
+}
+
+export function revokePackWaiver(giveawayId, discordId) {
+  return db.prepare('DELETE FROM giveaway_pack_waivers WHERE giveaway_id = ? AND discord_id = ?')
+    .run(giveawayId, discordId).changes > 0;
+}
+
+export function isPackWaived(giveawayId, discordId) {
+  return !!db.prepare('SELECT 1 FROM giveaway_pack_waivers WHERE giveaway_id = ? AND discord_id = ?')
+    .get(giveawayId, discordId);
+}
+
+export function getPackWaivers(giveawayId) {
+  return db.prepare(
+    'SELECT * FROM giveaway_pack_waivers WHERE giveaway_id = ? ORDER BY granted_at ASC'
+  ).all(giveawayId);
 }
 
 // ── Card battles ("highest card wins") ──────────────────────
