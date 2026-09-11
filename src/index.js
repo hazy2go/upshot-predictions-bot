@@ -34,7 +34,8 @@ import {
   getStoreWatchState, setStoreWatchState,
   createGiveaway, getGiveaway, setGiveawayMessageId, setGiveawayStatus, setGiveawayWinners,
   getDueGiveaways, getLiveGiveaways, updateGiveawayFields,
-  addGiveawayEntry, getGiveawayEntries, countGiveawayEntries,
+  addGiveawayEntry, getGiveawayEntries, countGiveawayEntries, hasGiveawayEntry,
+  grantPackWaiver, revokePackWaiver, isPackWaived, getPackWaivers,
   createCardBattle, getCardBattle, setCardBattleMessageId, setCardBattleStatus,
   countCardBattlePulls, getCardBattlePulls, pullCardFromBattle, getDueCardBattles,
   createStageDrop, getStageDrop, getLatestUnrevealedStageDrop, getRecentStageDrops,
@@ -61,6 +62,7 @@ import {
   buildContestLive, buildContestResults, buildContestList,
   buildRaffleLive, buildRaffleWinner, buildRaffleList,
   buildGiveawayLive, buildGiveawayEnded, buildGiveawayCancelled,
+  buildPackWaiverHowTo, buildPackWaiverPanel,
   buildCardBattleLive, buildCardBattlePull, buildCardBattleResults, formatGold,
   buildStageDropLive, buildStageDropSealedReceipt, buildStageDropRevealCard,
   buildStageDropResults, buildStageDropDm, buildStageDropRevealIntro,
@@ -2037,11 +2039,14 @@ async function handleGiveawayEnter(interaction, giveawayId) {
   }
 
   // Required-pack gate: entrant must currently hold the pack in their inventory.
-  if (g.required_pack) {
+  // An admin can waive this one gate for someone who bought the pack and opened
+  // it before the giveaway existed — they can't produce a holding they spent.
+  if (g.required_pack && !isPackWaived(giveawayId, userId)) {
     const entrantPacks = await getUserPacks(profile.wallet_address);
     if (!holdsRequiredPack(entrantPacks, g.required_pack)) {
       return interaction.editReply({
-        content: `🚫 This giveaway requires holding a **${g.required_pack}** pack in your Upshot inventory. Grab one, then hit **🎟 Enter** again.`,
+        content: `🚫 This giveaway requires holding a **${g.required_pack}** pack in your Upshot inventory. Grab one, then hit **🎟 Enter** again.`
+          + '\n-# Already bought and opened one? Tap **🎴 Opened it already?** on the giveaway — an admin can wave you through.',
       });
     }
   }
@@ -2606,6 +2611,165 @@ async function safeRunCardBattleSweep() {
   cardBattleSweepTimer = setTimeout(safeRunCardBattleSweep, CARD_BATTLE_SWEEP_INTERVAL);
 }
 
+
+
+// ── Giveaway pack waivers ───────────────────────────────────
+//
+// The required-pack gate asks whether a member holds the pack RIGHT NOW. That
+// punishes the people it should reward: someone who bought a pack and opened it
+// had no way to know a giveaway was coming. These let an admin wave them
+// through on one giveaway, lifting the pack rule and nothing else.
+
+// One admin ping per member per giveaway — a member tapping the button five
+// times shouldn't notify five times.
+const packWaiverPinged = new Set(); // `${giveawayId}:${userId}`
+
+// The proof channel: reuse the tweet-share channel if one is set, else leave it
+// generic. No new setting to configure for a flow that is mostly conversational.
+function waiverProofChannelId(guildId) {
+  return getTweetsChannelId(guildId) || null;
+}
+
+// Member taps "Opened it already?" on a pack-gated giveaway.
+async function handlePackWaiverRequest(interaction, giveawayId) {
+  const g = getGiveaway(giveawayId);
+  if (!g) return interaction.reply({ content: '❌ That giveaway no longer exists.', flags: ['Ephemeral'] });
+  if (!g.required_pack) {
+    return interaction.reply({ content: 'ℹ️ This giveaway has no pack requirement — just tap **🎟 Enter**.', flags: ['Ephemeral'] });
+  }
+  if (g.status !== 'live') {
+    return interaction.reply({ content: '⌛ This giveaway is already closed.', flags: ['Ephemeral'] });
+  }
+
+  const userId = interaction.user.id;
+  const waived = isPackWaived(giveawayId, userId);
+  await interaction.reply(buildPackWaiverHowTo({
+    g,
+    proofChannelId: waiverProofChannelId(interaction.guildId),
+    alreadyWaived: waived,
+    alreadyEntered: waived && hasGiveawayEntry(giveawayId, userId),
+  }));
+
+  // Let the admins know someone is asking, so a request in a busy channel
+  // doesn't get lost. Best-effort and deduplicated.
+  const key = `${giveawayId}:${userId}`;
+  if (!waived && !packWaiverPinged.has(key)) {
+    packWaiverPinged.add(key);
+    notifyAdmin(
+      interaction.guildId,
+      `🎴 **Pack waiver requested** — <@${userId}> already opened their **${g.required_pack}** pack for the **${g.pack_name}** giveaway.`
+      + `\nCheck their proof, then run \`/giveaway-waive\` to wave them through.`,
+    ).catch(() => {});
+  }
+}
+
+// Apply a batch of waivers and report what actually changed. Shared by the
+// mention-string path and the select-menu path so both behave identically.
+function applyPackWaivers(giveawayId, userIds, adminId, { revoke = false } = {}) {
+  const changed = [];
+  const unchanged = [];
+  for (const id of userIds) {
+    const did = revoke ? revokePackWaiver(giveawayId, id) : grantPackWaiver(giveawayId, id, adminId);
+    (did ? changed : unchanged).push(id);
+  }
+  return { changed, unchanged };
+}
+
+function packWaiverResultMessage(g, { changed, unchanged }, revoke) {
+  const lines = [];
+  if (changed.length) {
+    lines.push(revoke
+      ? `↩️ Waiver removed for ${changed.map(i => `<@${i}>`).join(', ')} — they need a **${g.required_pack}** pack again.`
+      : `✅ Waved through for **${g.pack_name}**: ${changed.map(i => `<@${i}>`).join(', ')}`);
+  }
+  if (unchanged.length) {
+    lines.push(revoke
+      ? `-# ${unchanged.map(i => `<@${i}>`).join(', ')} had no waiver to remove.`
+      : `-# ${unchanged.map(i => `<@${i}>`).join(', ')} were already waived.`);
+  }
+  if (changed.length && !revoke) {
+    lines.push('-# They can enter without holding the pack now. Every other requirement still applies.');
+  }
+  return lines.join('\n') || 'Nothing changed.';
+}
+
+async function handleGiveawayWaive(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+  const giveawayId = interaction.options.getString('giveaway', true);
+  const membersRaw = interaction.options.getString('members') || '';
+  const revoke = interaction.options.getBoolean('revoke') ?? false;
+
+  const g = getGiveaway(giveawayId);
+  if (!g) return interaction.reply({ content: '❌ That giveaway no longer exists.', flags: ['Ephemeral'] });
+  if (!g.required_pack) {
+    return interaction.reply({
+      content: `ℹ️ The **${g.pack_name}** giveaway has no pack requirement, so there's nothing to waive.`,
+      flags: ['Ephemeral'],
+    });
+  }
+
+  const ids = [...new Set([...membersRaw.matchAll(/<@!?(\d+)>/g)].map(m => m[1]))];
+
+  // No mentions given — show the picker instead of erroring. This is the path
+  // the command description points at, and it also shows who is already waived.
+  if (!ids.length) {
+    return interaction.reply(buildPackWaiverPanel({
+      g,
+      waivers: getPackWaivers(giveawayId),
+      mode: revoke ? 'revoke' : 'grant',
+    }));
+  }
+
+  const result = applyPackWaivers(giveawayId, ids, interaction.user.id, { revoke });
+  return interaction.reply({
+    content: packWaiverResultMessage(g, result, revoke),
+    flags: ['Ephemeral'],
+    allowedMentions: { parse: [] },
+  });
+}
+
+// The user-select in the admin panel came back with picks.
+async function handlePackWaiverSelect(interaction, rest) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+  const sep = rest.indexOf(':');
+  const mode = rest.slice(0, sep);
+  const giveawayId = rest.slice(sep + 1);
+  const revoke = mode === 'revoke';
+
+  const g = getGiveaway(giveawayId);
+  if (!g) return interaction.reply({ content: '❌ That giveaway no longer exists.', flags: ['Ephemeral'] });
+
+  const result = applyPackWaivers(giveawayId, interaction.values, interaction.user.id, { revoke });
+  return interaction.update({
+    ...buildPackWaiverPanel({ g, waivers: getPackWaivers(giveawayId), mode }),
+    content: packWaiverResultMessage(g, result, revoke),
+    allowedMentions: { parse: [] },
+  });
+}
+
+// Autocomplete: live giveaways that actually have a pack requirement.
+async function handleGiveawayWaiveAutocomplete(interaction) {
+  try {
+    const q = (interaction.options.getFocused() || '').toLowerCase();
+    const choices = getLiveGiveaways(interaction.guildId)
+      .filter(g => g.required_pack)
+      .filter(g => !q || g.pack_name.toLowerCase().includes(q) || g.required_pack.toLowerCase().includes(q))
+      .slice(0, 25)
+      .map(g => {
+        const waived = getPackWaivers(g.id).length;
+        const endsIn = fmtDurationShort(Date.parse(g.ends_at) - Date.now());
+        const label = `${g.pack_name} · needs ${g.required_pack} · ${waived} waived · ends in ${endsIn}`.slice(0, 100);
+        return { name: label, value: g.id };
+      });
+    return await interaction.respond(choices);
+  } catch {
+    return interaction.respond([]).catch(() => {});
+  }
+}
 
 // ── Stage drops (sealed cards, opened live on stage) ─────────
 //
@@ -5187,6 +5351,10 @@ async function handleButton(interaction) {
   }
 
   // Giveaway entry
+  if (interaction.customId.startsWith('gw_packwaiver:')) {
+    return handlePackWaiverRequest(interaction, interaction.customId.slice('gw_packwaiver:'.length));
+  }
+
   if (interaction.customId.startsWith('gw_enter:')) {
     return handleGiveawayEnter(interaction, interaction.customId.slice('gw_enter:'.length));
   }
@@ -7432,6 +7600,7 @@ async function handleAdminHelp(interaction) {
       '`/sendpack users pack quantity` — send Upshot pack(s) to member(s)',
       '`/giveaway pack duration …` — run a pack giveaway (react to enter, auto-drawn)',
       '`/giveaway-edit giveaway …` — change settings, end early, or cancel a live giveaway',
+      '`/giveaway-waive giveaway [members] [revoke]` — let members into a pack-gated giveaway who already opened their pack (lifts only the pack rule; blank `members` opens a picker)',
       '`/cardbattle [duration] …` — drop a "highest card wins" battle (members pull a random gold card)',
       '`/stagedrop start|reveal|redrop|close|cancel` — sealed card drop for a live Stage: cards stay hidden until you reveal them, and claiming can require an RSVP to the event',
     ]],
@@ -7634,6 +7803,7 @@ client.on(Events.InteractionCreate, async interaction => {
           : await handleSendPackAutocomplete(interaction);
       }
       if (interaction.commandName === 'giveaway-edit') return await handleGiveawayEditAutocomplete(interaction);
+      if (interaction.commandName === 'giveaway-waive') return await handleGiveawayWaiveAutocomplete(interaction);
       if (interaction.commandName === 'stagedrop') return await handleStageDropAutocomplete(interaction);
       if (interaction.commandName === 'badge') return await handleBadgeAutocomplete(interaction);
       return;
@@ -7669,6 +7839,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'sendpack': return await handleSendPack(interaction);
         case 'giveaway': return await handleGiveaway(interaction);
         case 'giveaway-edit': return await handleGiveawayEdit(interaction);
+        case 'giveaway-waive': return await handleGiveawayWaive(interaction);
         case 'cardbattle': return await handleCardBattle(interaction);
         case 'stagedrop': return await handleStageDrop(interaction);
         case 'process-tiers': return await handleProcessTiers(interaction);
@@ -7753,6 +7924,12 @@ client.on(Events.InteractionCreate, async interaction => {
       }
       if (interaction.customId === 'badge_create_contests') {
         return await handleBadgeCreateContestSelect(interaction);
+      }
+    }
+
+    if (interaction.isUserSelectMenu?.()) {
+      if (interaction.customId.startsWith('gw_waive_pick:')) {
+        return await handlePackWaiverSelect(interaction, interaction.customId.slice('gw_waive_pick:'.length));
       }
     }
 

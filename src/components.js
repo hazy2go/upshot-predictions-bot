@@ -492,7 +492,7 @@ function giveawayRules(g) {
     lines.push(`🐦 **Tweets shared${where}:** at least ${g.min_tweets} in the ${formatWindow(g.tweet_window_hours)} before this giveaway started`);
   }
   if (g.required_pack) {
-    lines.push(`🎴 **Must hold pack:** ${g.required_pack}`);
+    lines.push(`🎴 **Must hold pack:** ${g.required_pack} *(opened it already? see below)*`);
   }
   return lines;
 }
@@ -515,9 +515,90 @@ export function buildGiveawayLive(g, entryCount = 0) {
   if (rules.length) { children.push(separator()); children.push(text(rules.join('\n'))); }
 
   children.push(text('-# 🔗 An Upshot wallet must be connected to enter — the pack is sent there automatically.'));
-  children.push(actionRow(button(`gw_enter:${g.id}`, '🎟 Enter', ButtonStyle.Primary)));
+
+  // The pack gate asks whether you hold it right now, so anyone who already
+  // opened theirs is locked out with no way of knowing a giveaway was coming.
+  // Give them a visible route back in rather than a silent rejection.
+  const row = [button(`gw_enter:${g.id}`, '🎟 Enter', ButtonStyle.Primary)];
+  if (g.required_pack) {
+    children.push(text('-# 🎴 Already opened your pack? Tap **Opened it already?** — you can still get in.'));
+    row.push(button(`gw_packwaiver:${g.id}`, '🎴 Opened it already?', ButtonStyle.Secondary));
+  }
+  children.push(actionRow(...row));
 
   return { components: [container(Colors.Pending, children)], flags: 1 << 15 };
+}
+
+/**
+ * Shown to a member who opened their pack before the giveaway existed. It only
+ * explains how to ask — an admin still decides, because the proof lives in the
+ * member's Upshot activity where the bot can't see it.
+ */
+export function buildPackWaiverHowTo({ g, proofChannelId = null, alreadyWaived = false, alreadyEntered = false }) {
+  const children = [];
+  if (alreadyWaived) {
+    children.push(text('## ✅ You\'re already cleared'));
+    children.push(text(
+      alreadyEntered
+        ? `An admin has waived the **${g.required_pack}** pack requirement for you, and you're entered. Good luck! 🍀`
+        : `An admin has waived the **${g.required_pack}** pack requirement for you — just tap **🎟 Enter**.`
+    ));
+    return { components: [container(Colors.Hit, children)], flags: (1 << 15) | (1 << 6) };
+  }
+
+  children.push(text('## 🎴 Opened your pack already?'));
+  children.push(text(
+    `This giveaway asks you to be **holding** a **${g.required_pack}** pack — which isn't fair on anyone who bought one and opened it before this was announced.`
+    + '\n\n**You can still get in.** An admin just needs to see that you bought it.'
+  ));
+  children.push(separator());
+  const where = proofChannelId ? `<#${proofChannelId}>` : 'the server chat';
+  children.push(text([
+    '**How to claim it:**',
+    `1. Open your Upshot profile and find the **${g.required_pack}** purchase in your activity.`,
+    `2. Screenshot it and post it in ${where}, tagging an admin.`,
+    '3. Once they wave you through, come back and tap **🎟 Enter**.',
+  ].join('\n')));
+  children.push(separator());
+  children.push(text('-# Every other requirement on this giveaway still applies — this only lifts the pack rule.'));
+
+  return { components: [container(Colors.Pending, children)], flags: (1 << 15) | (1 << 6) };
+}
+
+/**
+ * Admin view for waiving the pack gate. `mode` is 'grant' or 'revoke'; the user
+ * select is multi-pick so a whole batch can be cleared in one go.
+ */
+export function buildPackWaiverPanel({ g, waivers = [], mode = 'grant' }) {
+  const granting = mode === 'grant';
+  const children = [];
+  children.push(text(`## 🎴 Pack waivers — ${g.pack_name}`));
+  children.push(text(`-# Required pack: **${g.required_pack}** · these members skip that check only.`));
+  children.push(separator());
+
+  if (waivers.length) {
+    const who = waivers.map(w => `<@${w.discord_id}>`).join(', ');
+    children.push(text(`**Already waived (${waivers.length}):** ${who}`));
+  } else {
+    children.push(text('-# Nobody is waived on this giveaway yet.'));
+  }
+
+  children.push(separator());
+  children.push(text(granting
+    ? '**Pick the members to wave through.** They can then enter without holding the pack.'
+    : '**Pick the waivers to take back.** They will need the pack again to enter.'));
+  children.push({
+    type: CT.ActionRow,
+    components: [{
+      type: CT.UserSelect,
+      custom_id: `gw_waive_pick:${mode}:${g.id}`,
+      placeholder: granting ? 'Select member(s) to waive…' : 'Select member(s) to un-waive…',
+      min_values: 1,
+      max_values: 25,
+    }],
+  });
+
+  return { components: [container(Colors.Admin, children)], flags: (1 << 15) | (1 << 6) };
 }
 
 export function buildGiveawayEnded(g, winnerIds = []) {
