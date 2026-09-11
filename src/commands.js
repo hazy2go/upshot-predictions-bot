@@ -788,7 +788,6 @@ export const commands = [
     .addStringOption(opt =>
       opt.setName('giveaway')
         .setDescription('Which live giveaway (only ones with a pack requirement are listed)')
-        .setRequired(true)
         .setAutocomplete(true)
     )
     .addStringOption(opt =>
@@ -798,6 +797,11 @@ export const commands = [
     .addBooleanOption(opt =>
       opt.setName('revoke')
         .setDescription('Take the waiver back instead of granting it')
+    )
+    .addChannelOption(opt =>
+      opt.setName('proof-channel')
+        .setDescription('Set where members are told to post their pack proof (saved for all future giveaways)')
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
     ),
 
   new SlashCommandBuilder()

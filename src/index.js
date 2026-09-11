@@ -2624,10 +2624,15 @@ async function safeRunCardBattleSweep() {
 // times shouldn't notify five times.
 const packWaiverPinged = new Set(); // `${giveawayId}:${userId}`
 
-// The proof channel: reuse the tweet-share channel if one is set, else leave it
-// generic. No new setting to configure for a flow that is mostly conversational.
+// Where members are told to post proof that they bought the pack. Set with
+// `/giveaway-waive proof-channel:` — it lives on this command rather than in
+// /setup, which is at Discord's 25-subcommand ceiling.
+//
+// No fallback to the tweet-share channel: that channel is for tweet links and
+// sending pack receipts there would pollute it (and silently pointing members
+// at the wrong place is worse than being vague).
 function waiverProofChannelId(guildId) {
-  return getTweetsChannelId(guildId) || null;
+  return getConfig(guildId, 'giveaway_proof_channel') || null;
 }
 
 // Member taps "Opened it already?" on a pack-gated giveaway.
@@ -2697,9 +2702,28 @@ async function handleGiveawayWaive(interaction) {
   if (!isAdmin(interaction.member)) {
     return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
   }
-  const giveawayId = interaction.options.getString('giveaway', true);
+  const giveawayId = interaction.options.getString('giveaway');
   const membersRaw = interaction.options.getString('members') || '';
   const revoke = interaction.options.getBoolean('revoke') ?? false;
+  const proofChannel = interaction.options.getChannel('proof-channel');
+
+  // Setting the proof channel is a standalone action — it needs no giveaway.
+  if (proofChannel) {
+    setConfig(interaction.guildId, 'giveaway_proof_channel', proofChannel.id);
+    const msg = `✅ Pack proof channel set to <#${proofChannel.id}>.`
+      + '\n-# Members who tap **🎴 Opened it already?** on a pack-gated giveaway are now told to post their proof there.';
+    if (!giveawayId) {
+      return interaction.reply({ content: msg, flags: ['Ephemeral'], allowedMentions: { parse: [] } });
+    }
+    await interaction.reply({ content: msg, flags: ['Ephemeral'], allowedMentions: { parse: [] } });
+  }
+
+  if (!giveawayId) {
+    return interaction.reply({
+      content: '❌ Pick a `giveaway` to waive someone on, or pass `proof-channel` to set where members post their proof.',
+      flags: ['Ephemeral'],
+    });
+  }
 
   const g = getGiveaway(giveawayId);
   if (!g) return interaction.reply({ content: '❌ That giveaway no longer exists.', flags: ['Ephemeral'] });
@@ -2714,8 +2738,14 @@ async function handleGiveawayWaive(interaction) {
 
   // No mentions given — show the picker instead of erroring. This is the path
   // the command description points at, and it also shows who is already waived.
+  // If the proof channel was set above we've already replied, so anything after
+  // it has to be a follow-up rather than a second reply.
+  const respond = (payload) => (interaction.replied || interaction.deferred)
+    ? interaction.followUp({ ...payload, flags: ['Ephemeral'] })
+    : interaction.reply(payload);
+
   if (!ids.length) {
-    return interaction.reply(buildPackWaiverPanel({
+    return respond(buildPackWaiverPanel({
       g,
       waivers: getPackWaivers(giveawayId),
       mode: revoke ? 'revoke' : 'grant',
@@ -2723,7 +2753,7 @@ async function handleGiveawayWaive(interaction) {
   }
 
   const result = applyPackWaivers(giveawayId, ids, interaction.user.id, { revoke });
-  return interaction.reply({
+  return respond({
     content: packWaiverResultMessage(g, result, revoke),
     flags: ['Ephemeral'],
     allowedMentions: { parse: [] },
@@ -7600,7 +7630,7 @@ async function handleAdminHelp(interaction) {
       '`/sendpack users pack quantity` — send Upshot pack(s) to member(s)',
       '`/giveaway pack duration …` — run a pack giveaway (react to enter, auto-drawn)',
       '`/giveaway-edit giveaway …` — change settings, end early, or cancel a live giveaway',
-      '`/giveaway-waive giveaway [members] [revoke]` — let members into a pack-gated giveaway who already opened their pack (lifts only the pack rule; blank `members` opens a picker)',
+      '`/giveaway-waive giveaway [members] [revoke] [proof-channel]` — let members into a pack-gated giveaway who already opened their pack (lifts only the pack rule; blank `members` opens a picker). `proof-channel` sets where members are told to post proof.',
       '`/cardbattle [duration] …` — drop a "highest card wins" battle (members pull a random gold card)',
       '`/stagedrop start|reveal|redrop|close|cancel` — sealed card drop for a live Stage: cards stay hidden until you reveal them, and claiming can require an RSVP to the event',
     ]],
