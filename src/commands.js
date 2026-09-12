@@ -845,6 +845,14 @@ export const commands = [
         )
     )
     .addSubcommand(sub =>
+      sub.setName('ping-role')
+        .setDescription('Set a role to ping on every mirrored post — omit the role to stop pinging')
+        .addRoleOption(opt =>
+          opt.setName('role')
+            .setDescription('The role to ping (leave empty to turn pinging off)')
+        )
+    )
+    .addSubcommand(sub =>
       sub.setName('interval')
         .setDescription('How often to check for new posts')
         .addIntegerOption(opt =>
