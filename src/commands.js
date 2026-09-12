@@ -805,6 +805,78 @@ export const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName('xfeed')
+    .setDescription('Mirror our X/Twitter accounts into a Discord channel (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addSubcommand(sub =>
+      sub.setName('add')
+        .setDescription('Start tracking an X account')
+        .addStringOption(opt =>
+          opt.setName('handle')
+            .setDescription('The @handle, e.g. goSodax (with or without the @)')
+            .setRequired(true)
+        )
+        .addBooleanOption(opt =>
+          opt.setName('announce-existing')
+            .setDescription('Post its latest few posts now instead of starting quiet (default: off)')
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('remove')
+        .setDescription('Stop tracking an X account')
+        .addStringOption(opt =>
+          opt.setName('handle')
+            .setDescription('Which account to drop')
+            .setRequired(true)
+            .setAutocomplete(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('list')
+        .setDescription('Show tracked accounts, where they post, and whether fetching is working')
+    )
+    .addSubcommand(sub =>
+      sub.setName('channel')
+        .setDescription('Set the channel new posts are mirrored into')
+        .addChannelOption(opt =>
+          opt.setName('channel')
+            .setDescription('Where to post (defaults to this channel)')
+            .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('interval')
+        .setDescription('How often to check for new posts')
+        .addIntegerOption(opt =>
+          opt.setName('minutes')
+            .setDescription('Minutes between checks (5–1440). X throttles hard, so 15+ is recommended.')
+            .setRequired(true)
+            .setMinValue(5)
+            .setMaxValue(1440)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('check')
+        .setDescription('Check for new posts right now')
+    )
+    .addSubcommand(sub =>
+      sub.setName('latest')
+        .setDescription('Force-post the most recent posts from one account (ignores what has been seen)')
+        .addStringOption(opt =>
+          opt.setName('handle')
+            .setDescription('Which account')
+            .setRequired(true)
+            .setAutocomplete(true)
+        )
+        .addIntegerOption(opt =>
+          opt.setName('count')
+            .setDescription('How many posts (1–5, default 1)')
+            .setMinValue(1)
+            .setMaxValue(5)
+        )
+    ),
+
+  new SlashCommandBuilder()
     .setName('stagedrop')
     .setDescription('Sealed card drop for a live Stage event — cards stay hidden until you reveal them (admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)

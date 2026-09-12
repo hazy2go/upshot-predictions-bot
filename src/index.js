@@ -36,6 +36,9 @@ import {
   getDueGiveaways, getLiveGiveaways, updateGiveawayFields,
   addGiveawayEntry, getGiveawayEntries, countGiveawayEntries, hasGiveawayEntry,
   grantPackWaiver, revokePackWaiver, isPackWaived, getPackWaivers,
+  addXAccount, removeXAccount, getXAccount, getXAccounts,
+  isXPostSeen, markXPostSeen, markXPostsSeen, pruneXSeen, setXAccountBaselined,
+  recordXSuccess, recordXFailure, bumpXPostedCount,
   createCardBattle, getCardBattle, setCardBattleMessageId, setCardBattleStatus,
   countCardBattlePulls, getCardBattlePulls, pullCardFromBattle, getDueCardBattles,
   createStageDrop, getStageDrop, getLatestUnrevealedStageDrop, getRecentStageDrops,
@@ -51,6 +54,7 @@ import {
 } from './database.js';
 
 import { rateWithAI, MODEL as NIM_MODEL } from './nim.js';
+import { fetchPosts, isOwnPost } from './xfeed.js';
 
 import {
   buildPredictionCard, buildAdminCard,
@@ -63,6 +67,7 @@ import {
   buildRaffleLive, buildRaffleWinner, buildRaffleList,
   buildGiveawayLive, buildGiveawayEnded, buildGiveawayCancelled,
   buildPackWaiverHowTo, buildPackWaiverPanel,
+  buildXPostCard, buildXFeedList,
   buildCardBattleLive, buildCardBattlePull, buildCardBattleResults, formatGold,
   buildStageDropLive, buildStageDropSealedReceipt, buildStageDropRevealCard,
   buildStageDropResults, buildStageDropDm, buildStageDropRevealIntro,
@@ -2612,6 +2617,339 @@ async function safeRunCardBattleSweep() {
 }
 
 
+
+
+// ── X (Twitter) feed ────────────────────────────────────────
+//
+// Mirrors our own X accounts into a Discord channel. Ported from the Telegram
+// tg-feed-bot; see src/xfeed.js for why 429 is the expected response and not an
+// error worth shouting about.
+//
+// Two deliberate differences from the original, both from bugs found in it:
+//   • a post is marked seen only AFTER Discord accepts it, so a failed send
+//     retries next cycle instead of being silently dropped forever;
+//   • failures are counted per account and surfaced, because the Telegram bot
+//     had an account quietly broken for five months.
+
+const X_FEED_DEFAULT_INTERVAL_MIN = 15;
+const X_FRESHNESS_HOURS = 48;        // never post something older than this
+const X_ACCOUNT_DELAY_MS = 5000;     // between accounts — the endpoint is IP-throttled
+const X_SEND_DELAY_MS = 1200;        // between Discord sends
+const X_SEEN_KEEP = 200;             // dedup window per account
+const X_FAIL_ALERT_AT = 20;          // warn admins once a streak reaches this
+let xFeedTimer = null;
+let xFeedRunning = false;
+const xFailAlerted = new Set();      // handles already warned about
+
+function xFeedChannelId(guildId) {
+  return getConfig(guildId, 'x_feed_channel') || null;
+}
+
+function xFeedIntervalMinutes(guildId) {
+  return parseInt(getConfig(guildId, 'x_feed_interval') || '', 10) || X_FEED_DEFAULT_INTERVAL_MIN;
+}
+
+function normalizeHandle(raw) {
+  return (raw || '').trim().replace(/^@/, '').replace(/^https?:\/\/(www\.)?(x|twitter)\.com\//i, '')
+    .split(/[/?#]/)[0].toLowerCase();
+}
+
+/**
+ * One account: fetch, post anything new, record state. Returns a small summary
+ * so the caller can report without re-reading the DB.
+ */
+async function runXAccount(account, channel, { force = 0 } = {}) {
+  const handle = account.handle;
+  let posts;
+  try {
+    posts = await fetchPosts(handle);
+    recordXSuccess(handle, null);
+  } catch (err) {
+    recordXFailure(handle, err.message);
+    // A throttled cycle is routine, so it is not worth an admin ping; a long
+    // streak is, and a permanently dead handle always is.
+    const a = getXAccount(handle);
+    const permanent = !!err.permanent;
+    if ((permanent || (a && a.fail_streak >= X_FAIL_ALERT_AT)) && !xFailAlerted.has(handle)) {
+      xFailAlerted.add(handle);
+      notifyAdmin(channel?.guildId,
+        `⚠️ **X feed: @${handle} isn't fetching.** ${err.message}`
+        + `\n-# ${a?.fail_streak || 1} failed checks in a row. `
+        + (permanent ? 'That handle looks gone or renamed — check it, or `/xfeed remove` it.' : 'Usually X rate limiting; it should recover on its own.'),
+      ).catch(() => {});
+    }
+    return { handle, ok: false, error: err.message, posted: 0, rateLimited: !!err.rateLimited };
+  }
+
+  const own = posts.filter(isOwnPost);
+  if (!own.length) return { handle, ok: true, posted: 0 };
+
+  const newest = own[0]?.date || null;
+
+  // First successful fetch: remember everything without posting, so adding an
+  // account doesn't dump its back catalogue into the channel.
+  if (!account.baselined && !force) {
+    markXPostsSeen(handle, posts.map(p => p.id));
+    setXAccountBaselined(handle, newest);
+    return { handle, ok: true, posted: 0, baselined: true };
+  }
+
+  const candidates = force
+    ? own.slice(0, force)
+    : own.filter(p => !isXPostSeen(handle, p.id) && isWithinHours(p.date, X_FRESHNESS_HOURS));
+
+  let posted = 0;
+  // Oldest first, so a burst reads in the order it was written.
+  for (const p of [...candidates].reverse()) {
+    try {
+      await channel.send({ ...buildXPostCard(p, { displayName: account.display_name }), allowedMentions: { parse: [] } });
+      // Only now is it "seen" — if the send above threw, we try again next cycle.
+      if (!force) markXPostSeen(handle, p.id);
+      posted++;
+      await sleep(X_SEND_DELAY_MS);
+    } catch (err) {
+      console.error(`[xfeed] @${handle} send failed (post ${p.id}):`, err.message);
+      break; // stop this account; unsent posts stay unseen and retry later
+    }
+  }
+
+  if (posted) bumpXPostedCount(handle, posted);
+  if (newest) recordXSuccess(handle, newest);
+  pruneXSeen(handle, X_SEEN_KEEP);
+  return { handle, ok: true, posted };
+}
+
+/** Sweep every tracked account. Skips entirely when no channel is configured. */
+async function runXFeedSweep({ guildId = null } = {}) {
+  if (xFeedRunning) return { skipped: true };
+  xFeedRunning = true;
+  try {
+    const accounts = getXAccounts();
+    if (!accounts.length) return { results: [] };
+
+    const gid = guildId || client.guilds.cache.first()?.id;
+    const channelId = gid ? xFeedChannelId(gid) : null;
+    if (!channelId) return { results: [], noChannel: true };
+    const channel = await safeGetChannel(channelId);
+    if (!channel) return { results: [], noChannel: true };
+
+    const results = [];
+    for (const a of accounts) {
+      results.push(await runXAccount(a, channel));
+      await sleep(X_ACCOUNT_DELAY_MS);
+    }
+    const posted = results.reduce((n, r) => n + r.posted, 0);
+    const failed = results.filter(r => !r.ok).length;
+    if (posted || failed) {
+      console.log(`[xfeed] sweep: ${posted} posted, ${failed}/${results.length} account(s) failed`);
+    }
+    return { results };
+  } finally {
+    xFeedRunning = false;
+  }
+}
+
+async function safeRunXFeedSweep() {
+  try {
+    await runXFeedSweep();
+  } catch (err) {
+    console.error('[xfeed] sweep: fatal error:', err.message);
+  }
+  scheduleXFeedSweep();
+}
+
+function scheduleXFeedSweep() {
+  if (xFeedTimer) clearTimeout(xFeedTimer);
+  const gid = client.guilds.cache.first()?.id;
+  const mins = gid ? xFeedIntervalMinutes(gid) : X_FEED_DEFAULT_INTERVAL_MIN;
+  // Jitter so we don't hammer the same second every cycle alongside whatever
+  // else on this host is polling the same IP-throttled endpoint.
+  const jitter = Math.floor(Math.random() * 60_000);
+  xFeedTimer = setTimeout(safeRunXFeedSweep, mins * 60_000 + jitter);
+}
+
+function isWithinHours(dateStr, hours) {
+  if (!dateStr) return false;
+  const t = Date.parse(dateStr);
+  if (!Number.isFinite(t)) return false;
+  return Date.now() - t < hours * 3_600_000;
+}
+
+// ── /xfeed ──────────────────────────────────────────────────
+
+async function handleXFeed(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admin only.', flags: ['Ephemeral'] });
+  }
+  switch (interaction.options.getSubcommand()) {
+    case 'add': return handleXFeedAdd(interaction);
+    case 'remove': return handleXFeedRemove(interaction);
+    case 'list': return handleXFeedList(interaction);
+    case 'channel': return handleXFeedChannel(interaction);
+    case 'interval': return handleXFeedInterval(interaction);
+    case 'check': return handleXFeedCheck(interaction);
+    case 'latest': return handleXFeedLatest(interaction);
+  }
+}
+
+async function handleXFeedAdd(interaction) {
+  const handle = normalizeHandle(interaction.options.getString('handle', true));
+  const announce = interaction.options.getBoolean('announce-existing') ?? false;
+  if (!/^[a-z0-9_]{1,15}$/.test(handle)) {
+    return interaction.reply({ content: '❌ That doesn\'t look like an X handle. Use e.g. `goSodax`.', flags: ['Ephemeral'] });
+  }
+  if (getXAccount(handle)) {
+    return interaction.reply({ content: `ℹ️ Already tracking **@${handle}**.`, flags: ['Ephemeral'] });
+  }
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  // Verify the handle resolves before storing it — otherwise a typo sits in the
+  // list forever failing. A 429 is not proof of anything, so accept it and let
+  // the sweep sort it out.
+  let verdict = '';
+  try {
+    const posts = await fetchPosts(handle);
+    verdict = `\n-# Fetched ${posts.length} recent post(s) — looks good.`;
+  } catch (err) {
+    if (err.permanent) {
+      return interaction.editReply({ content: `❌ Couldn't find **@${handle}** — ${err.message}` });
+    }
+    verdict = err.rateLimited
+      ? '\n-# ⚠️ X is rate limiting right now, so I couldn\'t verify the handle. Added anyway — check `/xfeed list` later.'
+      : `\n-# ⚠️ Couldn't verify it right now (${err.message}). Added anyway.`;
+  }
+
+  addXAccount(handle, interaction.options.getString('handle', true).trim().replace(/^@/, ''), interaction.user.id);
+  xFailAlerted.delete(handle);
+
+  const channelId = xFeedChannelId(interaction.guildId);
+  const lines = [`✅ Now tracking **@${handle}**.`];
+  if (!channelId) lines.push('-# ⚠️ No channel set yet — run `/xfeed channel` or nothing gets posted.');
+  else lines.push(`-# New posts go to <#${channelId}>, checked every ${xFeedIntervalMinutes(interaction.guildId)}m.`);
+  lines.push(announce
+    ? '-# Posting its latest posts now…'
+    : '-# Starting quiet: existing posts are recorded as seen, only new ones get mirrored.');
+  await interaction.editReply({ content: lines.join('\n') + verdict, allowedMentions: { parse: [] } });
+
+  if (announce) {
+    const channel = channelId ? await safeGetChannel(channelId) : null;
+    if (channel) {
+      const r = await runXAccount({ ...getXAccount(handle), baselined: false }, channel, { force: 3 });
+      // Force-posting bypasses the seen check, so baseline afterwards to stop
+      // the next sweep re-posting the same things.
+      const posts = await fetchPosts(handle).catch(() => []);
+      if (posts.length) markXPostsSeen(handle, posts.map(p => p.id));
+      setXAccountBaselined(handle, null);
+      await interaction.followUp({ content: `📤 Posted ${r.posted} recent post(s) to <#${channelId}>.`, flags: ['Ephemeral'] });
+    }
+  } else {
+    // Baseline immediately so the first sweep is quiet even if it's minutes away.
+    const posts = await fetchPosts(handle).catch(() => null);
+    if (posts) { markXPostsSeen(handle, posts.map(p => p.id)); setXAccountBaselined(handle, posts[0]?.date || null); }
+  }
+}
+
+async function handleXFeedRemove(interaction) {
+  const handle = normalizeHandle(interaction.options.getString('handle', true));
+  if (!removeXAccount(handle)) {
+    return interaction.reply({ content: `ℹ️ Not tracking **@${handle}**.`, flags: ['Ephemeral'] });
+  }
+  xFailAlerted.delete(handle);
+  return interaction.reply({ content: `🗑 Stopped tracking **@${handle}**.`, flags: ['Ephemeral'] });
+}
+
+async function handleXFeedList(interaction) {
+  return interaction.reply(buildXFeedList({
+    accounts: getXAccounts(),
+    channelId: xFeedChannelId(interaction.guildId),
+    intervalMinutes: xFeedIntervalMinutes(interaction.guildId),
+  }));
+}
+
+async function handleXFeedChannel(interaction) {
+  const channel = interaction.options.getChannel('channel') || interaction.channel;
+  setConfig(interaction.guildId, 'x_feed_channel', channel.id);
+  return interaction.reply({
+    content: `✅ X posts will be mirrored into <#${channel.id}>.`
+      + `\n-# Checked every ${xFeedIntervalMinutes(interaction.guildId)} minutes · ${getXAccounts().length} account(s) tracked.`,
+    flags: ['Ephemeral'],
+    allowedMentions: { parse: [] },
+  });
+}
+
+async function handleXFeedInterval(interaction) {
+  const mins = interaction.options.getInteger('minutes', true);
+  setConfig(interaction.guildId, 'x_feed_interval', String(mins));
+  scheduleXFeedSweep();
+  return interaction.reply({
+    content: `✅ Checking for new X posts every **${mins}** minutes.`
+      + (mins < 15 ? '\n-# ⚠️ X rate limits this endpoint per IP — below 15m you mostly get throttled, which doesn\'t make posts arrive sooner.' : ''),
+    flags: ['Ephemeral'],
+  });
+}
+
+async function handleXFeedCheck(interaction) {
+  if (!getXAccounts().length) {
+    return interaction.reply({ content: 'ℹ️ No accounts tracked — add one with `/xfeed add`.', flags: ['Ephemeral'] });
+  }
+  if (!xFeedChannelId(interaction.guildId)) {
+    return interaction.reply({ content: '❌ No channel set. Run `/xfeed channel` first.', flags: ['Ephemeral'] });
+  }
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  const { results, skipped, noChannel } = await runXFeedSweep({ guildId: interaction.guildId });
+  if (skipped) return interaction.editReply({ content: '⏳ A check is already running — try again in a moment.' });
+  if (noChannel) return interaction.editReply({ content: '❌ Couldn\'t reach the configured channel.' });
+
+  const posted = results.reduce((n, r) => n + r.posted, 0);
+  const lines = results.map(r => r.ok
+    ? `✅ @${r.handle} — ${r.baselined ? 'baselined (first fetch)' : `${r.posted} new`}`
+    : `${r.rateLimited ? '⏳' : '❌'} @${r.handle} — ${r.error}`);
+  const throttled = results.filter(r => r.rateLimited).length;
+  return interaction.editReply({
+    content: `**Checked ${results.length} account(s)** — ${posted} post(s) mirrored.\n${lines.join('\n')}`
+      + (throttled ? `\n-# ${throttled} were rate limited by X. That's normal; they'll catch up on a later check — nothing is lost.` : ''),
+  });
+}
+
+async function handleXFeedLatest(interaction) {
+  const handle = normalizeHandle(interaction.options.getString('handle', true));
+  const count = interaction.options.getInteger('count') ?? 1;
+  const account = getXAccount(handle);
+  if (!account) return interaction.reply({ content: `❌ Not tracking **@${handle}**.`, flags: ['Ephemeral'] });
+
+  const channelId = xFeedChannelId(interaction.guildId);
+  if (!channelId) return interaction.reply({ content: '❌ No channel set. Run `/xfeed channel` first.', flags: ['Ephemeral'] });
+  const channel = await safeGetChannel(channelId);
+  if (!channel) return interaction.reply({ content: '❌ Couldn\'t reach the configured channel.', flags: ['Ephemeral'] });
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+  const r = await runXAccount(account, channel, { force: count });
+  if (!r.ok) {
+    return interaction.editReply({
+      content: `${r.rateLimited ? '⏳' : '❌'} Couldn't fetch **@${handle}** — ${r.error}`
+        + (r.rateLimited ? '\n-# X is throttling us right now. Try again in a few minutes.' : ''),
+    });
+  }
+  return interaction.editReply({ content: `📤 Posted ${r.posted} post(s) from **@${handle}** to <#${channelId}>.`, allowedMentions: { parse: [] } });
+}
+
+async function handleXFeedAutocomplete(interaction) {
+  try {
+    const q = (interaction.options.getFocused() || '').toLowerCase().replace(/^@/, '');
+    const choices = getXAccounts()
+      .filter(a => !q || a.handle.includes(q))
+      .slice(0, 25)
+      .map(a => ({
+        name: `@${a.display_name || a.handle}${a.fail_streak > 0 ? ` (⚠️ ${a.fail_streak} failed)` : ''}`.slice(0, 100),
+        value: a.handle,
+      }));
+    return await interaction.respond(choices);
+  } catch {
+    return interaction.respond([]).catch(() => {});
+  }
+}
 
 // ── Giveaway pack waivers ───────────────────────────────────
 //
@@ -7632,6 +7970,7 @@ async function handleAdminHelp(interaction) {
       '`/giveaway-edit giveaway …` — change settings, end early, or cancel a live giveaway',
       '`/giveaway-waive giveaway [members] [revoke] [proof-channel]` — let members into a pack-gated giveaway who already opened their pack (lifts only the pack rule; blank `members` opens a picker). `proof-channel` sets where members are told to post proof.',
       '`/cardbattle [duration] …` — drop a "highest card wins" battle (members pull a random gold card)',
+      '`/xfeed add|remove|list|channel|interval|check|latest` — mirror our X accounts into a channel (`list` shows whether fetching is actually working)',
       '`/stagedrop start|reveal|redrop|close|cancel` — sealed card drop for a live Stage: cards stay hidden until you reveal them, and claiming can require an RSVP to the event',
     ]],
     ['🏅 Badges', [
@@ -7834,6 +8173,7 @@ client.on(Events.InteractionCreate, async interaction => {
       }
       if (interaction.commandName === 'giveaway-edit') return await handleGiveawayEditAutocomplete(interaction);
       if (interaction.commandName === 'giveaway-waive') return await handleGiveawayWaiveAutocomplete(interaction);
+      if (interaction.commandName === 'xfeed') return await handleXFeedAutocomplete(interaction);
       if (interaction.commandName === 'stagedrop') return await handleStageDropAutocomplete(interaction);
       if (interaction.commandName === 'badge') return await handleBadgeAutocomplete(interaction);
       return;
@@ -7870,6 +8210,7 @@ client.on(Events.InteractionCreate, async interaction => {
         case 'giveaway': return await handleGiveaway(interaction);
         case 'giveaway-edit': return await handleGiveawayEdit(interaction);
         case 'giveaway-waive': return await handleGiveawayWaive(interaction);
+        case 'xfeed': return await handleXFeed(interaction);
         case 'cardbattle': return await handleCardBattle(interaction);
         case 'stagedrop': return await handleStageDrop(interaction);
         case 'process-tiers': return await handleProcessTiers(interaction);
@@ -8097,6 +8438,9 @@ client.once(Events.ClientReady, async () => {
   // so it survives restarts.
   cardBattleSweepTimer = setTimeout(safeRunCardBattleSweep, 30_000);
   stageDropSweepTimer = setTimeout(safeRunStageDropSweep, 30_000);
+  // X feed: first check a minute in, then on its configured interval.
+  xFeedTimer = setTimeout(safeRunXFeedSweep, 60_000);
+  console.log(`   X feed: ${getXAccounts().length} account(s), first check in 60s`);
   console.log(`   Card battle sweep: first check in 30s, then every 20s`);
 
   // Re-warm the RSVP set for any drop still taking claims. The set lives in
@@ -8144,6 +8488,7 @@ process.on('SIGTERM', () => {
   if (giveawaySweepTimer) clearTimeout(giveawaySweepTimer);
   if (cardBattleSweepTimer) clearTimeout(cardBattleSweepTimer);
   if (stageDropSweepTimer) clearTimeout(stageDropSweepTimer);
+  if (xFeedTimer) clearTimeout(xFeedTimer);
   client.destroy();
   process.exit(0);
 });
@@ -8154,6 +8499,7 @@ process.on('SIGINT', () => {
   if (giveawaySweepTimer) clearTimeout(giveawaySweepTimer);
   if (cardBattleSweepTimer) clearTimeout(cardBattleSweepTimer);
   if (stageDropSweepTimer) clearTimeout(stageDropSweepTimer);
+  if (xFeedTimer) clearTimeout(xFeedTimer);
   client.destroy();
   process.exit(0);
 });
