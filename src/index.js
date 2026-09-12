@@ -54,7 +54,7 @@ import {
 } from './database.js';
 
 import { rateWithAI, MODEL as NIM_MODEL } from './nim.js';
-import { fetchPosts, isOwnPost } from './xfeed.js';
+import { fetchPosts, fetchListPosts, groupByAuthor, isOwnPost } from './xfeed.js';
 
 import {
   buildPredictionCard, buildAdminCard,
@@ -2645,6 +2645,13 @@ function xFeedChannelId(guildId) {
   return getConfig(guildId, 'x_feed_channel') || null;
 }
 
+// A public X list id. When set, one request to the list endpoint replaces the
+// per-account fetches entirely — it is a different rate-limit bucket and covers
+// every member for the same single call.
+function xFeedListId(guildId) {
+  return getConfig(guildId, 'x_feed_list_id') || null;
+}
+
 function xFeedPingRoleId(guildId) {
   return getConfig(guildId, 'x_feed_ping_role') || null;
 }
@@ -2669,22 +2676,36 @@ async function runXAccount(account, channel, { force = 0, pingRoleId = null } = 
     posts = await fetchPosts(handle);
     recordXSuccess(handle, null);
   } catch (err) {
-    recordXFailure(handle, err.message);
-    // A throttled cycle is routine, so it is not worth an admin ping; a long
-    // streak is, and a permanently dead handle always is.
-    const a = getXAccount(handle);
-    const permanent = !!err.permanent;
-    if ((permanent || (a && a.fail_streak >= X_FAIL_ALERT_AT)) && !xFailAlerted.has(handle)) {
-      xFailAlerted.add(handle);
-      notifyAdmin(channel?.guildId,
-        `⚠️ **X feed: @${handle} isn't fetching.** ${err.message}`
-        + `\n-# ${a?.fail_streak || 1} failed checks in a row. `
-        + (permanent ? 'That handle looks gone or renamed — check it, or `/xfeed remove` it.' : 'Usually X rate limiting; it should recover on its own.'),
-      ).catch(() => {});
-    }
-    return { handle, ok: false, error: err.message, posted: 0, rateLimited: !!err.rateLimited };
+    return xFetchFailure(account, channel, err);
   }
+  return deliverXPosts(account, posts, channel, { force, pingRoleId });
+}
 
+/** Shared failure bookkeeping for both fetch modes. */
+function xFetchFailure(account, channel, err) {
+  const handle = account.handle;
+  recordXFailure(handle, err.message);
+  // A throttled cycle is routine, so it is not worth an admin ping; a long
+  // streak is, and a permanently dead handle always is.
+  const a = getXAccount(handle);
+  const permanent = !!err.permanent;
+  if ((permanent || (a && a.fail_streak >= X_FAIL_ALERT_AT)) && !xFailAlerted.has(handle)) {
+    xFailAlerted.add(handle);
+    notifyAdmin(channel?.guildId,
+      `⚠️ **X feed: @${handle} isn't fetching.** ${err.message}`
+      + `\n-# ${a?.fail_streak || 1} failed checks in a row. `
+      + (permanent ? 'That handle looks gone or renamed — check it, or `/xfeed remove` it.' : 'Usually X rate limiting; it should recover on its own.'),
+    ).catch(() => {});
+  }
+  return { handle, ok: false, error: err.message, posted: 0, rateLimited: !!err.rateLimited };
+}
+
+/**
+ * Post whatever is new for one account. Takes posts as an argument so it serves
+ * both the per-account fetch and the single list fetch fanned out by author.
+ */
+async function deliverXPosts(account, posts, channel, { force = 0, pingRoleId = null } = {}) {
+  const handle = account.handle;
   const own = posts.filter(isOwnPost);
   if (!own.length) return { handle, ok: true, posted: 0 };
 
@@ -2743,11 +2764,17 @@ async function runXFeedSweep({ guildId = null } = {}) {
     if (!channel) return { results: [], noChannel: true };
 
     const pingRoleId = xFeedPingRoleId(gid);
-    const results = [];
-    for (const a of accounts) {
-      results.push(await runXAccount(a, channel, { pingRoleId }));
-      await sleep(X_ACCOUNT_DELAY_MS);
-    }
+    const listId = xFeedListId(gid);
+    const results = listId
+      ? await runXListSweep(listId, accounts, channel, { pingRoleId })
+      : await (async () => {
+        const out = [];
+        for (const a of accounts) {
+          out.push(await runXAccount(a, channel, { pingRoleId }));
+          await sleep(X_ACCOUNT_DELAY_MS);
+        }
+        return out;
+      })();
     const posted = results.reduce((n, r) => n + r.posted, 0);
     const failed = results.filter(r => !r.ok).length;
     if (posted || failed) {
@@ -2757,6 +2784,70 @@ async function runXFeedSweep({ guildId = null } = {}) {
   } finally {
     xFeedRunning = false;
   }
+}
+
+/**
+ * One request, every account. Fetches the configured public list once and fans
+ * the result out by author, which is why this feature is usable at all: the
+ * per-account endpoint 429s almost every time, while the list endpoint sits on
+ * a different bucket and returns all members together.
+ *
+ * A member of the list that isn't tracked yet is registered automatically and
+ * baselined, so curating the list on X is all that's needed to add an account.
+ */
+async function runXListSweep(listId, accounts, channel, { pingRoleId = null } = {}) {
+  let posts;
+  try {
+    posts = await fetchListPosts(listId);
+  } catch (err) {
+    // One failure covers every account, so record it against each — otherwise
+    // /xfeed list would show them as healthy while nothing is arriving.
+    for (const a of accounts) recordXFailure(a.handle, `list: ${err.message}`);
+    if (!xFailAlerted.has(`list:${listId}`) && !err.rateLimited) {
+      xFailAlerted.add(`list:${listId}`);
+      notifyAdmin(channel?.guildId,
+        `⚠️ **X feed: the list fetch failed.** ${err.message}`
+        + '\n-# Check the list is still public, or clear it with `/xfeed use-list` to fall back to per-account fetches.',
+      ).catch(() => {});
+    }
+    return accounts.map(a => ({
+      handle: a.handle, ok: false, posted: 0,
+      error: `list: ${err.message}`, rateLimited: !!err.rateLimited,
+    }));
+  }
+
+  xFailAlerted.delete(`list:${listId}`);
+  const byAuthor = groupByAuthor(posts);
+
+  // Anyone in the list we don't know about yet becomes tracked, quietly — but
+  // ONLY if they have a post of their own here. Verified on 2026-09-12 that a
+  // retweet is attributed to the retweeter, so a retweeted stranger never shows
+  // up as an author; this guard means that even if that ever changed, we could
+  // not start mirroring someone just because a member boosted them.
+  for (const [handle, theirs] of byAuthor) {
+    if (getXAccount(handle)) continue;
+    if (!theirs.some(isOwnPost)) {
+      console.log(`[xfeed] list: skipping @${handle} — appears only via retweets/replies`);
+      continue;
+    }
+    addXAccount(handle, theirs.find(isOwnPost)?.author || handle, 'x-list');
+    console.log(`[xfeed] list: auto-tracking @${handle} (member of list ${listId})`);
+  }
+
+  const results = [];
+  for (const account of getXAccounts()) {
+    const mine = byAuthor.get(account.handle);
+    if (!mine) {
+      // Tracked but absent from the list. Not an error — the list simply had
+      // nothing recent from them — but the list view flags it so a handle that
+      // was never added to the list on X is visible rather than silently idle.
+      results.push({ handle: account.handle, ok: true, posted: 0, notInList: true });
+      continue;
+    }
+    recordXSuccess(account.handle, null);
+    results.push(await deliverXPosts(account, mine, channel, { pingRoleId }));
+  }
+  return results;
 }
 
 async function safeRunXFeedSweep() {
@@ -2797,6 +2888,7 @@ async function handleXFeed(interaction) {
     case 'list': return handleXFeedList(interaction);
     case 'channel': return handleXFeedChannel(interaction);
     case 'ping-role': return handleXFeedPingRole(interaction);
+    case 'use-list': return handleXFeedUseList(interaction);
     case 'interval': return handleXFeedInterval(interaction);
     case 'check': return handleXFeedCheck(interaction);
     case 'latest': return handleXFeedLatest(interaction);
@@ -2876,6 +2968,7 @@ async function handleXFeedList(interaction) {
     channelId: xFeedChannelId(interaction.guildId),
     intervalMinutes: xFeedIntervalMinutes(interaction.guildId),
     pingRoleId: xFeedPingRoleId(interaction.guildId),
+    listId: xFeedListId(interaction.guildId),
   }));
 }
 
@@ -2887,6 +2980,63 @@ async function handleXFeedChannel(interaction) {
       + `\n-# Checked every ${xFeedIntervalMinutes(interaction.guildId)} minutes · ${getXAccounts().length} account(s) tracked`
       + `${xFeedPingRoleId(interaction.guildId) ? ` · pinging <@&${xFeedPingRoleId(interaction.guildId)}>` : ' · no role pinged'}.`,
     flags: ['Ephemeral'],
+    allowedMentions: { parse: [] },
+  });
+}
+
+async function handleXFeedUseList(interaction) {
+  const raw = (interaction.options.getString('list-id') || '').trim();
+  if (!raw) {
+    setConfig(interaction.guildId, 'x_feed_list_id', '');
+    return interaction.reply({
+      content: '✅ List mode off — back to fetching each account separately.'
+        + '\n-# ⚠️ That endpoint is throttled far harder; expect long gaps.',
+      flags: ['Ephemeral'],
+    });
+  }
+
+  // Accept a pasted list URL as well as a bare id.
+  const listId = (raw.match(/(\d{6,25})/) || [])[1];
+  if (!listId) {
+    return interaction.reply({
+      content: '❌ I couldn\'t find a list id in that. Paste the list URL (`https://x.com/i/lists/123…`) or just the number.',
+      flags: ['Ephemeral'],
+    });
+  }
+
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
+  // Prove it works before saving it — a private or wrong list returns an empty
+  // timeline rather than an error, which would otherwise look like "no posts".
+  let posts;
+  try {
+    posts = await fetchListPosts(listId);
+  } catch (err) {
+    return interaction.editReply({
+      content: `❌ Couldn't read that list — ${err.message}`
+        + (err.rateLimited ? '\n-# Rate limited right now; try again shortly.' : ''),
+    });
+  }
+
+  if (!posts.length) {
+    return interaction.editReply({
+      content: `❌ List \`${listId}\` came back empty. Is it **Public**? A private list reads as empty.`,
+    });
+  }
+
+  const byAuthor = groupByAuthor(posts);
+  const own = posts.filter(isOwnPost);
+  const ownByAuthor = groupByAuthor(own);
+  setConfig(interaction.guildId, 'x_feed_list_id', listId);
+
+  const members = [...byAuthor.keys()]
+    .map(h => `@${h} (${ownByAuthor.get(h)?.length || 0} own / ${byAuthor.get(h).length} total)`)
+    .join(', ');
+
+  return interaction.editReply({
+    content: `✅ List mode on — **one request now covers every account in the list**.`
+      + `\n-# Read ${posts.length} posts, ${own.length} of them original. Members seen: ${members}`
+      + `\n-# Retweets and replies to other people are skipped. Add or remove accounts on X and this picks it up automatically.`,
     allowedMentions: { parse: [] },
   });
 }
@@ -2934,7 +3084,9 @@ async function handleXFeedCheck(interaction) {
 
   const posted = results.reduce((n, r) => n + r.posted, 0);
   const lines = results.map(r => r.ok
-    ? `✅ @${r.handle} — ${r.baselined ? 'baselined (first fetch)' : `${r.posted} new`}`
+    ? (r.notInList
+      ? `➖ @${r.handle} — nothing recent in the list`
+      : `✅ @${r.handle} — ${r.baselined ? 'baselined (first fetch)' : `${r.posted} new`}`)
     : `${r.rateLimited ? '⏳' : '❌'} @${r.handle} — ${r.error}`);
   const throttled = results.filter(r => r.rateLimited).length;
   return interaction.editReply({

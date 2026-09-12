@@ -845,6 +845,14 @@ export const commands = [
         )
     )
     .addSubcommand(sub =>
+      sub.setName('use-list')
+        .setDescription('Fetch a public X list instead of each account — ONE request covers them all')
+        .addStringOption(opt =>
+          opt.setName('list-id')
+            .setDescription('List id or URL (https://x.com/i/lists/123…). Leave empty to go back to per-account.')
+        )
+    )
+    .addSubcommand(sub =>
       sub.setName('ping-role')
         .setDescription('Set a role to ping on every mirrored post — omit the role to stop pinging')
         .addRoleOption(opt =>
