@@ -2669,6 +2669,22 @@ function normalizeHandle(raw) {
  * One account: fetch, post anything new, record state. Returns a small summary
  * so the caller can report without re-reading the DB.
  */
+/**
+ * Posts for ONE handle, using whichever source is configured. Every single-handle
+ * command has to go through this: in list mode the per-account endpoint is the
+ * throttled one, so reaching for fetchPosts directly is how `/xfeed latest`
+ * ended up reporting "rate limited" while `/xfeed check` worked fine.
+ *
+ * Returns [] when list mode is on and the handle has nothing in the list — that
+ * is a real answer, not a failure.
+ */
+async function fetchPostsForHandle(guildId, handle) {
+  const listId = xFeedListId(guildId);
+  if (!listId) return fetchPosts(handle);
+  const posts = await fetchListPosts(listId);
+  return groupByAuthor(posts).get(handle) || [];
+}
+
 async function runXAccount(account, channel, { force = 0, pingRoleId = null } = {}) {
   const handle = account.handle;
   let posts;
@@ -2910,10 +2926,14 @@ async function handleXFeedAdd(interaction) {
   // Verify the handle resolves before storing it — otherwise a typo sits in the
   // list forever failing. A 429 is not proof of anything, so accept it and let
   // the sweep sort it out.
+  const listMode = !!xFeedListId(interaction.guildId);
   let verdict = '';
   try {
-    const posts = await fetchPosts(handle);
-    verdict = `\n-# Fetched ${posts.length} recent post(s) — looks good.`;
+    const posts = await fetchPostsForHandle(interaction.guildId, handle);
+    if (posts.length) verdict = `\n-# Fetched ${posts.length} recent post(s) — looks good.`;
+    else verdict = listMode
+      ? `\n-# ⚠️ Nothing from @${handle} in the configured list. Add it as a list member on X, or it will never be picked up.`
+      : '\n-# ⚠️ No posts came back, but the handle resolved.';
   } catch (err) {
     if (err.permanent) {
       return interaction.editReply({ content: `❌ Couldn't find **@${handle}** — ${err.message}` });
@@ -2935,21 +2955,25 @@ async function handleXFeedAdd(interaction) {
     : '-# Starting quiet: existing posts are recorded as seen, only new ones get mirrored.');
   await interaction.editReply({ content: lines.join('\n') + verdict, allowedMentions: { parse: [] } });
 
+  // One fetch for whichever path follows, through the configured source.
+  const posts = await fetchPostsForHandle(interaction.guildId, handle).catch(() => null);
+
   if (announce) {
     const channel = channelId ? await safeGetChannel(channelId) : null;
-    if (channel) {
-      const r = await runXAccount({ ...getXAccount(handle), baselined: false }, channel, { force: 3 });
+    if (channel && posts?.length) {
+      const r = await deliverXPosts(getXAccount(handle), posts, channel, { force: 3 });
       // Force-posting bypasses the seen check, so baseline afterwards to stop
       // the next sweep re-posting the same things.
-      const posts = await fetchPosts(handle).catch(() => []);
-      if (posts.length) markXPostsSeen(handle, posts.map(p => p.id));
-      setXAccountBaselined(handle, null);
+      markXPostsSeen(handle, posts.map(p => p.id));
+      setXAccountBaselined(handle, posts[0]?.date || null);
       await interaction.followUp({ content: `📤 Posted ${r.posted} recent post(s) to <#${channelId}>.`, flags: ['Ephemeral'] });
+    } else if (channel) {
+      await interaction.followUp({ content: '➖ Nothing to post yet — it\'ll pick up new posts on the next check.', flags: ['Ephemeral'] });
     }
-  } else {
+  } else if (posts) {
     // Baseline immediately so the first sweep is quiet even if it's minutes away.
-    const posts = await fetchPosts(handle).catch(() => null);
-    if (posts) { markXPostsSeen(handle, posts.map(p => p.id)); setXAccountBaselined(handle, posts[0]?.date || null); }
+    markXPostsSeen(handle, posts.map(p => p.id));
+    setXAccountBaselined(handle, posts[0]?.date || null);
   }
 }
 
@@ -3107,11 +3131,34 @@ async function handleXFeedLatest(interaction) {
   if (!channel) return interaction.reply({ content: '❌ Couldn\'t reach the configured channel.', flags: ['Ephemeral'] });
 
   await interaction.deferReply({ flags: ['Ephemeral'] });
-  const r = await runXAccount(account, channel, { force: count });
-  if (!r.ok) {
+
+  let posts;
+  try {
+    posts = await fetchPostsForHandle(interaction.guildId, handle);
+  } catch (err) {
     return interaction.editReply({
-      content: `${r.rateLimited ? '⏳' : '❌'} Couldn't fetch **@${handle}** — ${r.error}`
-        + (r.rateLimited ? '\n-# X is throttling us right now. Try again in a few minutes.' : ''),
+      content: `${err.rateLimited ? '⏳' : '❌'} Couldn't fetch **@${handle}** — ${err.message}`
+        + (err.rateLimited
+          ? (xFeedListId(interaction.guildId)
+            ? '\n-# The list endpoint is throttled right now — unusual. Try again shortly.'
+            : '\n-# X throttles the per-account endpoint hard. `/xfeed use-list` avoids it entirely.')
+          : ''),
+    });
+  }
+
+  if (!posts.length) {
+    return interaction.editReply({
+      content: xFeedListId(interaction.guildId)
+        ? `➖ Nothing from **@${handle}** in the list right now.`
+          + '\n-# Either it has posted nothing recently, or everything recent is a retweet. Check it\'s a member of the list on X.'
+        : `➖ No posts came back for **@${handle}**.`,
+    });
+  }
+
+  const r = await deliverXPosts(account, posts, channel, { force: count });
+  if (!r.posted) {
+    return interaction.editReply({
+      content: `➖ Found ${posts.length} post(s) from **@${handle}**, but none were original — retweets and replies to other accounts are skipped.`,
     });
   }
   return interaction.editReply({ content: `📤 Posted ${r.posted} post(s) from **@${handle}** to <#${channelId}>.`, allowedMentions: { parse: [] } });
