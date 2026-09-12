@@ -2631,7 +2631,7 @@ async function safeRunCardBattleSweep() {
 //   • failures are counted per account and surfaced, because the Telegram bot
 //     had an account quietly broken for five months.
 
-const X_FEED_DEFAULT_INTERVAL_MIN = 15;
+const X_FEED_DEFAULT_INTERVAL_MIN = 30;
 const X_FRESHNESS_HOURS = 48;        // never post something older than this
 const X_ACCOUNT_DELAY_MS = 5000;     // between accounts — the endpoint is IP-throttled
 const X_SEND_DELAY_MS = 1200;        // between Discord sends
@@ -2643,6 +2643,10 @@ const xFailAlerted = new Set();      // handles already warned about
 
 function xFeedChannelId(guildId) {
   return getConfig(guildId, 'x_feed_channel') || null;
+}
+
+function xFeedPingRoleId(guildId) {
+  return getConfig(guildId, 'x_feed_ping_role') || null;
 }
 
 function xFeedIntervalMinutes(guildId) {
@@ -2658,7 +2662,7 @@ function normalizeHandle(raw) {
  * One account: fetch, post anything new, record state. Returns a small summary
  * so the caller can report without re-reading the DB.
  */
-async function runXAccount(account, channel, { force = 0 } = {}) {
+async function runXAccount(account, channel, { force = 0, pingRoleId = null } = {}) {
   const handle = account.handle;
   let posts;
   try {
@@ -2702,7 +2706,12 @@ async function runXAccount(account, channel, { force = 0 } = {}) {
   // Oldest first, so a burst reads in the order it was written.
   for (const p of [...candidates].reverse()) {
     try {
-      await channel.send({ ...buildXPostCard(p, { displayName: account.display_name }), allowedMentions: { parse: [] } });
+      await channel.send({
+        ...buildXPostCard(p, { displayName: account.display_name, pingRoleId }),
+        // Only the configured role may ping — never @everyone, and never a
+        // user/role that happens to appear in the post's own text.
+        allowedMentions: pingRoleId ? { roles: [pingRoleId] } : { parse: [] },
+      });
       // Only now is it "seen" — if the send above threw, we try again next cycle.
       if (!force) markXPostSeen(handle, p.id);
       posted++;
@@ -2733,9 +2742,10 @@ async function runXFeedSweep({ guildId = null } = {}) {
     const channel = await safeGetChannel(channelId);
     if (!channel) return { results: [], noChannel: true };
 
+    const pingRoleId = xFeedPingRoleId(gid);
     const results = [];
     for (const a of accounts) {
-      results.push(await runXAccount(a, channel));
+      results.push(await runXAccount(a, channel, { pingRoleId }));
       await sleep(X_ACCOUNT_DELAY_MS);
     }
     const posted = results.reduce((n, r) => n + r.posted, 0);
@@ -2786,6 +2796,7 @@ async function handleXFeed(interaction) {
     case 'remove': return handleXFeedRemove(interaction);
     case 'list': return handleXFeedList(interaction);
     case 'channel': return handleXFeedChannel(interaction);
+    case 'ping-role': return handleXFeedPingRole(interaction);
     case 'interval': return handleXFeedInterval(interaction);
     case 'check': return handleXFeedCheck(interaction);
     case 'latest': return handleXFeedLatest(interaction);
@@ -2864,6 +2875,7 @@ async function handleXFeedList(interaction) {
     accounts: getXAccounts(),
     channelId: xFeedChannelId(interaction.guildId),
     intervalMinutes: xFeedIntervalMinutes(interaction.guildId),
+    pingRoleId: xFeedPingRoleId(interaction.guildId),
   }));
 }
 
@@ -2872,7 +2884,25 @@ async function handleXFeedChannel(interaction) {
   setConfig(interaction.guildId, 'x_feed_channel', channel.id);
   return interaction.reply({
     content: `✅ X posts will be mirrored into <#${channel.id}>.`
-      + `\n-# Checked every ${xFeedIntervalMinutes(interaction.guildId)} minutes · ${getXAccounts().length} account(s) tracked.`,
+      + `\n-# Checked every ${xFeedIntervalMinutes(interaction.guildId)} minutes · ${getXAccounts().length} account(s) tracked`
+      + `${xFeedPingRoleId(interaction.guildId) ? ` · pinging <@&${xFeedPingRoleId(interaction.guildId)}>` : ' · no role pinged'}.`,
+    flags: ['Ephemeral'],
+    allowedMentions: { parse: [] },
+  });
+}
+
+async function handleXFeedPingRole(interaction) {
+  const role = interaction.options.getRole('role');
+  if (!role) {
+    setConfig(interaction.guildId, 'x_feed_ping_role', '');
+    return interaction.reply({ content: '✅ Pinging off — mirrored posts will be silent.', flags: ['Ephemeral'] });
+  }
+  setConfig(interaction.guildId, 'x_feed_ping_role', role.id);
+  const accounts = getXAccounts().length;
+  return interaction.reply({
+    content: `✅ <@&${role.id}> will be pinged on every mirrored post.`
+      + `\n-# ${accounts} account(s) tracked, checked every ${xFeedIntervalMinutes(interaction.guildId)} minutes.`
+      + '\n-# `/xfeed latest` stays silent so you can test without pinging anyone. Run `/xfeed ping-role` with no role to turn this off.',
     flags: ['Ephemeral'],
     allowedMentions: { parse: [] },
   });
@@ -2884,7 +2914,7 @@ async function handleXFeedInterval(interaction) {
   scheduleXFeedSweep();
   return interaction.reply({
     content: `✅ Checking for new X posts every **${mins}** minutes.`
-      + (mins < 15 ? '\n-# ⚠️ X rate limits this endpoint per IP — below 15m you mostly get throttled, which doesn\'t make posts arrive sooner.' : ''),
+      + (mins < 30 ? '\n-# ⚠️ X rate limits this endpoint per IP — below 30m you mostly collect 429s, which does not make posts arrive any sooner.' : ''),
     flags: ['Ephemeral'],
   });
 }
@@ -3537,7 +3567,6 @@ async function handleStageDropRedrop(interaction) {
   // Only roles named in the option get pinged, and only those — never a blanket
   // @everyone from a stray mention in the note.
   const mentionRoles = [...new Set([...mentionRaw.matchAll(/<@&(\d+)>/g)].map(m => m[1]))];
-  const content = mentionRoles.length ? mentionRoles.map(r => `<@&${r}>`).join(' ') : undefined;
 
   const pulls = countStageDropPulls(drop.id);
   const payload = buildStageDropLive(drop, {
@@ -3545,12 +3574,14 @@ async function handleStageDropRedrop(interaction) {
     remaining: Math.max(0, drop.pool_size - pulls),
     potGold: sumStageDropGold(drop.id),
     note,
+    mentionRoleIds: mentionRoles,
   });
 
   let posted;
   try {
+    // The mention is a text component inside the container: a components-v2
+    // message is rejected outright if it also carries `content`.
     posted = await targetChannel.send({
-      ...(content ? { content } : {}),
       ...payload,
       allowedMentions: { roles: mentionRoles },
     });

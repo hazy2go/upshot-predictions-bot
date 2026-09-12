@@ -1760,9 +1760,13 @@ export function buildCardBattleResults({ tiers = [], totalPulls = 0 } = {}) {
  * A mirrored X post. Deliberately plain: the point is to read the post and get
  * to it in one tap, not to dress it up.
  */
-export function buildXPostCard(post, { displayName = null } = {}) {
+export function buildXPostCard(post, { displayName = null, pingRoleId = null } = {}) {
   const handle = post.author || displayName || 'unknown';
   const children = [];
+  // A components-v2 message cannot carry a `content` field, so a ping has to be
+  // a text component inside the container. Mentions in a TextDisplay notify
+  // exactly like message content does, gated by allowed_mentions on the send.
+  if (pingRoleId) children.push(text(`<@&${pingRoleId}>`));
   children.push(text(`### 𝕏  [@${handle}](https://x.com/${handle})`));
 
   const body = (post.text || '').trim();
@@ -1790,11 +1794,11 @@ export function buildXPostCard(post, { displayName = null } = {}) {
 }
 
 /** `/xfeed list` — what we track and whether it is actually working. */
-export function buildXFeedList({ accounts = [], channelId = null, intervalMinutes = 0 } = {}) {
+export function buildXFeedList({ accounts = [], channelId = null, intervalMinutes = 0, pingRoleId = null } = {}) {
   const children = [];
   children.push(text('## 𝕏 Tracked accounts'));
   children.push(text(channelId
-    ? `-# Posting to <#${channelId}> · checking every ${intervalMinutes}m`
+    ? `-# Posting to <#${channelId}> · checking every ${intervalMinutes}m · ${pingRoleId ? `pinging <@&${pingRoleId}>` : 'no role pinged'}`
     : '-# ⚠️ No channel set — run `/xfeed channel` or nothing will be posted.'));
 
   if (!accounts.length) {
@@ -1842,11 +1846,15 @@ function sealedLine(n) {
  *   sealed   — pulls closed, cards still hidden, waiting on the stage
  *   revealed — archived pointer to the results
  */
-export function buildStageDropLive(drop, { pulls = 0, remaining = null, potGold = 0, note = null } = {}) {
+export function buildStageDropLive(drop, { pulls = 0, remaining = null, potGold = 0, note = null, mentionRoleIds = [] } = {}) {
   const live = drop.status === 'live';
   const revealed = drop.status === 'revealed';
   const cancelled = drop.status === 'cancelled';
   const children = [];
+
+  // Same constraint as the X feed: no `content` on a components-v2 message, so a
+  // reminder ping is a text component inside the container.
+  if (mentionRoleIds.length) children.push(text(mentionRoleIds.map(r => `<@&${r}>`).join(' ')));
 
   const heading = cancelled ? '## 🔒 Sealed Card Drop — ❌ Cancelled'
     : revealed ? '## 🔒 Sealed Card Drop — ✅ Revealed'
