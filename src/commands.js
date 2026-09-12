@@ -890,6 +890,10 @@ export const commands = [
             .setMinValue(1)
             .setMaxValue(5)
         )
+        .addBooleanOption(opt =>
+          opt.setName('ping')
+            .setDescription('Also ping the configured role — off by default so testing stays quiet')
+        )
     ),
 
   new SlashCommandBuilder()

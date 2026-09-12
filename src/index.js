@@ -2723,17 +2723,29 @@ function xFetchFailure(account, channel, err) {
 async function deliverXPosts(account, posts, channel, { force = 0, pingRoleId = null } = {}) {
   const handle = account.handle;
   const own = posts.filter(isOwnPost);
-  if (!own.length) return { handle, ok: true, posted: 0 };
-
   const newest = own[0]?.date || null;
 
-  // First successful fetch: remember everything without posting, so adding an
-  // account doesn't dump its back catalogue into the channel.
+  // First sighting: remember everything without posting, so adding an account
+  // doesn't dump its back catalogue into the channel.
+  //
+  // This has to run BEFORE the no-original-posts check below. An account that
+  // currently only retweets has no *own* posts, so bailing out early left it
+  // permanently un-baselined — and then its first real post would arrive, still
+  // see baselined = 0, and get swallowed by the baseline instead of posted.
+  // Observed live: @retrimentum sat at baselined = 0 for exactly this reason.
+  //
+  // Baseline off ALL fetched ids (retweets included) so those don't resurface,
+  // but only when we actually received something: baselining on an empty result
+  // would mark an account ready while knowing nothing, and its existing posts
+  // would then all look new the first time it appears in the list.
   if (!account.baselined && !force) {
+    if (!posts.length) return { handle, ok: true, posted: 0 };
     markXPostsSeen(handle, posts.map(p => p.id));
     setXAccountBaselined(handle, newest);
     return { handle, ok: true, posted: 0, baselined: true };
   }
+
+  if (!own.length) return { handle, ok: true, posted: 0 };
 
   const candidates = force
     ? own.slice(0, force)
@@ -3155,13 +3167,24 @@ async function handleXFeedLatest(interaction) {
     });
   }
 
-  const r = await deliverXPosts(account, posts, channel, { force: count });
+  // Silent by default so force-posting can't spam the role; `ping:true` is how
+  // you verify the ping works without waiting for a real post.
+  const wantPing = interaction.options.getBoolean('ping') ?? false;
+  const pingRoleId = wantPing ? xFeedPingRoleId(interaction.guildId) : null;
+  if (wantPing && !pingRoleId) {
+    return interaction.editReply({ content: '❌ No ping role set — run `/xfeed ping-role` first.' });
+  }
+  const r = await deliverXPosts(account, posts, channel, { force: count, pingRoleId });
   if (!r.posted) {
     return interaction.editReply({
       content: `➖ Found ${posts.length} post(s) from **@${handle}**, but none were original — retweets and replies to other accounts are skipped.`,
     });
   }
-  return interaction.editReply({ content: `📤 Posted ${r.posted} post(s) from **@${handle}** to <#${channelId}>.`, allowedMentions: { parse: [] } });
+  return interaction.editReply({
+    content: `📤 Posted ${r.posted} post(s) from **@${handle}** to <#${channelId}>.`
+      + (pingRoleId ? `\n-# Pinged <@&${pingRoleId}>.` : '\n-# Silent — pass `ping:true` to test the role ping.'),
+    allowedMentions: { parse: [] },
+  });
 }
 
 async function handleXFeedAutocomplete(interaction) {
