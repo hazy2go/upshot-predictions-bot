@@ -1754,6 +1754,78 @@ export function buildCardBattleResults({ tiers = [], totalPulls = 0 } = {}) {
   return { components: [container(Colors.Gold, children)], flags: 1 << 15 };
 }
 
+// ── X (Twitter) feed ────────────────────────────────────────
+
+/**
+ * A mirrored X post. Deliberately plain: the point is to read the post and get
+ * to it in one tap, not to dress it up.
+ */
+export function buildXPostCard(post, { displayName = null } = {}) {
+  const handle = post.author || displayName || 'unknown';
+  const children = [];
+  children.push(text(`### 𝕏  [@${handle}](https://x.com/${handle})`));
+
+  const body = (post.text || '').trim();
+  if (body) children.push(text(body.slice(0, 1800)));
+
+  if (post.quoted?.text) {
+    const qAuthor = post.quoted.author ? `@${post.quoted.author}` : 'quoted';
+    children.push(text(`> **${qAuthor}**\n> ${post.quoted.text.slice(0, 400).replace(/\n/g, '\n> ')}`));
+  }
+
+  const img = eventImage(post.photos?.[0]);
+  if (img) children.push({ type: CT.MediaGallery, items: [{ media: { url: img } }] });
+
+  children.push(separator());
+  const when = post.date ? Date.parse(post.date) : NaN;
+  children.push(text(Number.isFinite(when)
+    ? `-# Posted <t:${Math.floor(when / 1000)}:R>`
+    : '-# Just posted'));
+  children.push(actionRow(
+    linkButton(post.url, 'View on X'),
+    linkButton(`https://x.com/${handle}`, `@${handle}`),
+  ));
+
+  return { components: [container(0x000000, children)], flags: 1 << 15 };
+}
+
+/** `/xfeed list` — what we track and whether it is actually working. */
+export function buildXFeedList({ accounts = [], channelId = null, intervalMinutes = 0 } = {}) {
+  const children = [];
+  children.push(text('## 𝕏 Tracked accounts'));
+  children.push(text(channelId
+    ? `-# Posting to <#${channelId}> · checking every ${intervalMinutes}m`
+    : '-# ⚠️ No channel set — run `/xfeed channel` or nothing will be posted.'));
+
+  if (!accounts.length) {
+    children.push(separator());
+    children.push(text('-# Nothing tracked yet. Add one with `/xfeed add handle:goSodax`.'));
+    return { components: [container(0x000000, children)], flags: (1 << 15) | (1 << 6) };
+  }
+
+  for (const a of accounts) {
+    children.push(separator());
+    // Health first: a tracked account that silently stopped working is the
+    // failure mode this whole view exists to prevent.
+    const lastOk = a.last_success ? `<t:${Math.floor(Date.parse(a.last_success) / 1000)}:R>` : 'never';
+    let health;
+    if (!a.last_success) health = a.fail_streak > 0 ? `❌ never fetched (${a.fail_streak} attempts)` : '⏳ not checked yet';
+    else if (a.fail_streak === 0) health = '✅ healthy';
+    else if (a.fail_streak < 10) health = `⚠️ ${a.fail_streak} failed checks in a row`;
+    else health = `❌ failing — ${a.fail_streak} checks in a row`;
+
+    const lines = [`**@${a.display_name || a.handle}** — ${health}`];
+    lines.push(`-# Last good fetch: ${lastOk} · ${a.posted_count} post${a.posted_count === 1 ? '' : 's'} mirrored`);
+    if (a.fail_streak > 0 && a.last_error) lines.push(`-# Last error: ${String(a.last_error).slice(0, 120)}`);
+    children.push(text(lines.join('\n')));
+  }
+
+  children.push(separator());
+  children.push(text('-# X throttles this feed hard per IP, so gaps are normal — nothing is lost, late checks catch up.'));
+
+  return { components: [container(0x000000, children)], flags: (1 << 15) | (1 << 6) };
+}
+
 // ── Stage drops (sealed cards, revealed live on stage) ───────
 
 const RANK_MEDALS = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣'];

@@ -258,6 +258,42 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_stage_drop_pulls_drop ON stage_drop_pulls(drop_id);
 
+  -- ── X (Twitter) feed ───────────────────────────────────────
+  -- Accounts we mirror into a Discord channel. Ported from the Telegram
+  -- tg-feed-bot, with the state moved out of a JSON file into here.
+  --
+  -- The source is Twitter's public syndication endpoint, which is rate limited
+  -- PER IP and hard: on the Pi it mostly answers 429 and only occasionally lets
+  -- a request through. fail_streak/last_error exist so that degradation is
+  -- visible instead of silent — the Telegram bot had an account that stopped
+  -- working for five months without anyone noticing.
+  CREATE TABLE IF NOT EXISTS x_accounts (
+    handle        TEXT PRIMARY KEY,                  -- lowercased, no @
+    display_name  TEXT,                              -- as typed, for display
+    added_by      TEXT,
+    added_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    baselined     INTEGER NOT NULL DEFAULT 0,        -- 1 = first fetch recorded, only newer posts notify
+    last_check    TEXT,                              -- last attempt
+    last_success  TEXT,                              -- last time the fetch actually worked
+    last_post_at  TEXT,                              -- timestamp of the newest post seen
+    fail_streak   INTEGER NOT NULL DEFAULT 0,
+    last_error    TEXT,
+    posted_count  INTEGER NOT NULL DEFAULT 0
+  );
+
+  -- Delivered (or baselined) post ids. A row here means "do not post this
+  -- again" — written only AFTER a successful send, so a failed Discord call
+  -- leaves the post to be retried rather than losing it.
+  CREATE TABLE IF NOT EXISTS x_seen_posts (
+    handle     TEXT NOT NULL,
+    post_id    TEXT NOT NULL,
+    seen_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (handle, post_id),
+    FOREIGN KEY (handle) REFERENCES x_accounts(handle) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_x_seen_posts_handle ON x_seen_posts(handle);
+
   -- Admin-defined achievement badges. A badge is earned by having at least
   -- required_lineups total lineup entries SUMMED across the contests listed in
   -- contest_ids (a JSON array of Upshot contest IDs). The 12h sweep is add-only:
@@ -1180,6 +1216,89 @@ export function pullCardFromStageDrop(dropId, { discordId, username }) {
     return { card, remaining: pool.length };
   });
   return txn();
+}
+
+// ── X (Twitter) feed ────────────────────────────────────────
+
+export function addXAccount(handle, displayName, addedBy) {
+  const info = db.prepare(`
+    INSERT OR IGNORE INTO x_accounts (handle, display_name, added_by) VALUES (?, ?, ?)
+  `).run(handle, displayName || handle, addedBy);
+  return info.changes > 0; // false = already tracked
+}
+
+export function removeXAccount(handle) {
+  return db.prepare('DELETE FROM x_accounts WHERE handle = ?').run(handle).changes > 0;
+}
+
+export function getXAccount(handle) {
+  return db.prepare('SELECT * FROM x_accounts WHERE handle = ?').get(handle);
+}
+
+export function getXAccounts() {
+  return db.prepare('SELECT * FROM x_accounts ORDER BY handle ASC').all();
+}
+
+export function isXPostSeen(handle, postId) {
+  return !!db.prepare('SELECT 1 FROM x_seen_posts WHERE handle = ? AND post_id = ?')
+    .get(handle, postId);
+}
+
+/** Record a post as delivered. Called AFTER the Discord send succeeds. */
+export function markXPostSeen(handle, postId) {
+  db.prepare('INSERT OR IGNORE INTO x_seen_posts (handle, post_id) VALUES (?, ?)')
+    .run(handle, postId);
+}
+
+/** Baseline: record a batch as seen without posting, so adding an account is quiet. */
+export function markXPostsSeen(handle, postIds) {
+  const stmt = db.prepare('INSERT OR IGNORE INTO x_seen_posts (handle, post_id) VALUES (?, ?)');
+  const txn = db.transaction(() => { for (const id of postIds) stmt.run(handle, id); });
+  txn();
+}
+
+export function countXSeen(handle) {
+  return db.prepare('SELECT COUNT(*) AS n FROM x_seen_posts WHERE handle = ?').get(handle).n;
+}
+
+/** Keep the newest `keep` ids per handle — the table is a dedup window, not an archive. */
+export function pruneXSeen(handle, keep = 200) {
+  db.prepare(`
+    DELETE FROM x_seen_posts
+     WHERE handle = ?
+       AND rowid NOT IN (
+         SELECT rowid FROM x_seen_posts WHERE handle = ? ORDER BY seen_at DESC, rowid DESC LIMIT ?
+       )
+  `).run(handle, handle, keep);
+}
+
+export function setXAccountBaselined(handle, lastPostAt) {
+  db.prepare('UPDATE x_accounts SET baselined = 1, last_post_at = ? WHERE handle = ?')
+    .run(lastPostAt || null, handle);
+}
+
+/** A fetch worked: clear the failure streak. */
+export function recordXSuccess(handle, lastPostAt) {
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE x_accounts
+       SET last_check = ?, last_success = ?, fail_streak = 0, last_error = NULL,
+           last_post_at = COALESCE(?, last_post_at)
+     WHERE handle = ?
+  `).run(now, now, lastPostAt || null, handle);
+}
+
+/** A fetch failed: count it, so a silently-dead account can be surfaced. */
+export function recordXFailure(handle, message) {
+  db.prepare(`
+    UPDATE x_accounts
+       SET last_check = ?, fail_streak = fail_streak + 1, last_error = ?
+     WHERE handle = ?
+  `).run(new Date().toISOString(), (message || '').slice(0, 300), handle);
+}
+
+export function bumpXPostedCount(handle, n = 1) {
+  db.prepare('UPDATE x_accounts SET posted_count = posted_count + ? WHERE handle = ?').run(n, handle);
 }
 
 // ── Config (DB-backed, overrides .env) ──────────────────────
