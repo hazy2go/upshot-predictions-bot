@@ -1794,12 +1794,15 @@ export function buildXPostCard(post, { displayName = null, pingRoleId = null } =
 }
 
 /** `/xfeed list` — what we track and whether it is actually working. */
-export function buildXFeedList({ accounts = [], channelId = null, intervalMinutes = 0, pingRoleId = null } = {}) {
+export function buildXFeedList({ accounts = [], channelId = null, intervalMinutes = 0, pingRoleId = null, listId = null } = {}) {
   const children = [];
   children.push(text('## 𝕏 Tracked accounts'));
   children.push(text(channelId
     ? `-# Posting to <#${channelId}> · checking every ${intervalMinutes}m · ${pingRoleId ? `pinging <@&${pingRoleId}>` : 'no role pinged'}`
     : '-# ⚠️ No channel set — run `/xfeed channel` or nothing will be posted.'));
+  children.push(text(listId
+    ? `-# 📋 List mode: one request covers every account ([list ${listId}](https://x.com/i/lists/${listId}))`
+    : '-# ⚠️ Per-account mode — X throttles that endpoint hard. `/xfeed use-list` is far more reliable.'));
 
   if (!accounts.length) {
     children.push(separator());
@@ -1825,7 +1828,9 @@ export function buildXFeedList({ accounts = [], channelId = null, intervalMinute
   }
 
   children.push(separator());
-  children.push(text('-# X throttles this feed hard per IP, so gaps are normal — nothing is lost, late checks catch up.'));
+  children.push(text(listId
+    ? '-# Only original posts are mirrored — retweets and replies to other accounts are skipped.'
+    : '-# X throttles this feed hard per IP, so gaps are normal — nothing is lost, late checks catch up.'));
 
   return { components: [container(0x000000, children)], flags: (1 << 15) | (1 << 6) };
 }

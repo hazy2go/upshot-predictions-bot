@@ -12,7 +12,8 @@
 // window wide enough that a late success still catches up, and never let a
 // quiet failure look like "no new posts".
 
-const SYNDICATION_URL = 'https://syndication.twitter.com/srv/timeline-profile/screen-name';
+const PROFILE_URL = 'https://syndication.twitter.com/srv/timeline-profile/screen-name';
+const LIST_URL = 'https://syndication.twitter.com/srv/timeline-list/list-id';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const REQUEST_TIMEOUT_MS = 20_000;
 
@@ -39,7 +40,25 @@ export class XAccountUnavailable extends Error {
  *            isReply, quoted }]
  */
 export async function fetchPosts(handle) {
-  const res = await fetch(`${SYNDICATION_URL}/${encodeURIComponent(handle)}`, {
+  return fetchTimeline(`${PROFILE_URL}/${encodeURIComponent(handle)}`, handle);
+}
+
+/**
+ * Fetch a PUBLIC X list's timeline: every member's posts in ONE request.
+ *
+ * This is the endpoint that makes the feed practical. Measured on 2026-09-12,
+ * while /timeline-profile was returning 429 to every request, this returned 200
+ * with 70 entries covering both tracked accounts — it is a separate rate-limit
+ * bucket, and it scales to any number of accounts for the same single request.
+ *
+ * The list must be public; a private one reads as empty rather than erroring.
+ */
+export async function fetchListPosts(listId) {
+  return fetchTimeline(`${LIST_URL}/${encodeURIComponent(listId)}`, null);
+}
+
+async function fetchTimeline(url, fallbackHandle) {
+  const res = await fetch(url, {
     headers: { 'User-Agent': UA, 'Accept': 'text/html' },
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
@@ -64,13 +83,28 @@ export async function fetchPosts(handle) {
 
   return entries
     .filter(e => e.type === 'tweet')
-    .map(e => normalize(e.content?.tweet, handle))
+    .map(e => normalize(e.content?.tweet, fallbackHandle))
     .filter(Boolean);
+}
+
+/** Group a list timeline by author handle (lowercased). */
+export function groupByAuthor(posts) {
+  const out = new Map();
+  for (const p of posts) {
+    const key = (p.author || '').toLowerCase();
+    if (!key) continue;
+    if (!out.has(key)) out.set(key, []);
+    out.get(key).push(p);
+  }
+  return out;
 }
 
 function normalize(t, handle) {
   if (!t?.id_str) return null;
-  const screenName = (t.user?.screen_name || handle);
+  // In list mode there is no single handle to fall back to, so a post without a
+  // resolvable author is dropped rather than mis-attributed.
+  const screenName = t.user?.screen_name || handle;
+  if (!screenName) return null;
   const lower = screenName.toLowerCase();
   const replyTo = t.in_reply_to_screen_name?.toLowerCase() || null;
 
