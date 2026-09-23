@@ -456,8 +456,10 @@ async function checkCardInContests(walletAddress, cardId) {
 /**
  * Get all contests a user is entered in, with ALL their lineups and card details.
  * Returns array of { contestName, lineups: [{ rank, totalLineups, score, cards: [{ id, name }] }] }
+ * `knownCards` (cardId -> card) supplies names the caller already has, so those
+ * cards skip the per-card lookup.
  */
-export async function getUserContestLineups(walletAddress) {
+export async function getUserContestLineups(walletAddress, { knownCards } = {}) {
   try {
     const contests = await getLiveContests();
     if (!contests.length) return [];
@@ -498,8 +500,12 @@ export async function getUserContestLineups(walletAddress) {
     // the picker (the global concurrency limiter keeps the extra attempts from
     // flooding the API).
     const cardNames = new Map();
+    for (const cardId of allCardIds) {
+      const name = knownCards?.get(cardId)?.name;
+      if (name) cardNames.set(cardId, name);
+    }
     const cardFetches = await Promise.allSettled(
-      [...allCardIds].map(async (cardId) => {
+      [...allCardIds].filter(cardId => !cardNames.has(cardId)).map(async (cardId) => {
         const details = await getCardDetails(cardId, { retries: 2 });
         return { cardId, name: details?.name || cardId };
       })
@@ -790,6 +796,13 @@ export async function getPredictableCards(walletAddress) {
   }
 
   const byId = new Map();
+  // Every card the balances payload embeds, INCLUDING qty-0 entries. A card
+  // sitting in a contest lineup shows up there with qty 0 (`inContest` counts
+  // the lineups), still carrying its name and event — so contest cards get
+  // their deadline from here instead of one getCardDetails call each. That
+  // per-card fan-out was ~166 requests (~45s at the rate limit) on a normal
+  // wallet's cold My Cards tap.
+  const embedded = new Map();
   let balancesComplete = true;
 
   // 1. Wallet balances — ALL pages (the endpoint is paginated; see above). The
@@ -802,6 +815,7 @@ export async function getPredictableCards(walletAddress) {
     balancesComplete = res.complete;
     for (const [cardId, entry] of res.pairs) {
       if (!cardId || !entry) continue;
+      if (entry.card) embedded.set(cardId, entry.card);
       const claimed = parseInt(entry.claimedQuantity || '0', 10);
       const unclaimed = parseInt(entry.unclaimedQuantity || '0', 10);
       if (claimed + unclaimed <= 0) continue;
@@ -817,12 +831,15 @@ export async function getPredictableCards(walletAddress) {
 
   // 2. Contest lineup cards (reuse the existing lineup fetcher).
   try {
-    const contests = await getUserContestLineups(walletAddress);
+    const contests = await getUserContestLineups(walletAddress, { knownCards: embedded });
     for (const contest of contests) {
       for (const lineup of contest.lineups) {
         for (const card of lineup.cards) {
           if (!card?.id || byId.has(card.id)) continue;
-          byId.set(card.id, { id: card.id, name: card.name || card.id, inContest: true });
+          const known = embedded.get(card.id);
+          const event = known?.event || known?.outcome?.event || null;
+          // No embedded event → leave `event` off so the deadline filter looks it up.
+          byId.set(card.id, { id: card.id, name: card.name || card.id, inContest: true, ...(event && { event }) });
         }
       }
     }
