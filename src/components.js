@@ -1620,6 +1620,98 @@ export function buildShotCallerPanel(view) {
   return { components: [container(Colors.Stats, children)], flags: 1 << 15 };
 }
 
+// ── Prediction whitelist (bypass the current-month gate) ─────
+// Admin picker over every active Upshot event. Each page is one multi-select
+// whose options are pre-ticked when the event is whitelisted: ticking adds it,
+// unticking removes it. `view` is 'all' (every active event) or 'listed'
+// (just the whitelist — including events that are no longer active, so stale
+// entries can still be removed).
+//   events: [{ id, name, eventDate }]   whitelist: { [eventId]: name }
+export const WHITELIST_PER_PAGE = 25; // Discord's max options per select
+
+function whitelistDateLabel(eventDate) {
+  if (!eventDate) return 'No resolution date';
+  const d = new Date(eventDate);
+  if (Number.isNaN(d.getTime())) return 'No resolution date';
+  const now = new Date();
+  const later = d.getUTCFullYear() * 12 + d.getUTCMonth() > now.getUTCFullYear() * 12 + now.getUTCMonth();
+  return `Resolves ${d.toISOString().slice(0, 10)}${later ? ' · later month' : ' · this month'}`;
+}
+
+export function buildPredictWhitelist(events, whitelist, { page = 0, query = null, view = 'all', error = null } = {}) {
+  const listedCount = Object.keys(whitelist).length;
+  const totalPages = Math.max(1, Math.ceil(events.length / WHITELIST_PER_PAGE));
+  const idx = Math.max(0, Math.min(page, totalPages - 1));
+  const start = idx * WHITELIST_PER_PAGE;
+  const pageEvents = events.slice(start, start + WHITELIST_PER_PAGE);
+
+  const children = [];
+  children.push(text('## 📋 Prediction Whitelist'));
+  children.push(text(
+    '-# Whitelisted events skip the **current month only** rule, so members can predict on their cards even when the event resolves in a later month. '
+    + `Tick to add, untick to remove. **${listedCount}** event${listedCount === 1 ? '' : 's'} whitelisted.`,
+  ));
+  if (error) children.push(text(`⚠️ ${error}`));
+  if (query) children.push(text(`-# 🔍 Search: **${query}** — ${events.length} match${events.length === 1 ? '' : 'es'}`));
+  children.push(separator());
+
+  if (events.length === 0) {
+    children.push(text(
+      query ? `No events match **${query}**.`
+        : view === 'listed' ? 'Nothing whitelisted yet — switch to **All active events** to add some.'
+          : 'No active events found. The Upshot API may be down — try 🔄 Refresh.',
+    ));
+  } else {
+    children.push({
+      type: CT.ActionRow,
+      components: [{
+        type: CT.StringSelect,
+        // Page index is baked in so the handler knows exactly which events this
+        // select covered (anything on the page but not ticked gets removed).
+        custom_id: `pwl_select:${idx}`,
+        placeholder: totalPages > 1 ? `Tick events to whitelist… (page ${idx + 1} of ${totalPages})` : 'Tick events to whitelist…',
+        min_values: 0,
+        max_values: pageEvents.length,
+        options: pageEvents.map(e => {
+          const name = e.name || e.id;
+          return {
+            label: name.length > 100 ? name.slice(0, 97) + '...' : name,
+            value: e.id,
+            description: (whitelist[e.id] ? '✅ Whitelisted · ' : '') + (e.inactive ? 'No longer active' : whitelistDateLabel(e.eventDate)),
+            default: !!whitelist[e.id],
+          };
+        }),
+      }],
+    });
+  }
+
+  if (totalPages > 1) {
+    children.push(text(`-# Page ${idx + 1} of ${totalPages} · events ${start + 1}–${start + pageEvents.length} of ${events.length}`));
+    // Role suffix keeps the custom_ids unique when targets coincide (see mycards_page).
+    children.push(actionRow(
+      button('pwl_page:0:first', '« First', ButtonStyle.Secondary, { disabled: idx === 0 }),
+      button(`pwl_page:${idx - 1}:prev`, '← Prev', ButtonStyle.Secondary, { disabled: idx === 0 }),
+      button(`pwl_page:${idx + 1}:next`, 'Next →', ButtonStyle.Secondary, { disabled: idx >= totalPages - 1 }),
+      button(`pwl_page:${totalPages - 1}:last`, 'Last »', ButtonStyle.Secondary, { disabled: idx >= totalPages - 1 }),
+    ));
+  }
+
+  children.push(separator());
+  children.push(actionRow(
+    view === 'listed'
+      ? button('pwl_view:all', '📅 All active events', ButtonStyle.Secondary)
+      : button('pwl_view:listed', `✅ Whitelisted only (${listedCount})`, ButtonStyle.Secondary),
+    button('pwl_search', '🔍 Search', ButtonStyle.Primary),
+    ...(query ? [button('pwl_search_clear', '✖ Clear search', ButtonStyle.Secondary)] : []),
+    button('pwl_refresh', '🔄 Refresh', ButtonStyle.Secondary),
+  ));
+
+  return {
+    components: [container(Colors.Admin, children)],
+    flags: (1 << 15) | (1 << 6),
+  };
+}
+
 // ── User self-cancel (deadline > 30 days away) ───────────────
 
 export function buildCancelPicker(predictions, minDays) {

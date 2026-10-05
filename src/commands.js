@@ -135,6 +135,11 @@ export const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
+    .setName('prediction-whitelist')
+    .setDescription('Let certain events skip the "current month only" predict rule (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
     .setName('refresh')
     .setDescription('Re-sync prediction embeds to show updated buttons (admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)

@@ -640,7 +640,7 @@ export function isInstantWinCard(cardLike) {
  * stragglers as a backstop) but flagged `unknownEvent: true` — we know nothing
  * about when they resolve, so the caller's current-month gate can't evaluate
  * them and must decide for itself whether to show them.
- * Returns { id, name, inContest, eventDate, unknownEvent } entries.
+ * Returns { id, name, inContest, eventId, eventDate, unknownEvent } entries.
  */
 async function filterOutExpiredCards(cards) {
   const out = [];
@@ -649,7 +649,7 @@ async function filterOutExpiredCards(cards) {
   for (const c of cards) {
     if (c.event) {
       if (!eventDeadlinePassed({ resolvedAt: c.event.resolvedAt, eventDate: c.event.eventDate, status: c.event.status })) {
-        out.push({ id: c.id, name: c.name, inContest: c.inContest, eventDate: c.event.eventDate || null });
+        out.push({ id: c.id, name: c.name, inContest: c.inContest, eventId: c.event.id || null, eventDate: c.event.eventDate || null });
       }
     } else {
       needFetch.push(c);
@@ -667,6 +667,7 @@ async function filterOutExpiredCards(cards) {
         id: chunk[j].id,
         name: details?.name || chunk[j].name,
         inContest: chunk[j].inContest,
+        eventId: details?.event?.id || null,
         eventDate: details?.eventDate || null,
         // No details at all = the lookup failed (shield block / timeout), not a
         // card that genuinely has no date. Callers use this to tell "resolves
@@ -858,6 +859,7 @@ export async function getPredictableCards(walletAddress) {
       id: c.id,
       name: c.name,
       inContest: c.inContest,
+      eventId: c.event?.id || null,
       eventDate: c.event?.eventDate || null,
       unknownEvent: !c.event?.eventDate,
     }));
@@ -961,6 +963,39 @@ export async function getContestTop(contestId, n = 3) {
   } catch (err) {
     console.error(`Upshot API: getContestTop(${contestId}) failed:`, err.message);
     return [];
+  }
+}
+
+// ── Active events (for the /prediction-whitelist picker) ─────────────────────
+// /events ignores ?status, so we page the whole list and keep ACTIVE ones in
+// memory. Instant-win events carry no prediction, so they're dropped too.
+// Cached briefly: the picker re-renders on every page/search/toggle.
+let _activeEvents = null; // { at, value }
+const ACTIVE_EVENTS_TTL = 5 * 60 * 1000;
+
+/**
+ * Every ACTIVE, non-instant event, sorted by name. Returns
+ * [{ id, name, eventDate }]. Best-effort: [] on failure (a failed or empty
+ * fetch is never cached). Pass fresh:true to bypass the cache.
+ */
+export async function getActiveEvents({ fresh = false } = {}) {
+  if (!fresh && _activeEvents && Date.now() - _activeEvents.at < ACTIVE_EVENTS_TTL) {
+    return _activeEvents.value;
+  }
+  try {
+    const events = await fetchAllPages(
+      (p, pp) => `${BASE}/events?status=ACTIVE&page=${p}&perPage=${pp}`,
+      { maxPages: 100, label: 'events' }
+    );
+    const value = events
+      .filter(e => e?.id && e.status === 'ACTIVE' && e.kind !== 'INSTANT' && e.resolutionType !== 'INSTANT')
+      .map(e => ({ id: e.id, name: e.name || e.id, eventDate: e.eventDate || null }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }));
+    if (value.length) _activeEvents = { at: Date.now(), value };
+    return value;
+  } catch (err) {
+    console.error('Upshot API: getActiveEvents failed:', err.message);
+    return _activeEvents?.value || [];
   }
 }
 
