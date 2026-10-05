@@ -94,7 +94,7 @@ import {
   getUserProfile, getUserPacks, transferPack, refreshUpshotAccessToken,
   getContests, getContestTop, getRaffles, getRaffleDetail, getRaffleTop,
   getStorePacks, getStoreBundles, getContestLineupCounts,
-  getLiveGoldCards, warmGoldPool, getActiveEvents,
+  getLiveGoldCards, warmGoldPool, getActiveEvents, getEventStatus,
 } from './api.js';
 
 // ── Client ──────────────────────────────────────────────────
@@ -8270,11 +8270,47 @@ function whitelistState(interaction) {
   return state;
 }
 
+// Drop whitelisted events that are over. Once an event leaves ACTIVE (locked /
+// pending / resolved) nobody can predict on it, so its entry is dead weight.
+// Entries still on the active list are kept without a lookup; anything else is
+// confirmed against /events/{id} first, so a partial or failed events fetch can
+// never wipe live entries — an unreachable lookup keeps the entry for next time.
+async function prunePredictWhitelist(guildId) {
+  const ids = Object.keys(getPredictWhitelist(guildId));
+  if (!ids.length) return [];
+  const activeIds = new Set((await getActiveEvents()).map(e => e.id));
+  const over = [];
+  for (const id of ids) {
+    if (activeIds.has(id)) continue;
+    const ev = await getEventStatus(id);
+    if (ev && (ev.notFound || ev.resolvedAt || (ev.status && ev.status !== 'ACTIVE'))) over.push(id);
+  }
+  if (!over.length) return [];
+  // Re-read so an admin's edit made while we were checking isn't overwritten.
+  const whitelist = getPredictWhitelist(guildId);
+  const removed = over.filter(id => whitelist[id]).map(id => whitelist[id]);
+  for (const id of over) delete whitelist[id];
+  setPredictWhitelist(guildId, whitelist);
+  if (removed.length) console.log(`Prediction whitelist (${guildId}): removed ${removed.length} finished event(s): ${removed.join(', ')}`);
+  return removed;
+}
+
+const WHITELIST_PRUNE_INTERVAL = 60 * 60 * 1000; // hourly
+async function safePruneAllWhitelists() {
+  for (const guildId of client.guilds.cache.keys()) {
+    try { await prunePredictWhitelist(guildId); }
+    catch (err) { console.error(`Prediction whitelist prune (${guildId}) failed:`, err.message); }
+  }
+}
+
 async function handlePredictWhitelist(interaction) {
   if (!isAdmin(interaction.member)) {
     return interaction.reply({ content: '❌ Admins only.', flags: ['Ephemeral'] });
   }
   await interaction.deferReply({ flags: ['Ephemeral'] });
+  // Clear out finished events first so the admin never sees stale entries.
+  await prunePredictWhitelist(interaction.guildId).catch(err =>
+    console.error('Prediction whitelist prune failed:', err.message));
   const state = { view: 'all', query: null, page: 0 };
   whitelistPickerCache.set(interaction.user.id, state);
   scheduleCacheEvict(whitelistPickerCache, 'whitelist', interaction.user.id);
@@ -8887,6 +8923,11 @@ client.once(Events.ClientReady, async () => {
   // contest-lineup badges to eligible linked users.
   badgeTimer = setTimeout(safeRunBadgeSweep, 180_000);
   console.log(`   Badge sweep: first check in 3 min, then every 12h`);
+
+  // Drop finished events from the prediction whitelist (first run after 2 min).
+  setTimeout(safePruneAllWhitelists, 120_000);
+  setInterval(safePruneAllWhitelists, WHITELIST_PRUNE_INTERVAL);
+  console.log(`   Prediction whitelist prune: first check in 2 min, then hourly`);
 
   // Keep the Upshot token fresh hands-off: the access token lives ~15h and the
   // refresh token is a rotating 7-day sliding window, so a check every 6h keeps
