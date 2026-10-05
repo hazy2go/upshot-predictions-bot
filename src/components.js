@@ -1624,8 +1624,8 @@ export function buildShotCallerPanel(view) {
 // Admin picker over every active Upshot event. Each page is one multi-select
 // whose options are pre-ticked when the event is whitelisted: ticking adds it,
 // unticking removes it. `view` is 'all' (every active event) or 'listed'
-// (just the whitelist — including events that are no longer active, so stale
-// entries can still be removed).
+// (just the whitelist). Finished events are pruned automatically (hourly and
+// whenever the picker opens); `inactive` only marks one not yet confirmed over.
 //   events: [{ id, name, eventDate }]   whitelist: { [eventId]: name }
 export const WHITELIST_PER_PAGE = 25; // Discord's max options per select
 
@@ -1649,7 +1649,7 @@ export function buildPredictWhitelist(events, whitelist, { page = 0, query = nul
   children.push(text('## 📋 Prediction Whitelist'));
   children.push(text(
     '-# Whitelisted events skip the **current month only** rule, so members can predict on their cards even when the event resolves in a later month. '
-    + `Tick to add, untick to remove. **${listedCount}** event${listedCount === 1 ? '' : 's'} whitelisted.`,
+    + `Tick to add, untick to remove — finished events drop off automatically. **${listedCount}** event${listedCount === 1 ? '' : 's'} whitelisted.`,
   ));
   if (error) children.push(text(`⚠️ ${error}`));
   if (query) children.push(text(`-# 🔍 Search: **${query}** — ${events.length} match${events.length === 1 ? '' : 'es'}`));

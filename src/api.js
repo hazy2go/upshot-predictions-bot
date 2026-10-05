@@ -999,6 +999,26 @@ export async function getActiveEvents({ fresh = false } = {}) {
   }
 }
 
+/**
+ * Live status of one event, for confirming a whitelisted event really is over
+ * before dropping it. Returns { status, resolvedAt } when found,
+ * { notFound: true } on a 404 / empty payload, or null on a transient failure
+ * (timeout, shield, 5xx) — callers must treat null as "don't know".
+ */
+export async function getEventStatus(eventId) {
+  try {
+    const res = await fetchRetry(`${BASE}/events/${eventId}`, { timeout: 12_000, retries: 2 });
+    if (res.status === 404) return { notFound: true };
+    if (!res.ok) return null;
+    const event = (await res.json())?.data;
+    if (!event) return { notFound: true };
+    return { status: event.status || null, resolvedAt: event.resolvedAt || null };
+  } catch (err) {
+    console.error(`Upshot API: getEventStatus(${eventId}) failed:`, err.message);
+    return null;
+  }
+}
+
 // ── Live gold-card pool (for the "highest card wins" battle) ─────────────────
 // The pool is EXPENSIVE to build (page the full /cards list — thousands of cards
 // — with include=event so we get each card's live event status in bulk). So it's
