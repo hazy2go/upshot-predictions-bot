@@ -76,6 +76,7 @@ import {
   buildAdminPanel, buildAdminPickChannel, buildAdminPickRole, buildAdminPickRoles, ADMIN_SETTINGS_LIST,
   formatWindow,
   buildShotCallerPanel,
+  buildPredictWhitelist, WHITELIST_PER_PAGE,
 } from './components.js';
 
 import { commands } from './commands.js';
@@ -93,7 +94,7 @@ import {
   getUserProfile, getUserPacks, transferPack, refreshUpshotAccessToken,
   getContests, getContestTop, getRaffles, getRaffleDetail, getRaffleTop,
   getStorePacks, getStoreBundles, getContestLineupCounts,
-  getLiveGoldCards, warmGoldPool,
+  getLiveGoldCards, warmGoldPool, getActiveEvents,
 } from './api.js';
 
 // ── Client ──────────────────────────────────────────────────
@@ -435,6 +436,29 @@ function getPredictMinAccountAgeDays(guildId) {
 function getPredictCurrentMonthOnly(guildId) {
   const v = getConfig(guildId, 'predict_current_month_only');
   return v == null ? true : (v === '1' || v === 'true');
+}
+
+// Events an admin has exempted from the current-month gate (/prediction-whitelist).
+// Stored as JSON { eventId: eventName } — the name lets the whitelist view show
+// entries whose event has since dropped off the active list.
+function getPredictWhitelist(guildId) {
+  try {
+    const parsed = JSON.parse(getConfig(guildId, 'predict_month_whitelist') || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+function setPredictWhitelist(guildId, whitelist) {
+  setConfig(guildId, 'predict_month_whitelist', JSON.stringify(whitelist));
+}
+
+// True when the current-month gate should block this card for this member:
+// gate on, not an admin, event not whitelisted, and it resolves in a later month.
+function monthGateBlocks(interaction, eventId, eventDate) {
+  if (!getPredictCurrentMonthOnly(interaction.guildId) || isAdmin(interaction.member)) return false;
+  if (eventId && getPredictWhitelist(interaction.guildId)[eventId]) return false;
+  return resolvesAfterThisMonth(eventDate);
 }
 
 // Member-based eligibility (role / message count / account age). Returns an error
@@ -4253,7 +4277,7 @@ async function handleCardPicker(interaction) {
   // Hide cards that already have an open prediction (one per card, globally) —
   // this is the "no backtracking" win: you only see cards you can actually post.
   // Also hide later-month cards when the current-month-only gate is on (admins
-  // still see everything — they bypass the gate).
+  // still see everything — they bypass the gate; whitelisted events pass too).
   //
   // `unknownEvent` cards are hidden under the gate too. Their detail lookup
   // failed, so we know neither their name (they render as a raw card ID) nor
@@ -4265,7 +4289,7 @@ async function handleCardPicker(interaction) {
   const monthGated = getPredictCurrentMonthOnly(interaction.guildId) && !isAdmin(interaction.member);
   const available = cards.filter(c =>
     !hasUnresolvedPredictionForCard(c.id)
-    && !(monthGated && (c.unknownEvent || resolvesAfterThisMonth(c.eventDate))));
+    && !(monthGated && (c.unknownEvent || monthGateBlocks(interaction, c.eventId, c.eventDate))));
 
   if (available.length === 0) {
     cardPickerCache.delete(interaction.user.id);
@@ -4494,8 +4518,8 @@ async function handlePredictUrlModalSubmit(interaction) {
   if (!isCardStillOpen(details)) {
     return interaction.editReply({ content: `❌ This card's prediction window has closed — its event is past the open phase${deadline ? ` (deadline **${deadline}**)` : ''}. You can't predict on it — pick another card.` });
   }
-  // Current-month-only gate (admins bypass): block cards resolving in a later month.
-  if (getPredictCurrentMonthOnly(interaction.guildId) && !isAdmin(interaction.member) && resolvesAfterThisMonth(details.eventDate)) {
+  // Current-month-only gate (admins + whitelisted events bypass): block cards resolving in a later month.
+  if (monthGateBlocks(interaction, details.event?.id, details.eventDate)) {
     return interaction.editReply({ content: `❌ You can only predict on cards resolving **this month**. This card resolves later${deadline ? ` (**${deadline}**)` : ''} — pick a current-month card.` });
   }
 
@@ -5591,10 +5615,9 @@ async function handlePredictModalSubmit(interaction) {
     });
   }
 
-  // Current-month-only gate (admins bypass) — authoritative backstop for every
-  // submit path. Only enforced when we have the event date.
-  if (getPredictCurrentMonthOnly(guildId) && !isAdmin(interaction.member)
-      && cardDetailsForCheck && resolvesAfterThisMonth(cardDetailsForCheck.eventDate)) {
+  // Current-month-only gate (admins + whitelisted events bypass) — authoritative
+  // backstop for every submit path. Only enforced when we have the event date.
+  if (cardDetailsForCheck && monthGateBlocks(interaction, cardDetailsForCheck.event?.id, cardDetailsForCheck.eventDate)) {
     return interaction.editReply({
       content: `❌ You can only predict on cards resolving **this month**. This card resolves later${deadlineFormatted && deadlineFormatted !== 'TBD' ? ` (**${deadlineFormatted}**)` : ''} — pick a current-month card.`,
     });
@@ -5922,6 +5945,11 @@ async function handleButton(interaction) {
   }
   if (interaction.customId.startsWith('admin_act:')) {
     return handleAdminAction(interaction, interaction.customId.split(':')[1]);
+  }
+
+  // Prediction whitelist picker
+  if (interaction.customId.startsWith('pwl_')) {
+    return handlePredictWhitelistButton(interaction);
   }
 
   // My Cards search
@@ -8193,6 +8221,144 @@ async function handleAdminPanel(interaction) {
   return interaction.reply(buildAdminPanel(gatherAdminCfg(interaction.guildId)));
 }
 
+// ── /prediction-whitelist ────────────────────────────────────
+// Per-admin picker state: which view/search/page they're on. The events list
+// itself lives in getActiveEvents' cache, so this only holds the UI position.
+const whitelistPickerCache = new Map(); // userId -> { view, query, page }
+
+// The events the picker currently shows: every active event, or (view
+// 'listed') just the whitelist — whitelisted events that are no longer active
+// are kept there, flagged `inactive`, so they can still be removed.
+async function whitelistView(guildId, state, { fresh = false } = {}) {
+  const active = await getActiveEvents({ fresh });
+  let events = active;
+  if (state.view === 'listed') {
+    const whitelist = getPredictWhitelist(guildId);
+    const byId = new Map(active.map(e => [e.id, e]));
+    events = Object.entries(whitelist)
+      .map(([id, name]) => byId.get(id) || { id, name, eventDate: null, inactive: true })
+      .sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }));
+  }
+  const q = state.query?.trim().toLowerCase();
+  if (q) events = events.filter(e => (e.name || '').toLowerCase().includes(q));
+  return { events, apiDown: active.length === 0 };
+}
+
+async function renderWhitelistPicker(interaction, state, opts = {}) {
+  const { events, apiDown } = await whitelistView(interaction.guildId, state, opts);
+  // Remember exactly which events this page's select shows, so a submit only
+  // touches those — even if the events list shifts before the admin picks.
+  const totalPages = Math.max(1, Math.ceil(events.length / WHITELIST_PER_PAGE));
+  state.page = Math.max(0, Math.min(state.page, totalPages - 1));
+  const shown = events.slice(state.page * WHITELIST_PER_PAGE, (state.page + 1) * WHITELIST_PER_PAGE);
+  state.shown = new Map(shown.map(e => [e.id, e.name]));
+  return buildPredictWhitelist(events, getPredictWhitelist(interaction.guildId), {
+    page: state.page,
+    query: state.query,
+    view: state.view,
+    error: apiDown && state.view === 'listed' ? 'Couldn\'t load active events from Upshot — showing the saved whitelist only.' : null,
+  });
+}
+
+function whitelistState(interaction) {
+  let state = whitelistPickerCache.get(interaction.user.id);
+  if (!state) {
+    state = { view: 'all', query: null, page: 0 };
+    whitelistPickerCache.set(interaction.user.id, state);
+  }
+  scheduleCacheEvict(whitelistPickerCache, 'whitelist', interaction.user.id);
+  return state;
+}
+
+async function handlePredictWhitelist(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admins only.', flags: ['Ephemeral'] });
+  }
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+  const state = { view: 'all', query: null, page: 0 };
+  whitelistPickerCache.set(interaction.user.id, state);
+  scheduleCacheEvict(whitelistPickerCache, 'whitelist', interaction.user.id);
+  return interaction.editReply(await renderWhitelistPicker(interaction, state));
+}
+
+async function handlePredictWhitelistButton(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admins only.', flags: ['Ephemeral'] });
+  }
+  const [action, arg] = interaction.customId.split(':');
+  const state = whitelistState(interaction);
+
+  if (action === 'pwl_search') {
+    const modal = new ModalBuilder()
+      .setCustomId('pwl_search_modal')
+      .setTitle('Search Events');
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('query')
+          .setLabel('Event name')
+          .setPlaceholder('e.g. Comics, Crypto, World Cup')
+          .setStyle(TextInputStyle.Short)
+          .setMaxLength(100)
+          .setRequired(true),
+      ),
+    );
+    return interaction.showModal(modal);
+  }
+
+  // The full events scan can be slow on a cold cache — ack first.
+  await interaction.deferUpdate();
+  let fresh = false;
+  if (action === 'pwl_page') state.page = Math.max(0, parseInt(arg, 10) || 0);
+  else if (action === 'pwl_view') { state.view = arg === 'listed' ? 'listed' : 'all'; state.page = 0; }
+  else if (action === 'pwl_search_clear') { state.query = null; state.page = 0; }
+  else if (action === 'pwl_refresh') fresh = true;
+  return interaction.editReply(await renderWhitelistPicker(interaction, state, { fresh }));
+}
+
+async function handlePredictWhitelistSearchSubmit(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admins only.', flags: ['Ephemeral'] });
+  }
+  const state = whitelistState(interaction);
+  state.query = interaction.fields.getTextInputValue('query')?.trim() || null;
+  state.page = 0;
+  await interaction.deferUpdate();
+  return interaction.editReply(await renderWhitelistPicker(interaction, state));
+}
+
+// A page's multi-select was submitted: everything ticked on that page is
+// whitelisted, everything on that page left unticked is removed. Events on
+// other pages are untouched.
+async function handlePredictWhitelistSelect(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Admins only.', flags: ['Ephemeral'] });
+  }
+  await interaction.deferUpdate();
+  const state = whitelistState(interaction);
+  const page = Math.max(0, parseInt(interaction.customId.split(':')[1], 10) || 0);
+
+  // The page the admin is looking at, as last rendered. If the picker state
+  // expired (bot restart / 10 min idle), re-derive it from the current list.
+  let shown = state.page === page ? state.shown : null;
+  if (!shown) {
+    state.page = page;
+    const { events } = await whitelistView(interaction.guildId, state);
+    shown = new Map(events.slice(page * WHITELIST_PER_PAGE, (page + 1) * WHITELIST_PER_PAGE).map(e => [e.id, e.name]));
+  }
+
+  const ticked = new Set(interaction.values || []);
+  const whitelist = getPredictWhitelist(interaction.guildId);
+  for (const [id, name] of shown) {
+    if (ticked.has(id)) whitelist[id] = whitelist[id] || name || id;
+    else delete whitelist[id];
+  }
+  setPredictWhitelist(interaction.guildId, whitelist);
+  // renderWhitelistPicker clamps the page — on the whitelist-only view a
+  // removal can shrink the list out from under the current page.
+  return interaction.editReply(await renderWhitelistPicker(interaction, state));
+}
+
 // Static cheat-sheet of every admin command + what it does. Grouped so admins
 // can skim it without digging through Discord's autocomplete. Kept here (not
 // auto-generated) so the descriptions can be friendlier than the raw command
@@ -8216,6 +8382,7 @@ async function handleAdminHelp(interaction) {
     ['🎯 Predictions', [
       '`/resolve id outcome` — set a prediction Hit/Fail',
       '`/refresh [id] [all]` — re-sync prediction embeds/buttons',
+      '`/prediction-whitelist` — pick events that skip the "current month only" rule (e.g. team cards that lock early but resolve next month)',
     ]],
     ['🎁 Packs & events', [
       '`/sendpack users pack quantity` — send Upshot pack(s) to member(s)',
@@ -8456,6 +8623,7 @@ client.on(Events.InteractionCreate, async interaction => {
         }
         case 'admin': return await handleAdminPanel(interaction);
         case 'admin-help': return await handleAdminHelp(interaction);
+        case 'prediction-whitelist': return await handlePredictWhitelist(interaction);
         case 'refresh': return await handleRefreshCommand(interaction);
         case 'resolve': return await handleResolveCommand(interaction);
         case 'setup': return await handleSetup(interaction);
@@ -8506,6 +8674,9 @@ client.on(Events.InteractionCreate, async interaction => {
       if (interaction.customId === 'mycards_search_modal') {
         return await handleMyCardSearchSubmit(interaction);
       }
+      if (interaction.customId === 'pwl_search_modal') {
+        return await handlePredictWhitelistSearchSubmit(interaction);
+      }
       if (interaction.customId === 'predict_url_modal') {
         return await handlePredictUrlModalSubmit(interaction);
       }
@@ -8542,6 +8713,9 @@ client.on(Events.InteractionCreate, async interaction => {
       }
       if (interaction.customId === 'admin_configure') {
         return await handleAdminConfigure(interaction);
+      }
+      if (interaction.customId.startsWith('pwl_select:')) {
+        return await handlePredictWhitelistSelect(interaction);
       }
       if (interaction.customId === 'cancel_pred_select') {
         return await handleCancelSelect(interaction);
