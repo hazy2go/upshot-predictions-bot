@@ -108,9 +108,17 @@ export const CARDS_PER_PAGE = 25;
 
 /**
  * StringSelect listing the cards a member can predict on right now, paginated.
- * cards: [{ id, name, inContest }] — already filtered (no taken cards).
+ * cards: [{ id, name, inContest, eventDate }] — already filtered (no taken cards)
+ * and sorted by deadline.
  * Pick a card to open its detail view; predictions are made from there.
  */
+// "📅 Ends Oct 12, 2026" from a card's event date (UTC, like the deadline gate).
+function cardDeadlineLabel(eventDate) {
+  const d = new Date(eventDate || '');
+  if (Number.isNaN(d.getTime())) return null;
+  return `📅 Ends ${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })}`;
+}
+
 export function buildCardPicker(cards, { page = 0, query = null } = {}) {
   const totalPages = Math.max(1, Math.ceil(cards.length / CARDS_PER_PAGE));
   const idx = Math.max(0, Math.min(page, totalPages - 1));
@@ -141,7 +149,8 @@ export function buildCardPicker(cards, { page = 0, query = null } = {}) {
   const options = pageCards.map(c => ({
     label: c.name.length > 100 ? c.name.slice(0, 97) + '...' : c.name,
     value: c.id,
-    description: c.inContest ? '🏅 From a contest you entered' : 'In your wallet',
+    description: [cardDeadlineLabel(c.eventDate), c.inContest ? '🏅 From a contest you entered' : 'In your wallet']
+      .filter(Boolean).join(' · '),
   }));
 
   children.push({
