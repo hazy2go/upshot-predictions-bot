@@ -4296,6 +4296,10 @@ async function handleCardPicker(interaction) {
     return interaction.editReply(buildCardPickerEmpty());
   }
 
+  // Soonest deadline first; cards with no known date go last.
+  const dateMs = c => { const t = Date.parse(c.eventDate || ''); return Number.isNaN(t) ? Infinity : t; };
+  available.sort((a, b) => dateMs(a) - dateMs(b) || (a.name || '').localeCompare(b.name || ''));
+
   cardPickerCache.set(interaction.user.id, { cards: available, page: 0, query: null });
   scheduleCacheEvict(cardPickerCache, 'picker', interaction.user.id);
 
