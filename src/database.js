@@ -727,6 +727,14 @@ export function getUserUnresolvedPredictions(authorId) {
   return rows.map(r => ({ ...r, images: JSON.parse(r.images) }));
 }
 
+// Unresolved predictions that have a card in the public feed — the set the
+// feed keeps sorted by deadline (see reorderPredictionFeed).
+export function getActiveFeedPredictions() {
+  return db.prepare(
+    "SELECT id, deadline, embed_message_id FROM predictions WHERE outcome IS NULL AND embed_message_id IS NOT NULL"
+  ).all();
+}
+
 export function getUnresolvedRatedPredictions() {
   const rows = db.prepare(
     "SELECT * FROM predictions WHERE status = 'rated' AND outcome IS NULL AND card_id IS NOT NULL ORDER BY created_at ASC"

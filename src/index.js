@@ -24,7 +24,7 @@ import {
   resetUser, resetAllUsers, deleteLastPrediction,
   deleteUserProfile, deleteAllProfiles,
   countUserUnresolved, getUserOpenPredictions, getUserUnresolvedPredictions, hasUnresolvedPredictionForCard,
-  getUnresolvedRatedPredictions, getResolvedCount, getUnresolvedCount,
+  getUnresolvedRatedPredictions, getActiveFeedPredictions, getResolvedCount, getUnresolvedCount,
   getProfileByWallet, getProfileByUrl, getAllUsers, getDbPath,
   getAllUserExportRows, getMonthPredictions,
   upsertCommunityVote, getCommunityVoteSummary,
@@ -718,24 +718,23 @@ async function syncPredictionEmbeds(predictionId, guildId) {
 
   const profile = getUpshotProfile(prediction.author_id);
 
-  // Update public embed
-  if (prediction.embed_message_id) {
+  // Update public embed (queued behind any feed reorder, re-reading the row so
+  // we edit the slot the prediction owns now, not one it was moved out of)
+  await inFeedQueue(guildId, async () => {
+    const current = getPrediction(predictionId);
+    if (!current?.embed_message_id) return;
     const channelId = getPredictionsChannelId(guildId);
-    if (channelId) {
-      const channel = await safeGetChannel(channelId);
-      if (channel) {
-        const msg = await safeGetMessage(channel, prediction.embed_message_id);
-        if (msg) {
-          try {
-            const payload = buildPredictionCard(prediction, profile?.upshot_url);
-            await msg.edit(payload);
-          } catch (err) {
-            console.error(`Failed to edit public embed #${predictionId}:`, err.message);
-          }
-        }
-      }
+    if (!channelId) return;
+    const channel = await safeGetChannel(channelId);
+    if (!channel) return;
+    const msg = await safeGetMessage(channel, current.embed_message_id);
+    if (!msg) return;
+    try {
+      await msg.edit(buildPredictionCard(current, profile?.upshot_url));
+    } catch (err) {
+      console.error(`Failed to edit public embed #${predictionId}:`, err.message);
     }
-  }
+  });
 
   // Update admin embed
   if (prediction.admin_message_id) {
@@ -758,6 +757,64 @@ async function syncPredictionEmbeds(predictionId, guildId) {
     }
   } else {
     console.warn(`syncPredictionEmbeds: no admin_message_id on #${predictionId} — admin embed was never posted`);
+  }
+}
+
+// Keep the active (unresolved) cards in the predictions channel in ascending
+// deadline order, soonest at the top. Discord can't reorder messages, so the
+// active cards' messages are treated as slots: the earliest slot shows the
+// earliest deadline, and any slot showing the wrong prediction is edited in
+// place (no reposts, so no unread pings). Undated ('TBD') predictions sort
+// last. Runs are serialized per guild so concurrent triggers can't interleave.
+// Public-card edits (syncPredictionEmbeds) share the queue, since a slot can
+// change owner mid-reorder.
+const feedChains = new Map();
+
+function inFeedQueue(guildId, fn) {
+  const next = (feedChains.get(guildId) || Promise.resolve()).then(fn);
+  feedChains.set(guildId, next.catch(() => {}));
+  return next;
+}
+
+function reorderPredictionFeed(guildId) {
+  return inFeedQueue(guildId, () => doReorderPredictionFeed(guildId))
+    .catch(e => console.error('Feed reorder failed:', e.message));
+}
+
+function feedDeadlineKey(deadline) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(deadline || '') ? deadline : '9999-99-99';
+}
+
+async function doReorderPredictionFeed(guildId) {
+  const channelId = getPredictionsChannelId(guildId);
+  if (!channelId) return;
+  const channel = await safeGetChannel(channelId);
+  if (!channel) return;
+
+  const active = getActiveFeedPredictions();
+  const sorted = [...active].sort((a, b) =>
+    feedDeadlineKey(a.deadline).localeCompare(feedDeadlineKey(b.deadline)) || a.id - b.id);
+  const slots = active.map(p => p.embed_message_id)
+    .sort((a, b) => (BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0));
+
+  const moves = sorted.map((p, i) => ({ id: p.id, slot: slots[i] })).filter((m, i) => sorted[i].embed_message_id !== m.slot);
+  if (!moves.length) return;
+
+  console.log(`Feed reorder: moving ${moves.length} of ${sorted.length} active prediction(s)`);
+  for (const { id, slot } of moves) {
+    const prediction = getPrediction(id);
+    if (!prediction) continue;
+    const msg = await safeGetMessage(channel, slot);
+    try {
+      if (!msg) throw new Error(`slot message ${slot} missing`);
+      await msg.edit(buildPredictionCard(prediction, getUpshotProfile(prediction.author_id)?.upshot_url));
+      updatePrediction(id, { embed_message_id: slot });
+    } catch (err) {
+      // Can't fill this slot — repost so the prediction never points at a
+      // message that's now showing a different card. The next run re-sorts it.
+      console.error(`Feed reorder: slot for #${id} failed (${err.message}), reposting`);
+      await postPredictionToFeed(prediction, guildId);
+    }
   }
 }
 
@@ -5774,6 +5831,7 @@ async function finalizeSubmission(draft, aiRating) {
   }
 
   await postPredictionToFeed(prediction, draft.guildId).catch(e => console.error('Feed post failed:', e.message));
+  reorderPredictionFeed(draft.guildId);
   await postToAdminReview(prediction, draft.guildId).catch(e => console.error('Admin post failed:', e.message));
   await refreshLeaderboard(draft.guildId).catch(() => {});
 
@@ -5858,6 +5916,7 @@ async function handleEditModalSubmit(interaction) {
   updatePrediction(predictionId, updates);
   await syncPredictionEmbeds(predictionId, interaction.guildId);
   await interaction.editReply({ content: '✅ Prediction updated.' });
+  if (updates.deadline && prediction.deadline !== updates.deadline) reorderPredictionFeed(interaction.guildId);
 
   // Notify admin channel about the edit
   if (changes.length > 0) {
@@ -8862,6 +8921,8 @@ client.once(Events.ClientReady, async () => {
     // Same for the standings message — it goes stale while the bot is down, and
     // layout changes should land without waiting for the next rating.
     await refreshLeaderboard(guildId).catch(e => console.error('Leaderboard refresh failed:', e.message));
+    // Sort the already-posted active predictions by deadline.
+    reorderPredictionFeed(guildId);
   }
   console.log(`   Panels + leaderboard re-rendered for ${client.guilds.cache.size} guild(s)`);
 
