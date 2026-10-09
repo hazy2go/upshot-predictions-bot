@@ -735,12 +735,6 @@ export function getActiveFeedPredictions() {
   ).all();
 }
 
-// Commit a feed reorder's slot reassignments in one go — see reorderPredictionFeed.
-export function setFeedMessageIds(moves) {
-  const stmt = db.prepare('UPDATE predictions SET embed_message_id = ? WHERE id = ?');
-  db.transaction(() => { for (const { id, slot } of moves) stmt.run(slot, id); })();
-}
-
 export function getUnresolvedRatedPredictions() {
   const rows = db.prepare(
     "SELECT * FROM predictions WHERE status = 'rated' AND outcome IS NULL AND card_id IS NOT NULL ORDER BY created_at ASC"
