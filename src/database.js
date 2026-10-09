@@ -727,14 +727,15 @@ export function getUserUnresolvedPredictions(authorId) {
   return rows.map(r => ({ ...r, images: JSON.parse(r.images) }));
 }
 
-// Every unresolved prediction, for the public feed sync (see syncPredictionFeed).
+// Unresolved predictions that have a card in the public feed — the set the
+// feed keeps sorted by deadline (see reorderPredictionFeed).
 export function getActiveFeedPredictions() {
   return db.prepare(
-    "SELECT id, deadline, card_id, embed_message_id FROM predictions WHERE outcome IS NULL"
+    "SELECT id, deadline, embed_message_id FROM predictions WHERE outcome IS NULL AND embed_message_id IS NOT NULL"
   ).all();
 }
 
-// Commit a feed reorder's slot reassignments in one go — see syncPredictionFeed.
+// Commit a feed reorder's slot reassignments in one go — see reorderPredictionFeed.
 export function setFeedMessageIds(moves) {
   const stmt = db.prepare('UPDATE predictions SET embed_message_id = ? WHERE id = ?');
   db.transaction(() => { for (const { id, slot } of moves) stmt.run(slot, id); })();

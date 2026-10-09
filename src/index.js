@@ -718,11 +718,23 @@ async function syncPredictionEmbeds(predictionId, guildId) {
 
   const profile = getUpshotProfile(prediction.author_id);
 
-  // Update public embed. While a feed reorder is moving cards between messages
-  // the slot this prediction owns is in flux, so leave it to the reorder.
-  const dirty = feedReorderDirty.get(guildId);
-  if (dirty) dirty.add(predictionId);
-  else await trackPublicEdit(guildId, editPublicCard(predictionId, guildId));
+  // Update public embed (queued behind any feed reorder, re-reading the row so
+  // we edit the slot the prediction owns now, not one it was moved out of)
+  await inFeedQueue(guildId, async () => {
+    const current = getPrediction(predictionId);
+    if (!current?.embed_message_id) return;
+    const channelId = getPredictionsChannelId(guildId);
+    if (!channelId) return;
+    const channel = await safeGetChannel(channelId);
+    if (!channel) return;
+    const msg = await safeGetMessage(channel, current.embed_message_id);
+    if (!msg) return;
+    try {
+      await msg.edit(buildPredictionCard(current, profile?.upshot_url));
+    } catch (err) {
+      console.error(`Failed to edit public embed #${predictionId}:`, err.message);
+    }
+  });
 
   // Update admin embed
   if (prediction.admin_message_id) {
@@ -748,49 +760,15 @@ async function syncPredictionEmbeds(predictionId, guildId) {
   }
 }
 
-// The predictions channel shows only the active (unresolved) predictions that
-// are "due": deadline in the current month or already past, TBD, or on a
-// /prediction-whitelist event. Predictions made before the current-month gate
-// existed (e.g. December ones) stay off the channel until their month starts,
-// then get posted — the hourly sync handles that rollover.
-//
-// Visible cards are kept in ascending deadline order, soonest at the top.
-// Discord can't reorder messages, so the visible cards' messages are treated
-// as slots: the earliest slot shows the earliest deadline, and any slot showing
-// the wrong prediction is edited in place (no reposts, so no unread pings).
-// Runs are serialized per guild so concurrent triggers can't interleave.
-// Public-card edits (syncPredictionEmbeds) made while slots are being moved are
-// deferred to the end of the reorder, since a slot can change owner mid-run.
+// Keep the active (unresolved) cards in the predictions channel in ascending
+// deadline order, soonest at the top. Discord can't reorder messages, so the
+// active cards' messages are treated as slots: the earliest slot shows the
+// earliest deadline, and any slot showing the wrong prediction is edited in
+// place (no reposts, so no unread pings). Undated ('TBD') predictions sort
+// last. Runs are serialized per guild so concurrent triggers can't interleave.
+// Public-card edits (syncPredictionEmbeds) share the queue, since a slot can
+// change owner mid-reorder.
 const feedChains = new Map();
-// guildId -> Set of prediction ids whose card changed mid-reorder (re-rendered
-// once the reorder commits), present only while a reorder is moving slots.
-const feedReorderDirty = new Map();
-// guildId -> Set of in-flight public card edits, which a reorder waits out.
-const publicEditsInFlight = new Map();
-
-function trackPublicEdit(guildId, promise) {
-  if (!publicEditsInFlight.has(guildId)) publicEditsInFlight.set(guildId, new Set());
-  const set = publicEditsInFlight.get(guildId);
-  set.add(promise);
-  return promise.finally(() => set.delete(promise));
-}
-
-// Re-render a prediction's public card from the current row.
-async function editPublicCard(predictionId, guildId) {
-  const prediction = getPrediction(predictionId);
-  if (!prediction?.embed_message_id) return;
-  const channelId = getPredictionsChannelId(guildId);
-  if (!channelId) return;
-  const channel = await safeGetChannel(channelId);
-  if (!channel) return;
-  const msg = await safeGetMessage(channel, prediction.embed_message_id);
-  if (!msg) return;
-  try {
-    await msg.edit(buildPredictionCard(prediction, getUpshotProfile(prediction.author_id)?.upshot_url));
-  } catch (err) {
-    console.error(`Failed to edit public embed #${predictionId}:`, err.message);
-  }
-}
 
 function inFeedQueue(guildId, fn) {
   const next = (feedChains.get(guildId) || Promise.resolve()).then(fn);
@@ -798,65 +776,22 @@ function inFeedQueue(guildId, fn) {
   return next;
 }
 
-function syncPredictionFeed(guildId) {
-  return inFeedQueue(guildId, () => doSyncPredictionFeed(guildId))
-    .catch(e => console.error('Feed sync failed:', e.message));
+function reorderPredictionFeed(guildId) {
+  return inFeedQueue(guildId, () => doReorderPredictionFeed(guildId))
+    .catch(e => console.error('Feed reorder failed:', e.message));
 }
 
 function feedDeadlineKey(deadline) {
   return /^\d{4}-\d{2}-\d{2}$/.test(deadline || '') ? deadline : '9999-99-99';
 }
 
-// card id -> event id. A card never changes event, so this only grows.
-const cardEventIds = new Map();
-
-// true = show, false = hide, null = couldn't tell (leave it as it is).
-async function feedVisible(prediction, whitelist) {
-  const due = feedDeadlineKey(prediction.deadline);
-  if (due === '9999-99-99' || due.slice(0, 7) <= new Date().toISOString().slice(0, 7)) return true;
-  if (!prediction.card_id || !Object.keys(whitelist).length) return false;
-  if (!cardEventIds.has(prediction.card_id)) {
-    const details = await getCardDetails(prediction.card_id).catch(() => null);
-    const eventId = details?.event?.id;
-    if (!eventId) return null;
-    cardEventIds.set(prediction.card_id, eventId);
-  }
-  return !!whitelist[cardEventIds.get(prediction.card_id)];
-}
-
-// Post a just-submitted prediction's card if it's due (fast — no reorder).
-async function postToFeedIfDue(prediction, guildId) {
-  if (await feedVisible(prediction, getPredictWhitelist(guildId))) await postPredictionToFeed(prediction, guildId);
-}
-
-async function doSyncPredictionFeed(guildId) {
+async function doReorderPredictionFeed(guildId) {
   const channelId = getPredictionsChannelId(guildId);
   if (!channelId) return;
   const channel = await safeGetChannel(channelId);
   if (!channel) return;
 
-  // 1. Take down cards that aren't due yet; post due ones that have no card.
-  const whitelist = getPredictWhitelist(guildId);
-  for (const row of getActiveFeedPredictions()) {
-    const visible = await feedVisible(row, whitelist);
-    if (visible === false && row.embed_message_id) {
-      const msg = await safeGetMessage(channel, row.embed_message_id);
-      if (msg) {
-        try { await msg.delete(); } catch (err) {
-          console.error(`Feed sync: couldn't hide #${row.id}:`, err.message);
-          continue;
-        }
-      }
-      updatePrediction(row.id, { embed_message_id: null });
-      console.log(`Feed sync: hid #${row.id} (due ${row.deadline})`);
-    } else if (visible === true && !row.embed_message_id) {
-      const prediction = getPrediction(row.id);
-      if (prediction && await postPredictionToFeed(prediction, guildId)) console.log(`Feed sync: posted #${row.id} (due ${row.deadline})`);
-    }
-  }
-
-  // 2. Sort what's on the channel.
-  const active = getActiveFeedPredictions().filter(p => p.embed_message_id);
+  const active = getActiveFeedPredictions();
   const sorted = [...active].sort((a, b) =>
     feedDeadlineKey(a.deadline).localeCompare(feedDeadlineKey(b.deadline)) || a.id - b.id);
   const slots = active.map(p => p.embed_message_id)
@@ -869,18 +804,6 @@ async function doSyncPredictionFeed(guildId) {
   // mid-run the rows still hold the old mapping, so the next run computes the
   // same plan and repeats the edits instead of leaving two rows on one message.
   console.log(`Feed reorder: moving ${moves.length} of ${sorted.length} active prediction(s)`);
-  const dirty = new Set();
-  feedReorderDirty.set(guildId, dirty);
-  try {
-    await Promise.allSettled([...(publicEditsInFlight.get(guildId) || [])]);
-    await moveFeedSlots(guildId, channel, moves);
-  } finally {
-    feedReorderDirty.delete(guildId);
-  }
-  for (const id of dirty) await trackPublicEdit(guildId, editPublicCard(id, guildId));
-}
-
-async function moveFeedSlots(guildId, channel, moves) {
   const done = [];
   const failed = [];
   for (const move of moves) {
@@ -900,11 +823,6 @@ async function moveFeedSlots(guildId, channel, moves) {
   // Couldn't fill these slots — repost so the prediction never points at a
   // message showing a different card. The next run re-sorts them.
   for (const prediction of failed) await postPredictionToFeed(prediction, guildId);
-}
-
-const FEED_SYNC_INTERVAL = 60 * 60 * 1000; // hourly — catches month rollover
-function syncAllPredictionFeeds() {
-  for (const guildId of client.guilds.cache.keys()) syncPredictionFeed(guildId);
 }
 
 /**
@@ -5919,10 +5837,8 @@ async function finalizeSubmission(draft, aiRating) {
     return null;
   }
 
-  // Only due (this month / whitelisted) predictions go on the channel; the
-  // sort runs in the background so the member's confirmation isn't held up.
-  await postToFeedIfDue(prediction, draft.guildId).catch(e => console.error('Feed post failed:', e.message));
-  syncPredictionFeed(draft.guildId);
+  await postPredictionToFeed(prediction, draft.guildId).catch(e => console.error('Feed post failed:', e.message));
+  reorderPredictionFeed(draft.guildId);
   await postToAdminReview(prediction, draft.guildId).catch(e => console.error('Admin post failed:', e.message));
   await refreshLeaderboard(draft.guildId).catch(() => {});
 
@@ -6007,7 +5923,7 @@ async function handleEditModalSubmit(interaction) {
   updatePrediction(predictionId, updates);
   await syncPredictionEmbeds(predictionId, interaction.guildId);
   await interaction.editReply({ content: '✅ Prediction updated.' });
-  if (updates.deadline && prediction.deadline !== updates.deadline) syncPredictionFeed(interaction.guildId);
+  if (updates.deadline && prediction.deadline !== updates.deadline) reorderPredictionFeed(interaction.guildId);
 
   // Notify admin channel about the edit
   if (changes.length > 0) {
@@ -6558,19 +6474,17 @@ async function handleDeleteButton(interaction, predictionId) {
 }
 
 // Delete a prediction's public + admin embeds (best-effort).
-// The public card goes through the feed queue so a running reorder can't have
-// moved another prediction into the message we're about to delete.
 async function deletePredictionMessages(guildId, prediction) {
-  await inFeedQueue(guildId, async () => {
-    const current = getPrediction(prediction.id) || prediction;
-    if (!current.embed_message_id) return;
+  if (prediction.embed_message_id) {
     const channelId = getPredictionsChannelId(guildId);
-    if (!channelId) return;
-    const channel = await safeGetChannel(channelId);
-    if (!channel) return;
-    const msg = await safeGetMessage(channel, current.embed_message_id);
-    if (msg) { try { await msg.delete(); } catch { /* ok */ } }
-  }).catch(() => {});
+    if (channelId) {
+      const channel = await safeGetChannel(channelId);
+      if (channel) {
+        const msg = await safeGetMessage(channel, prediction.embed_message_id);
+        if (msg) { try { await msg.delete(); } catch { /* ok */ } }
+      }
+    }
+  }
 
   if (prediction.admin_message_id) {
     const channelId = getAdminChannelId(guildId);
@@ -6594,15 +6508,14 @@ async function handleConfirmDelete(interaction, predictionId) {
     return interaction.reply({ content: '❌ Already deleted.', flags: ['Ephemeral'] });
   }
 
-  // Deleting the card can wait behind a feed reorder — defer past the 3s window.
-  await interaction.deferReply({ flags: ['Ephemeral'] });
   await deletePredictionMessages(interaction.guildId, prediction);
 
   deletePrediction(predictionId);
   await refreshLeaderboard(interaction.guildId).catch(() => {});
 
-  await interaction.editReply({
+  await interaction.reply({
     content: `🗑 Prediction **#${String(predictionId).padStart(4, '0')}** deleted.`,
+    flags: ['Ephemeral'],
   });
 }
 
@@ -8543,7 +8456,6 @@ async function handlePredictWhitelistSelect(interaction) {
     else delete whitelist[id];
   }
   setPredictWhitelist(interaction.guildId, whitelist);
-  syncPredictionFeed(interaction.guildId); // whitelisted events' cards appear/disappear
   // renderWhitelistPicker clamps the page — on the whitelist-only view a
   // removal can shrink the list out from under the current page.
   return interaction.editReply(await renderWhitelistPicker(interaction, state));
@@ -9016,8 +8928,8 @@ client.once(Events.ClientReady, async () => {
     // Same for the standings message — it goes stale while the bot is down, and
     // layout changes should land without waiting for the next rating.
     await refreshLeaderboard(guildId).catch(e => console.error('Leaderboard refresh failed:', e.message));
-    // Show only due predictions, sorted by deadline.
-    syncPredictionFeed(guildId);
+    // Sort the already-posted active predictions by deadline.
+    reorderPredictionFeed(guildId);
   }
   console.log(`   Panels + leaderboard re-rendered for ${client.guilds.cache.size} guild(s)`);
 
@@ -9083,7 +8995,6 @@ client.once(Events.ClientReady, async () => {
   // Drop finished events from the prediction whitelist (first run after 2 min).
   setTimeout(safePruneAllWhitelists, 120_000);
   setInterval(safePruneAllWhitelists, WHITELIST_PRUNE_INTERVAL);
-  setInterval(syncAllPredictionFeeds, FEED_SYNC_INTERVAL);
   console.log(`   Prediction whitelist prune: first check in 2 min, then hourly`);
 
   // Keep the Upshot token fresh hands-off: the access token lives ~15h and the
