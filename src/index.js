@@ -24,7 +24,7 @@ import {
   resetUser, resetAllUsers, deleteLastPrediction,
   deleteUserProfile, deleteAllProfiles,
   countUserUnresolved, getUserOpenPredictions, getUserUnresolvedPredictions, hasUnresolvedPredictionForCard,
-  getUnresolvedRatedPredictions, getActiveFeedPredictions, getResolvedCount, getUnresolvedCount,
+  getUnresolvedRatedPredictions, getActiveFeedPredictions, setFeedMessageIds, getResolvedCount, getUnresolvedCount,
   getProfileByWallet, getProfileByUrl, getAllUsers, getDbPath,
   getAllUserExportRows, getMonthPredictions,
   upsertCommunityVote, getCommunityVoteSummary,
@@ -800,22 +800,29 @@ async function doReorderPredictionFeed(guildId) {
   const moves = sorted.map((p, i) => ({ id: p.id, slot: slots[i] })).filter((m, i) => sorted[i].embed_message_id !== m.slot);
   if (!moves.length) return;
 
+  // The new message ids are committed together at the end: if the bot dies
+  // mid-run the rows still hold the old mapping, so the next run computes the
+  // same plan and repeats the edits instead of leaving two rows on one message.
   console.log(`Feed reorder: moving ${moves.length} of ${sorted.length} active prediction(s)`);
-  for (const { id, slot } of moves) {
-    const prediction = getPrediction(id);
+  const done = [];
+  const failed = [];
+  for (const move of moves) {
+    const prediction = getPrediction(move.id);
     if (!prediction) continue;
-    const msg = await safeGetMessage(channel, slot);
+    const msg = await safeGetMessage(channel, move.slot);
     try {
-      if (!msg) throw new Error(`slot message ${slot} missing`);
+      if (!msg) throw new Error(`slot message ${move.slot} missing`);
       await msg.edit(buildPredictionCard(prediction, getUpshotProfile(prediction.author_id)?.upshot_url));
-      updatePrediction(id, { embed_message_id: slot });
+      done.push(move);
     } catch (err) {
-      // Can't fill this slot — repost so the prediction never points at a
-      // message that's now showing a different card. The next run re-sorts it.
-      console.error(`Feed reorder: slot for #${id} failed (${err.message}), reposting`);
-      await postPredictionToFeed(prediction, guildId);
+      console.error(`Feed reorder: slot for #${move.id} failed (${err.message}), reposting`);
+      failed.push(prediction);
     }
   }
+  setFeedMessageIds(done);
+  // Couldn't fill these slots — repost so the prediction never points at a
+  // message showing a different card. The next run re-sorts them.
+  for (const prediction of failed) await postPredictionToFeed(prediction, guildId);
 }
 
 /**
