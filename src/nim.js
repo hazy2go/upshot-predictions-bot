@@ -10,12 +10,14 @@
 
 const BASE = 'https://integrate.api.nvidia.com/v1';
 
-// `thinking` models take chat_template_kwargs/reasoning_budget and stream their
-// thoughts as reasoning_content; the others are plain chat models and get the
-// bare request. An unknown id from NIM_MODELS is assumed to be plain.
-const THINKING_MODELS = new Set([
-  'nvidia/nemotron-3-ultra-550b-a55b',
-  'nvidia/nemotron-3-super-120b-a12b',
+// Thinking models take chat_template_kwargs and stream their thoughts as
+// reasoning_content; the others are plain chat models and get the bare request.
+// An unknown id from NIM_MODELS is assumed to be plain. Ultra 400s on
+// `reasoning_budget`, so it thinks unbudgeted and is capped by max_tokens
+// alone — it spends ~500 thinking tokens on a rating, so 4096 is ample.
+const THINKING_MODELS = new Map([
+  ['nvidia/nemotron-3-ultra-550b-a55b', { budget: false, maxTokens: 4096 }],
+  ['nvidia/nemotron-3-super-120b-a12b', { budget: true }],
 ]);
 const DEFAULT_MODELS = [
   'nvidia/nemotron-3-ultra-550b-a55b',
@@ -219,7 +221,7 @@ async function rateOnce(ctx, opts = {}) {
 
 async function rateWithModel(apiKey, model, ctx, opts) {
   const { attempts = 3, timeoutMs = REQUEST_TIMEOUT_MS, reasoningBudget = REASONING_BUDGET } = opts;
-  const thinking = THINKING_MODELS.has(model);
+  const thinking = THINKING_MODELS.get(model);
 
   const body = {
     model,
@@ -232,14 +234,14 @@ async function rateWithModel(apiKey, model, ctx, opts) {
     // default of 1 is tuned for open-ended generation, not scoring.)
     temperature: 0.3,
     top_p: 0.95,
-    max_tokens: (thinking ? reasoningBudget : 0) + ANSWER_TOKENS,
+    max_tokens: thinking?.maxTokens ?? (thinking?.budget ? reasoningBudget : 0) + ANSWER_TOKENS,
     stream: true,
   };
   if (thinking) {
     // The OpenAI Python SDK's `extra_body` is flattened into the request body;
     // posting raw JSON, these go at the top level instead.
     body.chat_template_kwargs = { enable_thinking: true };
-    body.reasoning_budget = reasoningBudget;
+    if (thinking.budget) body.reasoning_budget = reasoningBudget;
   }
 
   // NIM free tier latency is variable; retries with exponential backoff clear
