@@ -8600,11 +8600,14 @@ const SLOW_INTERACTION_TOTAL_MS = 2200;   // close to the 3s cliff
 // our acknowledgement". Everything a handler does AFTER acknowledging — an RSVP
 // lookup, an API call, the actual reply — is off that clock entirely, which is
 // what deferReply buys. So measure to the ack, not to the end of the handler.
-function stampAck(interaction, onAck) {
+// onSend fires as the ack request leaves, so a 10062 can be split further into
+// "our code was slow to call it" vs "the request itself sat queued/in flight".
+function stampAck(interaction, onAck, onSend = () => {}) {
   for (const method of ['reply', 'deferReply', 'update', 'deferUpdate', 'showModal', 'respond']) {
     const original = interaction[method];
     if (typeof original !== 'function') continue;
     interaction[method] = async (...args) => {
+      onSend();
       const result = await original.apply(interaction, args);
       onAck(); // after the await: Discord has the ack, which is what its clock sees
       return result;
@@ -8617,7 +8620,8 @@ client.on(Events.InteractionCreate, async interaction => {
   const arrivalMs = interaction.createdTimestamp ? startedAt - interaction.createdTimestamp : null;
   const label = () => interaction.commandName || interaction.customId || 'unknown';
   let ackAt = null;
-  stampAck(interaction, () => { ackAt ??= Date.now(); });
+  let ackSentAt = null;
+  stampAck(interaction, () => { ackAt ??= Date.now(); }, () => { ackSentAt ??= Date.now(); });
   if (arrivalMs != null && arrivalMs > SLOW_INTERACTION_ARRIVAL_MS) {
     console.warn(`Interaction arrived ${arrivalMs}ms after Discord created it on \`${label()}\` — lag before our code ran (gateway/reconnect), not handler time.`);
   }
@@ -8800,7 +8804,8 @@ client.on(Events.InteractionCreate, async interaction => {
       // arrival = how late it reached us; handler = how long we then took. If
       // arrival is already near 3000 there was nothing to fix on our side.
       const split = arrivalMs != null
-        ? ` (arrival ${arrivalMs}ms + ${ackAt ? `${ackAt - startedAt}ms to ack` : `${Date.now() - startedAt}ms, never acked`})`
+        ? ` (arrival ${arrivalMs}ms + ${ackAt ? `${ackAt - startedAt}ms to ack` : `${Date.now() - startedAt}ms, never acked`}`
+          + `${ackSentAt ? `; ack sent at +${ackSentAt - startedAt}ms, request took ${Date.now() - ackSentAt}ms` : ''})`
         : '';
       console.warn(`Interaction expired before response (${error.code}) on \`${cmd}\` after ${ageMs}ms${split}${messageScanInProgress?.size ? ' [scan running]' : ''} — skipping.`);
       return;
@@ -8831,6 +8836,12 @@ client.on(Events.InteractionCreate, async interaction => {
       }
     }
   }
+});
+
+// A REST call parked behind a rate limit is invisible otherwise — it just looks
+// like a slow handler, and an interaction ack stuck there expires as a 10062.
+client.rest.on('rateLimited', info => {
+  console.warn(`Discord rate limit: ${info.method} ${info.route} — waiting ${info.timeToReset}ms (${info.global ? 'global' : `bucket limit ${info.limit}`}, scope ${info.scope ?? '?'})`);
 });
 
 // ── Startup ──────────────────────────────────────────────────
