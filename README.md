@@ -45,7 +45,7 @@ Two `/setup` subcommands let admins clear the review queue in bulk instead of cl
 
 - **`/setup auto-verify-all`** — Loops every unverified prediction and hits the Upshot API to check ownership. Passing predictions are marked verified (same effect as clicking the button manually — embeds and state update identically). Failing predictions are listed back so you can handle them by hand.
 
-- **`/setup auto-rate-all`** — Uses [NVIDIA NIM](https://build.nvidia.com) (`nvidia/nemotron-3-super-120b-a12b`, a reasoning model) to suggest 0-3 star ratings for every verified-but-unrated prediction. The bot feeds each prediction's title, description, category, **plus the real Upshot card/event context** (card name, event description, the specific outcome the user is betting on) to the model and returns a star rating with a one-sentence reason.
+- **`/setup auto-rate-all`** — Uses [NVIDIA NIM](https://build.nvidia.com) (`nvidia/nemotron-3-ultra-550b-a55b`, falling back to `google/gemma-4-31b-it` then `nvidia/nemotron-3-super-120b-a12b`; override with `NIM_MODELS`) to suggest 0-3 star ratings for every verified-but-unrated prediction. The bot feeds each prediction's title, description, category, **plus the real Upshot card/event context** (card name, event description, the specific outcome the user is betting on) to the model and returns a star rating with a one-sentence reason.
 
   You get an ephemeral summary listing every suggestion, then two buttons: **Accept All** or **Cancel**. Accept All applies the ratings one by one, re-checking each prediction at apply time so it safely skips anything that got manually rated, deleted, or un-verified in the meantime.
 
@@ -200,7 +200,7 @@ API failures are handled gracefully — if the API is down, predictions still su
 
 ## NVIDIA NIM Integration
 
-The `/setup auto-rate-all` and `/setup recheck-all-ratings` commands use [NVIDIA NIM](https://build.nvidia.com) (`nvidia/nemotron-3-super-120b-a12b`, a reasoning model) to suggest admin star ratings. Requires a free API key from build.nvidia.com. The request is streamed and only the final JSON (`{stars, reason}`) is applied; the model's reasoning tokens are discarded. If `NVIDIA_NIM_API_KEY` is missing, the command returns a clear error and no other features are affected.
+The `/setup auto-rate-all` and `/setup recheck-all-ratings` commands use [NVIDIA NIM](https://build.nvidia.com) (`nvidia/nemotron-3-ultra-550b-a55b`, falling back to `google/gemma-4-31b-it` then `nvidia/nemotron-3-super-120b-a12b`; override with `NIM_MODELS`) to suggest admin star ratings. Requires a free API key from build.nvidia.com. The request is streamed and only the final JSON (`{stars, reason}`) is applied; the model's reasoning tokens are discarded. If `NVIDIA_NIM_API_KEY` is missing, the command returns a clear error and no other features are affected.
 
 ## Setup
 

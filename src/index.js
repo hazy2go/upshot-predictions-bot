@@ -53,7 +53,7 @@ import {
   getTweetLeaderboard, getTweetStats,
 } from './database.js';
 
-import { rateWithAI, MODEL as NIM_MODEL } from './nim.js';
+import { rateWithAI, MODEL as NIM_MODEL, MODELS as NIM_MODELS } from './nim.js';
 import { fetchPosts, fetchListPosts, groupByAuthor, isOwnPost } from './xfeed.js';
 
 import {
@@ -5693,10 +5693,10 @@ async function handlePredictModalSubmit(interaction) {
     let aiRating = null;
     try {
       const ctx = await gatherRatingContext({ title, description, category: 'General', deadline: deadlineFormatted, card_id: cardId });
-      // Single attempt here so a flaky model can't block the member behind
-      // compounding retries. On failure we fall through to the standard flow,
-      // where the background auto-rater retries patiently after submission.
-      aiRating = await rateWithAI(ctx, { attempts: 1 });
+      // Single attempt on at most two models so a flaky provider can't block
+      // the member behind compounding retries. On failure we fall through to
+      // the standard flow, where the background auto-rater retries patiently.
+      aiRating = await rateWithAI(ctx, { attempts: 1, models: NIM_MODELS.slice(0, 2) });
     } catch (err) {
       console.error(`pre-submit rating failed for user ${interaction.user.id} — falling back to standard flow:`, err.message);
     }
