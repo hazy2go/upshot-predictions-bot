@@ -1,13 +1,30 @@
 // ── NVIDIA NIM AI rater ─────────────────────────────────────
 //
 // OpenAI-compatible endpoint at https://integrate.api.nvidia.com/v1
-// Uses nvidia/nemotron-3-super-120b-a12b, a reasoning model. SSE streaming;
-// reasoning_content deltas are discarded and only `content` deltas are kept.
+// Tries a chain of models in order, falling through to the next when one is
+// down (retries exhausted). SSE streaming; reasoning_content deltas are
+// discarded and only `content` deltas are kept.
 //
-// Requires NVIDIA_NIM_API_KEY in .env.
+// Requires NVIDIA_NIM_API_KEY in .env. Override the chain with NIM_MODELS
+// (comma-separated, first = primary) without a code change.
 
 const BASE = 'https://integrate.api.nvidia.com/v1';
-export const MODEL = 'nvidia/nemotron-3-super-120b-a12b';
+
+// `thinking` models take chat_template_kwargs/reasoning_budget and stream their
+// thoughts as reasoning_content; the others are plain chat models and get the
+// bare request. An unknown id from NIM_MODELS is assumed to be plain.
+const THINKING_MODELS = new Set([
+  'nvidia/nemotron-3-ultra-550b-a55b',
+  'nvidia/nemotron-3-super-120b-a12b',
+]);
+const DEFAULT_MODELS = [
+  'nvidia/nemotron-3-ultra-550b-a55b',
+  'google/gemma-4-31b-it',
+  'nvidia/nemotron-3-super-120b-a12b',
+];
+export const MODELS = (process.env.NIM_MODELS || '').split(',').map(m => m.trim()).filter(Boolean);
+if (!MODELS.length) MODELS.push(...DEFAULT_MODELS);
+export const MODEL = MODELS[0];
 
 // Nemotron thinks before answering, and every reasoning token is streamed — so
 // per-call latency scales almost linearly with this budget. A 0-3 star call with
@@ -146,6 +163,7 @@ function isRetryable(message) {
  *   attempts    — total tries per call (default 3)
  *   timeoutMs   — per-request timeout (default REQUEST_TIMEOUT_MS = 120s)
  *   confirmZero — re-roll a 0 (default on; NIM_CONFIRM_ZERO=0 disables globally)
+ *   models      — model chain to walk (default MODELS)
  *
  * For latency-sensitive callers (e.g. rating during a live submission), pass a
  * smaller budget so the user isn't blocked, and fall back on throw.
@@ -179,14 +197,32 @@ export async function rateWithAI(ctx, opts = {}) {
   }
 }
 
-// One rating, with the retry policy. rateWithAI wraps this to second-guess a 0.
+// One rating: walk the model chain, each with the retry policy, and return the
+// first valid verdict. The result carries the `model` that produced it.
+// rateWithAI wraps this to second-guess a 0.
 async function rateOnce(ctx, opts = {}) {
-  const { attempts = 3, timeoutMs = REQUEST_TIMEOUT_MS, reasoningBudget = REASONING_BUDGET } = opts;
   const apiKey = process.env.NVIDIA_NIM_API_KEY;
   if (!apiKey) throw new Error('NVIDIA_NIM_API_KEY not set in .env');
 
+  const { models = MODELS } = opts;
+  let lastErr;
+  for (const model of models) {
+    try {
+      return { ...(await rateWithModel(apiKey, model, ctx, opts)), model };
+    } catch (err) {
+      lastErr = err;
+      if (model !== models.at(-1)) console.warn(`rateWithAI [${model}] gave up (${err.message}) — falling back to the next model`);
+    }
+  }
+  throw lastErr;
+}
+
+async function rateWithModel(apiKey, model, ctx, opts) {
+  const { attempts = 3, timeoutMs = REQUEST_TIMEOUT_MS, reasoningBudget = REASONING_BUDGET } = opts;
+  const thinking = THINKING_MODELS.has(model);
+
   const body = {
-    model: MODEL,
+    model,
     messages: [
       { role: 'system', content: RUBRIC },
       { role: 'user', content: buildUserPrompt(ctx) },
@@ -196,13 +232,15 @@ async function rateOnce(ctx, opts = {}) {
     // default of 1 is tuned for open-ended generation, not scoring.)
     temperature: 0.3,
     top_p: 0.95,
-    max_tokens: reasoningBudget + ANSWER_TOKENS,
+    max_tokens: (thinking ? reasoningBudget : 0) + ANSWER_TOKENS,
     stream: true,
+  };
+  if (thinking) {
     // The OpenAI Python SDK's `extra_body` is flattened into the request body;
     // posting raw JSON, these go at the top level instead.
-    chat_template_kwargs: { enable_thinking: true },
-    reasoning_budget: reasoningBudget,
-  };
+    body.chat_template_kwargs = { enable_thinking: true };
+    body.reasoning_budget = reasoningBudget;
+  }
 
   // NIM free tier latency is variable; retries with exponential backoff clear
   // most transient errors.
@@ -217,7 +255,7 @@ async function rateOnce(ctx, opts = {}) {
       lastErr = err;
       if (!isRetryable(err.message) || attempt === attempts) throw err;
       const backoff = 1500 * 2 ** (attempt - 1); // 1.5s, 3s, 6s, …
-      console.warn(`rateWithAI [${MODEL}] attempt ${attempt}/${attempts} failed (${err.message}) — retrying in ${backoff}ms`);
+      console.warn(`rateWithAI [${model}] attempt ${attempt}/${attempts} failed (${err.message}) — retrying in ${backoff}ms`);
       await new Promise(r => setTimeout(r, backoff));
     }
   }
