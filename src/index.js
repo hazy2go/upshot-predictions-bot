@@ -437,6 +437,16 @@ function getPredictCurrentMonthOnly(guildId) {
   const v = getConfig(guildId, 'predict_current_month_only');
   return v == null ? true : (v === '1' || v === 'true');
 }
+// Grace window for the current-month gate: a next-month event resolving within
+// this many days is still allowed. Without it, an event ending on the 1st–3rd
+// can never be predicted — it's blocked all of the prior month, then over by the
+// time its month starts. Defaults to 7; 0 restores the strict calendar cutoff.
+function getPredictMonthGraceDays(guildId) {
+  const v = getConfig(guildId, 'predict_month_grace_days');
+  if (v == null || v === '') return 7;
+  const n = parseInt(v, 10);
+  return Number.isInteger(n) && n >= 0 ? n : 7;
+}
 
 // Events an admin has exempted from the current-month gate (/prediction-whitelist).
 // Stored as JSON { eventId: eventName } — the name lets the whitelist view show
@@ -454,11 +464,12 @@ function setPredictWhitelist(guildId, whitelist) {
 }
 
 // True when the current-month gate should block this card for this member:
-// gate on, not an admin, event not whitelisted, and it resolves in a later month.
+// gate on, not an admin, event not whitelisted, and it resolves in a later month
+// beyond the grace window.
 function monthGateBlocks(interaction, eventId, eventDate) {
   if (!getPredictCurrentMonthOnly(interaction.guildId) || isAdmin(interaction.member)) return false;
   if (eventId && getPredictWhitelist(interaction.guildId)[eventId]) return false;
-  return resolvesAfterThisMonth(eventDate);
+  return resolvesAfterThisMonth(eventDate, getPredictMonthGraceDays(interaction.guildId));
 }
 
 // Member-based eligibility (role / message count / account age). Returns an error
@@ -491,15 +502,17 @@ function predictionMemberGateError(interaction) {
   return null;
 }
 
-// True if an event resolves in a LATER calendar month than now (UTC). Cards in
-// the current month (or already past — those are closed elsewhere) are allowed.
-function resolvesAfterThisMonth(eventDateIso) {
+// True if an event resolves in a LATER calendar month than now (UTC) and more
+// than `graceDays` from now. Cards in the current month (or already past — those
+// are closed elsewhere) are allowed, as are early-next-month cards in the window.
+function resolvesAfterThisMonth(eventDateIso, graceDays = 0) {
   if (!eventDateIso) return false; // unknown date — don't block (submit backstop covers open/closed)
   const d = new Date(eventDateIso);
   if (Number.isNaN(d.getTime())) return false;
   const now = new Date();
   const monthIdx = (y, m) => y * 12 + m;
-  return monthIdx(d.getUTCFullYear(), d.getUTCMonth()) > monthIdx(now.getUTCFullYear(), now.getUTCMonth());
+  if (monthIdx(d.getUTCFullYear(), d.getUTCMonth()) <= monthIdx(now.getUTCFullYear(), now.getUTCMonth())) return false;
+  return d.getTime() - now.getTime() > graceDays * 86_400_000;
 }
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -4524,7 +4537,7 @@ async function handlePredictUrlModalSubmit(interaction) {
   }
   // Current-month-only gate (admins + whitelisted events bypass): block cards resolving in a later month.
   if (monthGateBlocks(interaction, details.event?.id, details.eventDate)) {
-    return interaction.editReply({ content: `❌ You can only predict on cards resolving **this month**. This card resolves later${deadline ? ` (**${deadline}**)` : ''} — pick a current-month card.` });
+    return interaction.editReply({ content: `❌ You can only predict on cards resolving **this month** (or within the next few days). This card resolves later${deadline ? ` (**${deadline}**)` : ''} — pick a current-month card.` });
   }
 
   // All good — show the card with a "Predict" button (reuses the My Cards detail
@@ -5623,7 +5636,7 @@ async function handlePredictModalSubmit(interaction) {
   // backstop for every submit path. Only enforced when we have the event date.
   if (cardDetailsForCheck && monthGateBlocks(interaction, cardDetailsForCheck.event?.id, cardDetailsForCheck.eventDate)) {
     return interaction.editReply({
-      content: `❌ You can only predict on cards resolving **this month**. This card resolves later${deadlineFormatted && deadlineFormatted !== 'TBD' ? ` (**${deadlineFormatted}**)` : ''} — pick a current-month card.`,
+      content: `❌ You can only predict on cards resolving **this month** (or within the next few days). This card resolves later${deadlineFormatted && deadlineFormatted !== 'TBD' ? ` (**${deadlineFormatted}**)` : ''} — pick a current-month card.`,
     });
   }
 
@@ -8214,6 +8227,7 @@ function gatherAdminCfg(guildId) {
       minMessages: getPredictMinMessages(guildId),
       minAccountAge: getPredictMinAccountAgeDays(guildId),
       currentMonthOnly: getPredictCurrentMonthOnly(guildId),
+      monthGraceDays: getPredictMonthGraceDays(guildId),
     },
   };
 }
@@ -8486,6 +8500,7 @@ async function handleAdminConfigure(interaction) {
       max_open: getMaxOpen(interaction.guildId),
       predict_min_messages: getPredictMinMessages(interaction.guildId),
       predict_min_account_age: getPredictMinAccountAgeDays(interaction.guildId),
+      predict_month_grace_days: getPredictMonthGraceDays(interaction.guildId),
     };
     const current = currentByKey[setting.key] ?? 0;
     const modal = new ModalBuilder().setCustomId(`admin_limit:${setting.key}`).setTitle(setting.label.slice(0, 45));
@@ -8534,6 +8549,7 @@ const ADMIN_INT_LIMITS = {
   max_open: [1, 50],
   predict_min_messages: [0, 100000],
   predict_min_account_age: [0, 3650],
+  predict_month_grace_days: [0, 31],
 };
 async function handleAdminLimitModal(interaction) {
   const key = interaction.customId.split(':')[1];

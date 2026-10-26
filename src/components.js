@@ -743,6 +743,7 @@ const ADMIN_SETTINGS = [
   { key: 'predict_min_messages',      label: 'Predict: min messages',         kind: 'int',   emoji: '💬' },
   { key: 'predict_min_account_age',   label: 'Predict: min account age (days)', kind: 'int', emoji: '🕰' },
   { key: 'predict_current_month_only', label: 'Predict: current month only',  kind: 'bool',  emoji: '📅' },
+  { key: 'predict_month_grace_days',  label: 'Predict: next-month grace (days)', kind: 'int', emoji: '⏳' },
   { key: 'upshot_token',        label: 'Upshot token (packs/giveaways)', kind: 'token', emoji: '🔑' },
   { key: 'owner_id',            label: 'Lock /sendpack & /giveaway to me', kind: 'owner', emoji: '🔒' },
 ];
@@ -785,7 +786,7 @@ export function buildAdminPanel(cfg) {
     '**Prediction gates** (admins bypass)',
     `🎭 Required role(s): ${pg.roles?.length ? pg.roles.map(r => `<@&${r}>`).join(' ') : 'anyone'}`,
     `💬 Min messages: **${pg.minMessages || 'off'}** · 🕰 Min account age: **${pg.minAccountAge ? pg.minAccountAge + 'd' : 'off'}**`,
-    `📅 Current-month-only: **${pg.currentMonthOnly ? 'on' : 'off'}**`,
+    `📅 Current-month-only: **${pg.currentMonthOnly ? 'on' : 'off'}**${pg.currentMonthOnly ? ` · ⏳ next-month grace: **${pg.monthGraceDays ? pg.monthGraceDays + 'd' : 'off'}**` : ''}`,
   ].join('\n')));
   children.push(separator());
 
