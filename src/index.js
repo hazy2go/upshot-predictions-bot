@@ -505,13 +505,17 @@ function predictionMemberGateError(interaction) {
 // True if an event resolves in a LATER calendar month than now (UTC) and more
 // than `graceDays` from now. Cards in the current month (or already past — those
 // are closed elsewhere) are allowed, as are early-next-month cards in the window.
+// eventDate is the settlement deadline, set hours after the event itself: a
+// "November 30 close" carries 2026-12-01T12:00Z. So the month is judged one day
+// earlier, which puts anything dated the 1st (UTC) in the month before.
 function resolvesAfterThisMonth(eventDateIso, graceDays = 0) {
   if (!eventDateIso) return false; // unknown date — don't block (submit backstop covers open/closed)
   const d = new Date(eventDateIso);
   if (Number.isNaN(d.getTime())) return false;
   const now = new Date();
   const monthIdx = (y, m) => y * 12 + m;
-  if (monthIdx(d.getUTCFullYear(), d.getUTCMonth()) <= monthIdx(now.getUTCFullYear(), now.getUTCMonth())) return false;
+  const event = new Date(d.getTime() - 86_400_000);
+  if (monthIdx(event.getUTCFullYear(), event.getUTCMonth()) <= monthIdx(now.getUTCFullYear(), now.getUTCMonth())) return false;
   return d.getTime() - now.getTime() > graceDays * 86_400_000;
 }
 
