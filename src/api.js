@@ -330,7 +330,11 @@ async function fetchCardDetails(cardId, { retries, timeout }) {
   try {
     const res = await fetchRetry(`${BASE}/cards/${cardId}?include=event,supply`, { timeout, retries });
     if (res.status === 404) return { ok: false, notFound: true };
-    if (!res.ok) return { ok: false, notFound: false };
+    if (!res.ok) {
+      // 403 here is Upshot's Bunny Shield challenge page, not a missing card.
+      console.warn(`Upshot API: getCardDetails(${cardId}) HTTP ${res.status}${res.status === 403 ? ' (shield challenge)' : ''}`);
+      return { ok: false, notFound: false };
+    }
     const json = await res.json();
     const card = json.data;
     if (!card) return { ok: false, notFound: true };
@@ -366,6 +370,13 @@ async function fetchCardDetails(cardId, { retries, timeout }) {
     console.error(`Upshot API: getCardDetails(${cardId}) failed:`, err.message);
     return { ok: false, notFound: false };
   }
+}
+
+// Like getCardDetails, but keeps the failure reason: returns the raw
+// { ok, value } / { ok: false, notFound } result so a caller can tell "no such
+// card" from "couldn't reach Upshot" and word its error accordingly.
+export async function lookupCardDetails(cardId, { retries = 3, timeout = 15_000 } = {}) {
+  return fetchCardDetails(cardId, { retries, timeout });
 }
 
 export async function getCardDetails(cardId, { retries = 3, fresh = false, timeout = 15_000 } = {}) {
