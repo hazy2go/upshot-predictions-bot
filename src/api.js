@@ -326,7 +326,74 @@ const CARD_DETAILS_TTL = 30 * 60 * 1000;
 // This distinction matters for auto-resolve: a transient miss must be retried on
 // the next sweep, not logged as "card not found" (which scared us into thinking
 // the API had dropped live cards when it was really just a timeout/shield block).
-async function fetchCardDetails(cardId, { retries, timeout }) {
+function normalizeCard(card) {
+  return {
+    id: card.id,
+    name: card.name,
+    rarity: card.rarity,
+    image: card.image,
+    arweaveUrl: card.image
+      ? (card.image.startsWith('http') ? card.image : `https://arweave.net/${card.image}`)
+      : null,
+    maxSupply: card.maxSupply,
+    pointsValue: card.pointsValue,
+    event: card.event || null,
+    eventDate: card.event?.eventDate || null,
+    outcomeId: card.outcomeId || null,
+    // The name of the outcome this card is betting on ("Detroit Lions Win").
+    // The API ships it under `outcome` with the includes we already request;
+    // it used to be dropped here, which left the AI rater with no idea WHICH
+    // side of the event a submission was picking (see gatherRatingContext).
+    outcomeName: card.outcome?.name || null,
+    eventStatus: card.event?.status || null,
+    winningOutcomeId: card.event?.winningOutcomeId || null,
+    resolvedAt: card.event?.resolvedAt || null,
+    kind: card.kind || null,
+    isInstantWin: !!card.isInstantWin,
+    prizeType: card.prizeType || null,
+  };
+}
+
+// Some cards (seen with cash cards, Nov 2026) 404 on /cards/{id} even though the
+// web app shows them. The wallet's balance entry for that card embeds the same
+// card + event, so when we know who holds it we can read the card from there.
+async function fetchCardFromWallet(wallet, cardId, { retries, timeout }) {
+  try {
+    const res = await fetchRetry(`${BASE}/cards/balances/${wallet}?cardId=${cardId}`, { timeout, retries });
+    if (!res.ok) {
+      console.warn(`Upshot API: wallet fallback for ${cardId} HTTP ${res.status}`);
+      return null;
+    }
+    const json = await res.json();
+    const data = json.data ?? json;
+    const entry = Array.isArray(data)
+      ? data.find(e => (e?.cardId || e?.card?.id) === cardId)
+      : data?.[cardId];
+    const card = entry?.card;
+    if (!card) {
+      console.warn(`Upshot API: wallet fallback for ${cardId}: no balance entry in ${wallet}`);
+      return null;
+    }
+    const value = normalizeCard({ ...card, id: card.id || cardId });
+    console.log(`Upshot API: wallet fallback found ${cardId} ("${value.name}", kind ${value.kind}, event ${value.eventStatus || 'none'} ${value.eventDate || ''})`);
+    return value;
+  } catch (err) {
+    console.error(`Upshot API: wallet fallback for ${cardId} failed:`, err.message);
+    return null;
+  }
+}
+
+// `wallet` (optional): on a 404, try that wallet's balance entry for the card.
+async function fetchCardDetails(cardId, { retries, timeout, wallet = null }) {
+  const r = await fetchCardDetailsDirect(cardId, { retries, timeout });
+  if (r.ok || !r.notFound || !wallet) return r;
+  const value = await fetchCardFromWallet(wallet, cardId, { retries, timeout });
+  if (!value) return r;
+  cacheSet(cardDetailsCache, cardId, { at: Date.now(), value }, 2000);
+  return { ok: true, value };
+}
+
+async function fetchCardDetailsDirect(cardId, { retries, timeout }) {
   try {
     const res = await fetchRetry(`${BASE}/cards/${cardId}?include=event,supply`, { timeout, retries });
     if (res.status === 404) return { ok: false, notFound: true };
@@ -339,31 +406,7 @@ async function fetchCardDetails(cardId, { retries, timeout }) {
     const card = json.data;
     if (!card) return { ok: false, notFound: true };
 
-    const value = {
-      id: card.id,
-      name: card.name,
-      rarity: card.rarity,
-      image: card.image,
-      arweaveUrl: card.image
-        ? (card.image.startsWith('http') ? card.image : `https://arweave.net/${card.image}`)
-        : null,
-      maxSupply: card.maxSupply,
-      pointsValue: card.pointsValue,
-      event: card.event || null,
-      eventDate: card.event?.eventDate || null,
-      outcomeId: card.outcomeId || null,
-      // The name of the outcome this card is betting on ("Detroit Lions Win").
-      // The API ships it under `outcome` with the includes we already request;
-      // it used to be dropped here, which left the AI rater with no idea WHICH
-      // side of the event a submission was picking (see gatherRatingContext).
-      outcomeName: card.outcome?.name || null,
-      eventStatus: card.event?.status || null,
-      winningOutcomeId: card.event?.winningOutcomeId || null,
-      resolvedAt: card.event?.resolvedAt || null,
-      kind: card.kind || null,
-      isInstantWin: !!card.isInstantWin,
-      prizeType: card.prizeType || null,
-    };
+    const value = normalizeCard(card);
     cacheSet(cardDetailsCache, cardId, { at: Date.now(), value }, 2000);
     return { ok: true, value };
   } catch (err) {
@@ -375,16 +418,16 @@ async function fetchCardDetails(cardId, { retries, timeout }) {
 // Like getCardDetails, but keeps the failure reason: returns the raw
 // { ok, value } / { ok: false, notFound } result so a caller can tell "no such
 // card" from "couldn't reach Upshot" and word its error accordingly.
-export async function lookupCardDetails(cardId, { retries = 3, timeout = 15_000 } = {}) {
-  return fetchCardDetails(cardId, { retries, timeout });
+export async function lookupCardDetails(cardId, { retries = 3, timeout = 15_000, wallet = null } = {}) {
+  return fetchCardDetails(cardId, { retries, timeout, wallet });
 }
 
-export async function getCardDetails(cardId, { retries = 3, fresh = false, timeout = 15_000 } = {}) {
+export async function getCardDetails(cardId, { retries = 3, fresh = false, timeout = 15_000, wallet = null } = {}) {
   const cached = cardDetailsCache.get(cardId);
   if (!fresh && cached && Date.now() - cached.at < CARD_DETAILS_TTL) {
     return cached.value;
   }
-  const result = await fetchCardDetails(cardId, { retries, timeout });
+  const result = await fetchCardDetails(cardId, { retries, timeout, wallet });
   return result.ok ? result.value : null;
 }
 
@@ -909,7 +952,7 @@ export async function getPredictableCards(walletAddress) {
  *   - resolved=true, won=true: card outcome matches winning outcome (hit)
  *   - resolved=true, won=false: card lost (fail)
  */
-export async function checkCardResolution(cardId) {
+export async function checkCardResolution(cardId, wallet = null) {
   // Resolution detection must use live event status, not a cached snapshot, and
   // fail fast (1 retry, 10s): the auto-resolve sweep runs sequentially over
   // every open prediction, so the default 3 retries × 15s would let a single
@@ -920,7 +963,7 @@ export async function checkCardResolution(cardId) {
   // prediction unresolved for the next sweep, but only a real 404 is worth
   // flagging; conflating the two made transient timeouts look like Upshot had
   // dropped live cards.
-  const r = await fetchCardDetails(cardId, { retries: 1, timeout: 10_000 });
+  const r = await fetchCardDetails(cardId, { retries: 1, timeout: 10_000, wallet });
   if (!r.ok) {
     return { resolved: false, won: null, error: r.notFound ? 'card_not_found' : 'fetch_failed' };
   }

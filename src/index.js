@@ -4526,7 +4526,7 @@ async function handlePredictUrlModalSubmit(interaction) {
   }
 
   // Fetch + deadline check (live status, not a cached snapshot).
-  const lookup = await lookupCardDetails(cardId);
+  const lookup = await lookupCardDetails(cardId, { wallet: getUpshotProfile(interaction.user.id)?.wallet_address || null });
   const details = lookup.ok ? lookup.value : null;
   if (!details) {
     console.warn(`[predict-url] lookup failed for ${cardId} (from ${JSON.stringify(raw.slice(0, 200))}): ${lookup.notFound ? 'not found' : 'unreachable'}`);
@@ -5550,7 +5550,7 @@ async function handlePredictModalSubmit(interaction) {
   if (cardId) {
     let cardDetails = null;
     try {
-      cardDetails = await getCardDetails(cardId);
+      cardDetails = await getCardDetails(cardId, { wallet: getUpshotProfile(interaction.user.id)?.wallet_address || null });
       cardDetailsForCheck = cardDetails;
       if (cardDetails?.arweaveUrl) {
         cardImage = cardDetails.arweaveUrl;
@@ -6334,7 +6334,7 @@ async function handleCheckResolve(interaction, predictionId) {
   await interaction.deferReply({ flags: ['Ephemeral'] });
 
   const previousOutcome = prediction.outcome;
-  const result = await checkCardResolution(prediction.card_id);
+  const result = await checkCardResolution(prediction.card_id, getUpshotProfile(prediction.author_id)?.wallet_address || null);
 
   if (result.error === 'no_winning_outcome') {
     return interaction.editReply({ content: '⏳ Event is marked resolved on Upshot but the winning outcome isn\'t published yet — try again shortly.' });
@@ -6571,7 +6571,7 @@ const RESOLVE_RETRY_DELAY_MS = 60_000;
  */
 async function resolveOnePrediction(prediction, guildId) {
   try {
-    const result = await checkCardResolution(prediction.card_id);
+    const result = await checkCardResolution(prediction.card_id, getUpshotProfile(prediction.author_id)?.wallet_address || null);
 
     if (result.error === 'card_not_found') {
       console.warn(`Auto-resolve: #${prediction.id} card no longer exists on Upshot (${prediction.card_id})`);
