@@ -786,7 +786,7 @@ export function buildAdminPanel(cfg) {
     '**Prediction gates** (admins bypass)',
     `🎭 Required role(s): ${pg.roles?.length ? pg.roles.map(r => `<@&${r}>`).join(' ') : 'anyone'}`,
     `💬 Min messages: **${pg.minMessages || 'off'}** · 🕰 Min account age: **${pg.minAccountAge ? pg.minAccountAge + 'd' : 'off'}**`,
-    `📅 Current-month-only: **${pg.currentMonthOnly ? 'on' : 'off'}**${pg.currentMonthOnly ? ` · ⏳ next-month grace: **${pg.monthGraceDays ? pg.monthGraceDays + 'd' : 'off'}**` : ''}`,
+    `📅 Current-month-only: **${pg.currentMonthOnly ? 'on' : 'off'}**${pg.currentMonthOnly ? ` · ⏳ next-month grace: **${pg.monthGraceDays ? pg.monthGraceDays + 'd' : 'off'}** · 💵 cash cards exempt` : ''}`,
   ].join('\n')));
   children.push(separator());
 

@@ -631,6 +631,21 @@ export function isInstantWinCard(cardLike) {
 }
 
 /**
+ * True for regular cash-prize cards (Upshot's kind/prizeType CASH): cards that
+ * pay cash when their prediction hits. These are exempt from the current-month
+ * gate because most of them resolve months out. Instant Cash cards share the
+ * CASH prize type but carry no prediction, so they never count here.
+ * Accepts a normalized getCardDetails result or a raw balance-embed card.
+ */
+export function isCashCard(cardLike) {
+  if (!cardLike || isInstantWinCard(cardLike)) return false;
+  const event = cardLike.event || cardLike.outcome?.event || null;
+  return cardLike.kind === 'CASH'
+    || String(cardLike.prizeType || '').toUpperCase() === 'CASH'
+    || event?.kind === 'CASH';
+}
+
+/**
  * Drop any card whose event deadline has already passed. Cards that carry an
  * embedded `event` (everything from wallet balances) are filtered inline with
  * NO network call — critical for large wallets (hundreds/thousands of cards;
@@ -640,7 +655,7 @@ export function isInstantWinCard(cardLike) {
  * stragglers as a backstop) but flagged `unknownEvent: true` — we know nothing
  * about when they resolve, so the caller's current-month gate can't evaluate
  * them and must decide for itself whether to show them.
- * Returns { id, name, inContest, eventId, eventDate, unknownEvent } entries.
+ * Returns { id, name, inContest, cash, eventId, eventDate, unknownEvent } entries.
  */
 async function filterOutExpiredCards(cards) {
   const out = [];
@@ -649,7 +664,7 @@ async function filterOutExpiredCards(cards) {
   for (const c of cards) {
     if (c.event) {
       if (!eventDeadlinePassed({ resolvedAt: c.event.resolvedAt, eventDate: c.event.eventDate, status: c.event.status })) {
-        out.push({ id: c.id, name: c.name, inContest: c.inContest, eventId: c.event.id || null, eventDate: c.event.eventDate || null });
+        out.push({ id: c.id, name: c.name, inContest: c.inContest, cash: !!c.cash, eventId: c.event.id || null, eventDate: c.event.eventDate || null });
       }
     } else {
       needFetch.push(c);
@@ -667,6 +682,7 @@ async function filterOutExpiredCards(cards) {
         id: chunk[j].id,
         name: details?.name || chunk[j].name,
         inContest: chunk[j].inContest,
+        cash: !!chunk[j].cash || isCashCard(details),
         eventId: details?.event?.id || null,
         eventDate: details?.eventDate || null,
         // No details at all = the lookup failed (shield block / timeout), not a
@@ -823,7 +839,7 @@ export async function getPredictableCards(walletAddress) {
       // Instant Cash / Instant XP cards can't back a prediction — never list them.
       if (isInstantWinCard(entry.card)) continue;
       const event = entry.card?.event || entry.card?.outcome?.event || null;
-      byId.set(cardId, { id: cardId, name: entry.card?.name || cardId, inContest: false, event });
+      byId.set(cardId, { id: cardId, name: entry.card?.name || cardId, inContest: false, cash: isCashCard(entry.card), event });
     }
   } catch (err) {
     balancesComplete = false;
@@ -840,7 +856,7 @@ export async function getPredictableCards(walletAddress) {
           const known = embedded.get(card.id);
           const event = known?.event || known?.outcome?.event || null;
           // No embedded event → leave `event` off so the deadline filter looks it up.
-          byId.set(card.id, { id: card.id, name: card.name || card.id, inContest: true, ...(event && { event }) });
+          byId.set(card.id, { id: card.id, name: card.name || card.id, inContest: true, cash: isCashCard(known), ...(event && { event }) });
         }
       }
     }
@@ -859,6 +875,7 @@ export async function getPredictableCards(walletAddress) {
       id: c.id,
       name: c.name,
       inContest: c.inContest,
+      cash: !!c.cash,
       eventId: c.event?.id || null,
       eventDate: c.event?.eventDate || null,
       unknownEvent: !c.event?.eventDate,

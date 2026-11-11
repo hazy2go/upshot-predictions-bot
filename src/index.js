@@ -89,7 +89,7 @@ import {
 
 import {
   extractWallet, extractCardId,
-  getCardDetails, checkCardOwnership, checkCardResolution, isInstantWinCard, isCardStillOpen,
+  getCardDetails, checkCardOwnership, checkCardResolution, isInstantWinCard, isCashCard, isCardStillOpen,
   getSeasonRank, getUserContestLineups, getPredictableCards, getCardStats,
   getUserProfile, getUserPacks, transferPack, refreshUpshotAccessToken,
   getContests, getContestTop, getRaffles, getRaffleDetail, getRaffleTop,
@@ -464,10 +464,12 @@ function setPredictWhitelist(guildId, whitelist) {
 }
 
 // True when the current-month gate should block this card for this member:
-// gate on, not an admin, event not whitelisted, and it resolves in a later month
-// beyond the grace window.
-function monthGateBlocks(interaction, eventId, eventDate) {
+// gate on, not an admin, not a cash card, event not whitelisted, and it resolves
+// in a later month beyond the grace window. Cash-prize cards (never Instant Cash —
+// see isCashCard) are always allowed: most resolve months out.
+function monthGateBlocks(interaction, eventId, eventDate, isCash = false) {
   if (!getPredictCurrentMonthOnly(interaction.guildId) || isAdmin(interaction.member)) return false;
+  if (isCash) return false;
   if (eventId && getPredictWhitelist(interaction.guildId)[eventId]) return false;
   return resolvesAfterThisMonth(eventDate, getPredictMonthGraceDays(interaction.guildId));
 }
@@ -4306,7 +4308,7 @@ async function handleCardPicker(interaction) {
   const monthGated = getPredictCurrentMonthOnly(interaction.guildId) && !isAdmin(interaction.member);
   const available = cards.filter(c =>
     !hasUnresolvedPredictionForCard(c.id)
-    && !(monthGated && (c.unknownEvent || monthGateBlocks(interaction, c.eventId, c.eventDate))));
+    && !(monthGated && (c.unknownEvent || monthGateBlocks(interaction, c.eventId, c.eventDate, c.cash))));
 
   if (available.length === 0) {
     cardPickerCache.delete(interaction.user.id);
@@ -4540,7 +4542,7 @@ async function handlePredictUrlModalSubmit(interaction) {
     return interaction.editReply({ content: `❌ This card's prediction window has closed — its event is past the open phase${deadline ? ` (deadline **${deadline}**)` : ''}. You can't predict on it — pick another card.` });
   }
   // Current-month-only gate (admins + whitelisted events bypass): block cards resolving in a later month.
-  if (monthGateBlocks(interaction, details.event?.id, details.eventDate)) {
+  if (monthGateBlocks(interaction, details.event?.id, details.eventDate, isCashCard(details))) {
     return interaction.editReply({ content: `❌ You can only predict on cards resolving **this month** (or within the next few days). This card resolves later${deadline ? ` (**${deadline}**)` : ''} — pick a current-month card.` });
   }
 
@@ -5638,7 +5640,7 @@ async function handlePredictModalSubmit(interaction) {
 
   // Current-month-only gate (admins + whitelisted events bypass) — authoritative
   // backstop for every submit path. Only enforced when we have the event date.
-  if (cardDetailsForCheck && monthGateBlocks(interaction, cardDetailsForCheck.event?.id, cardDetailsForCheck.eventDate)) {
+  if (cardDetailsForCheck && monthGateBlocks(interaction, cardDetailsForCheck.event?.id, cardDetailsForCheck.eventDate, isCashCard(cardDetailsForCheck))) {
     return interaction.editReply({
       content: `❌ You can only predict on cards resolving **this month** (or within the next few days). This card resolves later${deadlineFormatted && deadlineFormatted !== 'TBD' ? ` (**${deadlineFormatted}**)` : ''} — pick a current-month card.`,
     });
