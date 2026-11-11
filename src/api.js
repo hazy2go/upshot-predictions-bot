@@ -383,10 +383,115 @@ async function fetchCardFromWallet(wallet, cardId, { retries, timeout }) {
   }
 }
 
+// ── Call cards (Upshot "Calls", Nov 2026) ─────────────────────────────────────
+// A call card is one outcome of a market-style "board". /cards/{id} 404s for
+// them; the web app reads GET /calls/call-cards/{id} → { outcomeId, board }.
+// The board carries status (OPEN / RESOLVED), locksAt (trading/prediction
+// deadline), resolvesAt, resolvedAt, resultOutcomeId and outcomes[] each with
+// its callCard. Holdings never appear in /cards/balances: ownership is the net
+// of the public trade feed (/calls/boards/{id}/trades, BUY legs positive, SELL
+// legs negative deltaMicro), keyed by Upshot username.
+function normalizeCallCard(cardId, data) {
+  const board = data?.board;
+  if (!board) return null;
+  const outcome = (board.outcomes || []).find(o => o.id === data.outcomeId)
+    || (board.outcomes || []).find(o => o.callCard?.id === cardId);
+  const cc = outcome?.callCard || {};
+  let status;
+  if (board.status === 'RESOLVED' || board.resolvedAt) status = 'RESOLVED';
+  else if (board.status === 'OPEN' && (!board.locksAt || Date.parse(board.locksAt) > Date.now())) status = 'ACTIVE';
+  else status = board.status === 'OPEN' ? 'LOCKED' : (board.status || 'LOCKED');
+  const event = {
+    id: board.id,
+    name: board.name,
+    status,
+    eventDate: board.locksAt || board.resolvesAt || null,
+    resolvedAt: board.resolvedAt || null,
+    winningOutcomeId: board.resultOutcomeId || null,
+    kind: 'CALL',
+  };
+  return {
+    id: cc.id || cardId,
+    name: cc.name || outcome?.name || board.name,
+    rarity: cc.rarity || null,
+    image: cc.image || null,
+    arweaveUrl: cc.image || board.image || null,
+    maxSupply: null,
+    pointsValue: null,
+    event,
+    eventDate: event.eventDate,
+    outcomeId: data.outcomeId || outcome?.id || null,
+    outcomeName: outcome?.name || null,
+    eventStatus: status,
+    winningOutcomeId: event.winningOutcomeId,
+    resolvedAt: event.resolvedAt,
+    kind: 'CALL',
+    isInstantWin: false,
+    prizeType: 'CASH',
+    isCall: true,
+    boardId: board.id,
+  };
+}
+
+async function fetchCallCard(cardId, { retries, timeout }) {
+  try {
+    const res = await fetchRetry(`${BASE}/calls/call-cards/${cardId}`, { timeout, retries });
+    if (res.status === 404) return { ok: false, notFound: true };
+    if (!res.ok) {
+      console.warn(`Upshot API: call card ${cardId} HTTP ${res.status}`);
+      return { ok: false, notFound: false };
+    }
+    const json = await res.json();
+    const value = normalizeCallCard(cardId, json.data ?? json);
+    return value ? { ok: true, value } : { ok: false, notFound: true };
+  } catch (err) {
+    console.error(`Upshot API: call card ${cardId} failed:`, err.message);
+    return { ok: false, notFound: false };
+  }
+}
+
+// Net amount of a call card's outcome a wallet holds, from the board's public
+// trade feed. Returns { owned, netMicro } or null when it couldn't be checked.
+const CALL_TRADES_MAX_PAGES = 20;
+async function checkCallCardOwnership(walletAddress, card) {
+  try {
+    const uRes = await fetchRetry(`${BASE}/users/${walletAddress}`, { timeout: 10_000 });
+    if (!uRes.ok) return null;
+    const uJson = await uRes.json();
+    const username = (uJson.data ?? uJson)?.username;
+    if (!username) return { owned: false, netMicro: 0 };
+    const want = username.toLowerCase();
+    let net = 0n;
+    for (let p = 1; p <= CALL_TRADES_MAX_PAGES; p++) {
+      const res = await fetchRetry(`${BASE}/calls/boards/${card.boardId}/trades?page=${p}&perPage=100`, { timeout: 12_000 });
+      if (!res.ok) return null;
+      const json = await res.json();
+      for (const t of json.data || []) {
+        if ((t.username || '').toLowerCase() !== want) continue;
+        for (const leg of t.legs || []) {
+          if (leg.outcomeId === card.outcomeId) net += BigInt(leg.deltaMicro || '0');
+        }
+      }
+      if (!json.meta?.next) break;
+    }
+    return { owned: net > 0n, netMicro: Number(net) };
+  } catch (err) {
+    console.error(`Upshot API: call card ownership(${walletAddress}, ${card.id}) failed:`, err.message);
+    return null;
+  }
+}
+
 // `wallet` (optional): on a 404, try that wallet's balance entry for the card.
+// A 404 is first retried as a call card (see above).
 async function fetchCardDetails(cardId, { retries, timeout, wallet = null }) {
   const r = await fetchCardDetailsDirect(cardId, { retries, timeout });
-  if (r.ok || !r.notFound || !wallet) return r;
+  if (r.ok || !r.notFound) return r;
+  const call = await fetchCallCard(cardId, { retries, timeout });
+  if (call.ok) {
+    cacheSet(cardDetailsCache, cardId, { at: Date.now(), value: call.value }, 2000);
+    return call;
+  }
+  if (!wallet) return call.notFound ? r : call;
   const value = await fetchCardFromWallet(wallet, cardId, { retries, timeout });
   if (!value) return r;
   cacheSet(cardDetailsCache, cardId, { at: Date.now(), value }, 2000);
@@ -458,6 +563,15 @@ export async function checkCardOwnership(walletAddress, cardId) {
           inContest: false,
         };
       }
+    }
+
+    // Call cards never show in balances — their holdings live in the board's
+    // trade feed. Only checked when the card really is a call card.
+    const details = await getCardDetails(cardId);
+    if (details?.isCall) {
+      const pos = await checkCallCardOwnership(walletAddress, details);
+      if (!pos) return { owned: false, quantity: 0, winning: false, card: null, error: 'call_check_failed' };
+      return { owned: pos.owned, quantity: pos.owned ? 1 : 0, winning: false, card: null, inContest: false };
     }
 
     // Card not in wallet — check if it's entered in an active contest
