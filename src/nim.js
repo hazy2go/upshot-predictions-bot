@@ -12,17 +12,23 @@ const BASE = 'https://integrate.api.nvidia.com/v1';
 
 // Thinking models take chat_template_kwargs and stream their thoughts as
 // reasoning_content; the others are plain chat models and get the bare request.
-// An unknown id from NIM_MODELS is assumed to be plain. Ultra 400s on
-// `reasoning_budget`, so it thinks unbudgeted and is capped by max_tokens
-// alone — it spends ~500 thinking tokens on a rating, so 4096 is ample.
+// An unknown id from NIM_MODELS is assumed to be plain.
+//
+// 2026-11-11: Ultra's backend broke — it returns garbled tokens (or content:
+// null) most of the time, so it was demoted to last resort; Gemma 4 and Super 3
+// now 404 ("Function … Not found") and were dropped. Super 3.5 is the primary.
+// GLM 5.3 Flash reasons natively without any kwarg (`kwargs: false`) and spends
+// its thinking from max_tokens, so it needs the same 4096 headroom or the
+// answer comes back empty.
 const THINKING_MODELS = new Map([
+  ['nvidia/nemotron-3.5-super-vl-120b-a12b', { budget: false, maxTokens: 4096 }],
+  ['z-ai/glm-5.3-flash', { kwargs: false, maxTokens: 4096 }],
   ['nvidia/nemotron-3-ultra-550b-a55b', { budget: false, maxTokens: 4096 }],
-  ['nvidia/nemotron-3-super-120b-a12b', { budget: true }],
 ]);
 const DEFAULT_MODELS = [
+  'nvidia/nemotron-3.5-super-vl-120b-a12b',
+  'z-ai/glm-5.3-flash',
   'nvidia/nemotron-3-ultra-550b-a55b',
-  'google/gemma-4-31b-it',
-  'nvidia/nemotron-3-super-120b-a12b',
 ];
 export const MODELS = (process.env.NIM_MODELS || '').split(',').map(m => m.trim()).filter(Boolean);
 if (!MODELS.length) MODELS.push(...DEFAULT_MODELS);
@@ -100,7 +106,13 @@ function parseRating(text) {
     const reason = String(obj.reason || '').trim().slice(0, 300);
     return { stars, reason };
   } catch {
-    return null;
+    // Super 3.5 sometimes quotes the submission inside `reason` without
+    // escaping it ({"stars": 1, "reason": "... ("the t..."}), which breaks
+    // JSON.parse though the verdict is plain. Pull the fields out directly.
+    const stars = match[0].match(/"stars"\s*:\s*"?([0-3])\b/);
+    if (!stars) return null;
+    const reason = match[0].match(/"reason"\s*:\s*"([\s\S]*)"\s*\}\s*$/);
+    return { stars: Number(stars[1]), reason: (reason ? reason[1] : '').trim().slice(0, 300) };
   }
 }
 
@@ -240,7 +252,7 @@ async function rateWithModel(apiKey, model, ctx, opts) {
   if (thinking) {
     // The OpenAI Python SDK's `extra_body` is flattened into the request body;
     // posting raw JSON, these go at the top level instead.
-    body.chat_template_kwargs = { enable_thinking: true };
+    if (thinking.kwargs !== false) body.chat_template_kwargs = { enable_thinking: true };
     if (thinking.budget) body.reasoning_budget = reasoningBudget;
   }
 
