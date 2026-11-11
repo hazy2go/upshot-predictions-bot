@@ -89,7 +89,7 @@ import {
 
 import {
   extractWallet, extractCardId,
-  getCardDetails, checkCardOwnership, checkCardResolution, isInstantWinCard, isCashCard, isCardStillOpen,
+  getCardDetails, lookupCardDetails, checkCardOwnership, checkCardResolution, isInstantWinCard, isCashCard, isCardStillOpen,
   getSeasonRank, getUserContestLineups, getPredictableCards, getCardStats,
   getUserProfile, getUserPacks, transferPack, refreshUpshotAccessToken,
   getContests, getContestTop, getRaffles, getRaffleDetail, getRaffleTop,
@@ -4526,8 +4526,13 @@ async function handlePredictUrlModalSubmit(interaction) {
   }
 
   // Fetch + deadline check (live status, not a cached snapshot).
-  const details = await getCardDetails(cardId, { fresh: true });
+  const lookup = await lookupCardDetails(cardId);
+  const details = lookup.ok ? lookup.value : null;
   if (!details) {
+    console.warn(`[predict-url] lookup failed for ${cardId} (from ${JSON.stringify(raw.slice(0, 200))}): ${lookup.notFound ? 'not found' : 'unreachable'}`);
+    if (!lookup.notFound) {
+      return interaction.editReply({ content: '⚠️ Couldn\'t reach Upshot to look up that card right now. Please try again in a few minutes.' });
+    }
     return interaction.editReply({ content: '❌ Couldn\'t find that card on Upshot. Double-check the URL or ID and try again.' });
   }
 
