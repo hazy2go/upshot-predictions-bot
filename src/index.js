@@ -5801,20 +5801,39 @@ async function finalizeSubmission(draft, aiRating) {
     return null;
   }
 
+  const verified = draft.ownershipCheck === 'verified' || draft.ownershipCheck === 'verified_contest';
+
+  // When verification + rating are already known, write them BEFORE posting so
+  // the feed/admin cards go out in their final state. Posting "Pending
+  // Verification" and editing it ~1s later raced Discord's async processing of
+  // the external card image: the media resolve could land after our edits and
+  // write back the original snapshot, leaving the card stuck on "Pending
+  // Verification" while the DB said rated (#2764).
+  if (verified && aiRating) {
+    updatePrediction(prediction.id, {
+      ownership_verified: 1,
+      verified_by: 'auto-api',
+      verified_at: new Date().toISOString(),
+      star_rating: aiRating.stars,
+      status: Status.Rated,
+      rated_by: 'auto-ai',
+    });
+    recalculatePoints(prediction.id);
+    prediction = getPrediction(prediction.id);
+  }
+
   await postPredictionToFeed(prediction, draft.guildId).catch(e => console.error('Feed post failed:', e.message));
   await postToAdminReview(prediction, draft.guildId).catch(e => console.error('Admin post failed:', e.message));
   await refreshLeaderboard(draft.guildId).catch(() => {});
 
-  const verified = draft.ownershipCheck === 'verified' || draft.ownershipCheck === 'verified_contest';
-  if (verified) {
-    if (aiRating) {
-      // We already rated it — verify and apply directly (no second model call).
-      await applyVerification(prediction.id, 'auto-api', draft.guildId).catch(e => console.error('verify failed:', e.message));
-      await applyStarRating(prediction.id, aiRating.stars, 'auto-ai', draft.guildId).catch(e => console.error('rate apply failed:', e.message));
-    } else {
-      // No pre-computed rating (no API key or it errored) — verify + rate in bg.
-      autoVerifyAndRate(prediction.id, draft.guildId).catch(() => {});
-    }
+  if (verified && !aiRating) {
+    // No pre-computed rating (no API key or it errored) — verify + rate in bg,
+    // then re-sync once more after Discord has settled the image, in case an
+    // early edit got clobbered by the same race.
+    const id = prediction.id;
+    autoVerifyAndRate(id, draft.guildId)
+      .catch(() => {})
+      .finally(() => setTimeout(() => syncPredictionEmbeds(id, draft.guildId).catch(() => {}), 15_000));
   }
 
   // Second nudge for a 0★ submission: the ephemeral "this is low-effort"
